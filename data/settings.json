@@ -1,0 +1,8 @@
+{
+  "sandboxDir": "/root/cowork",
+  "tigerBotApiKey": "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",
+  "tigerBotModel": "qwen/qwen3.5-122b-a10b",
+  "mcpTools": [],
+  "webSearchEnabled": false,
+  "tigerBotApiUrl": "https://openrouter.ai/api/v1"
+}
