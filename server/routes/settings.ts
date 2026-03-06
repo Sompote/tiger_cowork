@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getSettings, saveSettings } from "../services/data";
+import { connectServer, disconnectServer, getMcpStatus, initMcpServers } from "../services/mcp";
 
 export const settingsRouter = Router();
 
@@ -53,4 +54,33 @@ settingsRouter.post("/test-connection", async (req, res) => {
   } catch (err: any) {
     res.json({ success: false, message: err.message });
   }
+});
+
+// --- MCP Server Management ---
+
+// Get status of all MCP connections
+settingsRouter.get("/mcp/status", (_req, res) => {
+  res.json(getMcpStatus());
+});
+
+// Connect to a single MCP server
+settingsRouter.post("/mcp/connect", async (req, res) => {
+  const { name, url } = req.body;
+  if (!name || !url) return res.status(400).json({ error: "name and url required" });
+  const result = await connectServer({ name, url, enabled: true });
+  res.json(result);
+});
+
+// Disconnect a single MCP server
+settingsRouter.post("/mcp/disconnect", async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "name required" });
+  await disconnectServer(name);
+  res.json({ ok: true });
+});
+
+// Reconnect all MCP servers from settings
+settingsRouter.post("/mcp/reconnect-all", async (_req, res) => {
+  await initMcpServers();
+  res.json({ ok: true, status: getMcpStatus() });
 });

@@ -77,7 +77,7 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
-  source: "claude" | "openclaw" | "custom";
+  source: "claude" | "openclaw" | "custom" | "clawhub";
   script: string;
   enabled: boolean;
   installedAt: string;

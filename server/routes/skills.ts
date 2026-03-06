@@ -1,11 +1,33 @@
 import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { getSkills, saveSkills } from "../services/data";
+import { listInstalledSkills } from "../services/clawhub";
 
 export const skillsRouter = Router();
 
 skillsRouter.get("/", (_req, res) => {
-  res.json(getSkills());
+  const skills = getSkills();
+  // Merge in any ClawHub-installed skills not yet registered in skills.json
+  try {
+    const clawhubSkills = listInstalledSkills();
+    let changed = false;
+    for (const cs of clawhubSkills) {
+      if (cs.installed && !skills.some((s) => s.name === cs.name && s.source === "clawhub")) {
+        skills.push({
+          id: uuid(),
+          name: cs.name,
+          description: cs.description || `ClawHub skill: ${cs.name}`,
+          source: "clawhub" as const,
+          script: cs.name,
+          enabled: true,
+          installedAt: new Date().toISOString(),
+        });
+        changed = true;
+      }
+    }
+    if (changed) saveSkills(skills);
+  } catch {}
+  res.json(skills);
 });
 
 // Install skill

@@ -4,12 +4,13 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { runPython } from "./python";
 import { getSettings } from "./data";
+import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
 
 const execAsync = promisify(exec);
 
 // --- Tool definitions (OpenAI function-calling format) ---
 
-export const tools = [
+const builtinTools = [
   {
     type: "function" as const,
     function: {
@@ -43,7 +44,7 @@ export const tools = [
     type: "function" as const,
     function: {
       name: "run_python",
-      description: "Execute Python code in the sandbox. Returns stdout, stderr, and any generated files.",
+      description: "Execute Python code in the sandbox. Working directory is output_file/. Use PROJECT_DIR variable to access project files (e.g. os.path.join(PROJECT_DIR, 'uploads/file.xlsx')). Returns stdout, stderr, and any generated files.",
       parameters: {
         type: "object",
         properties: {
@@ -186,6 +187,14 @@ export const tools = [
   },
 ];
 
+// Dynamic tools getter: built-in + MCP tools
+export function getTools() {
+  return [...builtinTools, ...getMcpTools()];
+}
+
+// Keep backward-compat export (static reference for imports that use `tools`)
+export const tools = builtinTools;
+
 // --- Tool implementations ---
 
 async function webSearch(args: { query: string }): Promise<any> {
@@ -303,8 +312,10 @@ async function runPythonTool(args: { code: string }): Promise<any> {
 async function runReactTool(args: { code: string; title?: string; dependencies?: string[] }): Promise<any> {
   const settings = getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
+  const outputDir = path.join(sandboxDir, "output_file");
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
   const filename = `react_${Date.now()}.html`;
-  const filePath = path.join(sandboxDir, filename);
+  const filePath = path.join(outputDir, filename);
 
   // Map common library names to CDN URLs
   const cdnMap: Record<string, string> = {
@@ -397,23 +408,27 @@ async function runReactTool(args: { code: string; title?: string; dependencies?:
 </html>`;
 
   try {
-    if (!fs.existsSync(sandboxDir)) fs.mkdirSync(sandboxDir, { recursive: true });
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(filePath, html, "utf8");
+    const relPath = `output_file/${filename}`;
     return {
       ok: true,
-      outputFiles: [filename],
-      message: `React app saved to ${filename}. It will be rendered in the output panel.`,
+      outputFiles: [relPath],
+      message: `React app saved to ${relPath}. It will be rendered in the output panel.`,
     };
   } catch (err: any) {
     return { ok: false, error: err.message, outputFiles: [] };
   }
 }
 
-async function runShell(args: { command: string; cwd?: string }): Promise<any> {
+async function runShell(args: { command?: string; cmd?: string; cwd?: string }): Promise<any> {
+  // Accept both "command" and "cmd" since models sometimes use either
+  const command = args.command || args.cmd;
+  if (!command) return { ok: false, error: "No command provided" };
   const settings = getSettings();
   const cwd = args.cwd || settings.sandboxDir || process.cwd();
   try {
-    const { stdout, stderr } = await execAsync(args.command, {
+    const { stdout, stderr } = await execAsync(command, {
       cwd,
       timeout: 30000,
       maxBuffer: 1024 * 1024,
@@ -424,15 +439,20 @@ async function runShell(args: { command: string; cwd?: string }): Promise<any> {
   }
 }
 
-function readFileTool(args: { path: string }): any {
-  const target = path.resolve(args.path);
+function readFileTool(args: { path?: string; file?: string; filepath?: string }): any {
+  const filePath = args.path || args.file || args.filepath;
+  if (!filePath) return { ok: false, error: "No path provided" };
+  const target = path.resolve(filePath);
   if (!fs.existsSync(target)) return { ok: false, error: "File not found: " + target };
   const content = fs.readFileSync(target, "utf8");
   return { ok: true, path: target, content: content.slice(0, 30000), truncated: content.length > 30000 };
 }
 
 function writeFileTool(args: { path: string; content: string; append?: boolean }): any {
-  const target = path.resolve(args.path);
+  const settings = getSettings();
+  const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
+  const outputDir = path.join(sandboxDir, "output_file");
+  const target = path.resolve(outputDir, args.path);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   if (args.append) {
     fs.appendFileSync(target, args.content, "utf8");
@@ -606,6 +626,9 @@ export async function callTool(name: string, args: any): Promise<any> {
     case "load_skill": return loadSkillTool(args);
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
-    default: return { ok: false, error: `Unknown tool: ${name}` };
+    default:
+      // Route MCP tools to MCP client
+      if (isMcpTool(name)) return callMcpTool(name, args);
+      return { ok: false, error: `Unknown tool: ${name}` };
   }
 }

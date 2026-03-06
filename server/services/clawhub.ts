@@ -75,3 +75,84 @@ export function readSkill(name: string): string | null {
   if (!fs.existsSync(skillFile)) return null;
   return fs.readFileSync(skillFile, "utf-8");
 }
+
+export async function clawhubInfo(slug: string) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
+    return { ok: false, error: "Invalid slug format" };
+  }
+
+  // 1. If installed locally, read SKILL.md for full details
+  const skillFile = path.join(SKILLS_DIR, slug, "SKILL.md");
+  if (fs.existsSync(skillFile)) {
+    const content = fs.readFileSync(skillFile, "utf-8");
+    let meta: any = {};
+    const metaFile = path.join(SKILLS_DIR, slug, "_meta.json");
+    if (fs.existsSync(metaFile)) {
+      try { meta = JSON.parse(fs.readFileSync(metaFile, "utf-8")); } catch {}
+    }
+    return {
+      ok: true,
+      slug,
+      installed: true,
+      output: content,
+      meta,
+    };
+  }
+
+  // 2. Not installed — quick-install to a temp dir, read SKILL.md, then clean up
+  const tmpDir = path.join(TIGER_BOT_DIR, "_preview_tmp");
+  const tmpSkillsDir = path.join(tmpDir, "skills");
+  try {
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const bin = await findClawhubBin();
+    await execFileAsync(
+      bin,
+      ["install", slug, "--no-input", "--workdir", tmpDir, "--dir", "skills"],
+      { timeout: 30000, maxBuffer: 1024 * 1024 }
+    );
+
+    const tmpSkillFile = path.join(tmpSkillsDir, slug, "SKILL.md");
+    const tmpMetaFile = path.join(tmpSkillsDir, slug, "_meta.json");
+    let output = "";
+    let meta: any = {};
+
+    if (fs.existsSync(tmpSkillFile)) {
+      output = fs.readFileSync(tmpSkillFile, "utf-8");
+    }
+    if (fs.existsSync(tmpMetaFile)) {
+      try { meta = JSON.parse(fs.readFileSync(tmpMetaFile, "utf-8")); } catch {}
+    }
+
+    // Clean up temp dir
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+
+    if (output) {
+      return { ok: true, slug, installed: false, output, meta };
+    }
+  } catch (err: any) {
+    // Clean up on failure
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+
+    // 3. Fallback: search for the exact slug
+    try {
+      const bin = await findClawhubBin();
+      const { stdout } = await execFileAsync(
+        bin,
+        ["search", slug, "--limit", "5", "--no-input", "--workdir", TIGER_BOT_DIR, "--dir", "skills"],
+        { timeout: 15000, maxBuffer: 1024 * 1024 }
+      );
+      const lines = stdout.trim().split("\n");
+      const match = lines.find((l) => l.startsWith(slug + " ") || l.trim() === slug);
+      if (match) {
+        return { ok: true, slug, installed: false, output: match };
+      }
+    } catch {}
+  }
+
+  return {
+    ok: true,
+    slug,
+    installed: false,
+    output: `Could not load details for "${slug}". Try installing the skill to see its full documentation.`,
+  };
+}

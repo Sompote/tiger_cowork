@@ -1,5 +1,5 @@
 import { getSettings } from "./data";
-import { tools, callTool } from "./toolbox";
+import { getTools, callTool } from "./toolbox";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -32,7 +32,7 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
     model: options.model || model,
     messages,
     temperature: 0.7,
-    max_tokens: 4096,
+    max_tokens: 8192,
   };
   if (options.tools && options.tools.length) {
     body.tools = options.tools;
@@ -75,12 +75,17 @@ export async function callTigerBotWithTools(
   allMessages.push(...messages);
 
   const maxToolRounds = 8;
+  const maxToolCalls = 12;
   const toolResults: Array<{ tool: string; result: any }> = [];
+  const toolCallHistory: string[] = [];
+  let totalToolCalls = 0;
+  let usesSkill = false; // Track if a skill was loaded (needs more tool calls)
+  let consecutiveErrors = 0;
 
   for (let round = 0; round < maxToolRounds; round++) {
     let data: any;
     try {
-      data = await llmCall(allMessages, { tools });
+      data = await llmCall(allMessages, { tools: getTools() });
     } catch (err: any) {
       return { content: `Connection error: ${err.message}`, toolResults };
     }
@@ -98,7 +103,7 @@ export async function callTigerBotWithTools(
       tool_calls: toolCalls.length ? toolCalls : undefined,
     });
 
-    // If no tool calls, we're done
+    // If no tool calls, we're done — return the text response
     if (!toolCalls.length) {
       return {
         content: message.content || "No response generated.",
@@ -107,12 +112,28 @@ export async function callTigerBotWithTools(
       };
     }
 
+    // Loop detection: same tools with same args called 3 rounds in a row → stop
+    // Use tool names + truncated args hash to distinguish explore vs chart vs fix
+    const currentSignature = toolCalls.map((tc: any) => {
+      const name = tc.function?.name || "";
+      const args = tc.function?.arguments || "";
+      const argSnippet = typeof args === "string" ? args.slice(0, 100) : JSON.stringify(args).slice(0, 100);
+      return `${name}:${argSnippet}`;
+    }).sort().join("|");
+    toolCallHistory.push(currentSignature);
+    if (toolCallHistory.length >= 3) {
+      const last3 = toolCallHistory.slice(-3);
+      if (last3[0] === last3[1] && last3[1] === last3[2]) {
+        console.log(`[ToolLoop] Loop detected: same tools+args 3 rounds. Breaking.`);
+        break;
+      }
+    }
+
     // Execute each tool call
     for (const tc of toolCalls) {
       const fnName = tc.function?.name || "";
       let fnArgs: any = {};
       const rawArgs = tc.function?.arguments || "{}";
-      // Some APIs return arguments as an object already, not a string
       if (typeof rawArgs === "object" && rawArgs !== null) {
         fnArgs = rawArgs;
       } else try {
@@ -120,22 +141,16 @@ export async function callTigerBotWithTools(
       } catch (parseErr: any) {
         console.error(`[Tool ${fnName}] JSON parse failed:`, parseErr.message);
         console.error(`[Tool ${fnName}] Raw args (first 500):`, rawArgs.slice(0, 500));
-        // For code tools, the AI often sends unescaped code in JSON
-        // Try to extract the code value manually
         if (fnName === "run_react" || fnName === "run_python") {
           const codeKey = rawArgs.indexOf('"code"');
           if (codeKey !== -1) {
-            // Find the start of the code value after "code": "
             const valueStart = rawArgs.indexOf('"', codeKey + 6) + 1;
             if (valueStart > 0) {
-              // Find the closing pattern: look for ", " or "} at end
               let valueEnd = rawArgs.lastIndexOf('"');
-              // Walk back past any trailing keys like "title", "dependencies"
               const trailingKeys = ['"title"', '"dependencies"'];
               for (const tk of trailingKeys) {
                 const tkPos = rawArgs.lastIndexOf(tk);
                 if (tkPos > valueStart) {
-                  // Find the comma before this key
                   const commaPos = rawArgs.lastIndexOf(',', tkPos);
                   if (commaPos > valueStart) {
                     const quoteBeforeComma = rawArgs.lastIndexOf('"', commaPos - 1);
@@ -148,7 +163,6 @@ export async function callTigerBotWithTools(
               if (valueEnd > valueStart) {
                 const codeValue = rawArgs.slice(valueStart, valueEnd);
                 fnArgs = { code: codeValue };
-                // Try to also extract title
                 const titleMatch = rawArgs.match(/"title"\s*:\s*"([^"]*)"/);
                 if (titleMatch) fnArgs.title = titleMatch[1];
                 const depsMatch = rawArgs.match(/"dependencies"\s*:\s*\[([^\]]*)\]/);
@@ -162,7 +176,10 @@ export async function callTigerBotWithTools(
         }
       }
 
-      console.log(`[Tool ${fnName}] Parsed args keys:`, Object.keys(fnArgs), fnArgs.code ? `code length: ${fnArgs.code.length}` : "NO CODE");
+      // Track skill usage — if a skill is loaded, allow more tool calls
+      if (fnName === "load_skill") usesSkill = true;
+
+      console.log(`[Tool ${fnName}] args:`, Object.keys(fnArgs), fnArgs.code ? `code(${fnArgs.code.length})` : fnArgs.command || fnArgs.cmd || fnArgs.query || fnArgs.skill || fnArgs.path || "");
 
       if (onToolCall) onToolCall(fnName, fnArgs);
 
@@ -173,26 +190,172 @@ export async function callTigerBotWithTools(
         result = { ok: false, error: err.message };
       }
 
+      // Track consecutive errors — if tool keeps failing, stop
+      if (result?.ok === false || result?.exitCode === 1) {
+        consecutiveErrors++;
+        console.log(`[Tool ${fnName}] Failed (${consecutiveErrors} consecutive errors):`, result?.error || result?.stderr || "");
+      } else {
+        consecutiveErrors = 0;
+      }
+
       if (onToolResult) onToolResult(fnName, result);
       toolResults.push({ tool: fnName, result });
+      totalToolCalls++;
 
-      // Add tool result to context
+      // Truncate large tool results to prevent context overflow
+      let resultStr = JSON.stringify(result);
+      const maxLen = fnName === "load_skill" ? 3000 : 6000;
+      if (resultStr.length > maxLen) {
+        resultStr = resultStr.slice(0, maxLen) + "\n...(truncated)";
+      }
       allMessages.push({
         role: "tool",
-        content: JSON.stringify(result),
+        content: resultStr,
         tool_call_id: tc.id,
       });
+
+      // Stop if too many consecutive errors (tool/command not available)
+      if (consecutiveErrors >= 3) {
+        console.log(`[ToolLoop] 3 consecutive errors. Breaking.`);
+        break;
+      }
+
+      // Hard stop at max tool calls
+      if (totalToolCalls >= maxToolCalls) break;
+    }
+
+    if (totalToolCalls >= maxToolCalls || consecutiveErrors >= 3) break;
+  }
+
+  console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls. Generating final response...`);
+
+  // Check if user likely wanted output files but none were generated
+  const hasOutputFiles = toolResults.some((tr) => tr.result?.outputFiles?.length > 0);
+  const userWantsOutput = allMessages.some((m) =>
+    m.role === "user" && /\b(chart|graph|plot|report|analy[sz]|visual|diagram|figure)\b/i.test(m.content)
+  );
+
+  // If user wanted graphs/analysis but none were generated, do extra rounds to generate them
+  if (userWantsOutput && !hasOutputFiles && totalToolCalls > 0) {
+    // Collect any error messages from failed tool calls to help LLM fix them
+    const errors = toolResults
+      .filter((tr) => tr.result?.exitCode === 1 || tr.result?.ok === false)
+      .map((tr) => tr.result?.stderr || tr.result?.error || "unknown error")
+      .join("\n");
+
+    const errorHint = errors
+      ? `\n\nYour previous code had errors:\n${errors.slice(0, 1000)}\n\nFix these errors in your new code.`
+      : "";
+
+    console.log("[ToolLoop] User wanted output files but none generated. Nudging LLM to create them...");
+    allMessages.push({
+      role: "system",
+      content: `IMPORTANT: The user asked for charts/graphs/analysis but you have NOT generated any output files yet. You MUST now call run_python to create matplotlib charts and save them as PNG files. Write simple, robust code — avoid complex table formatting. Use plt.savefig('filename.png', dpi=150, bbox_inches='tight') for each chart. Combine reading data + creating charts in one run_python call.${errorHint}`,
+    });
+
+    const maxNudgeRounds = 3;
+    for (let nudgeRound = 0; nudgeRound < maxNudgeRounds; nudgeRound++) {
+      try {
+        const nudgeData = await llmCall(allMessages, { tools: getTools() });
+        const nudgeChoice = nudgeData.choices?.[0];
+        if (!nudgeChoice?.message?.tool_calls?.length) {
+          // LLM responded with text instead of tools
+          if (nudgeChoice?.message?.content) {
+            return { content: nudgeChoice.message.content, usage: nudgeData.usage, toolResults };
+          }
+          break;
+        }
+
+        const nudgeMsg = nudgeChoice.message;
+        allMessages.push({
+          role: "assistant",
+          content: nudgeMsg.content || "",
+          tool_calls: nudgeMsg.tool_calls,
+        });
+
+        let nudgeHasOutput = false;
+        for (const tc of nudgeMsg.tool_calls) {
+          const fnName = tc.function?.name || "";
+          let fnArgs: any = {};
+          try { fnArgs = JSON.parse(tc.function?.arguments || "{}"); } catch { fnArgs = {}; }
+          if (onToolCall) onToolCall(fnName, fnArgs);
+          let result: any;
+          try { result = await callTool(fnName, fnArgs); } catch (err: any) { result = { ok: false, error: err.message }; }
+          if (onToolResult) onToolResult(fnName, result);
+          toolResults.push({ tool: fnName, result });
+          totalToolCalls++;
+          if (result?.outputFiles?.length > 0) nudgeHasOutput = true;
+          let resultStr = JSON.stringify(result);
+          if (resultStr.length > 6000) resultStr = resultStr.slice(0, 6000) + "\n...(truncated)";
+          allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
+        }
+
+        // If we got output files, we're done nudging
+        if (nudgeHasOutput) {
+          console.log("[NudgeLoop] Output files generated successfully.");
+          break;
+        }
+
+        // If code errored, add a fix hint for next round
+        const lastResult = toolResults[toolResults.length - 1]?.result;
+        if (lastResult?.exitCode === 1 && lastResult?.stderr) {
+          allMessages.push({
+            role: "system",
+            content: `Your code failed with error:\n${lastResult.stderr.slice(0, 800)}\n\nFix the error and try again. Keep the code simple — avoid complex formatting. Just create basic charts with plt.plot/plt.bar/plt.scatter and plt.savefig.`,
+          });
+        }
+      } catch (err: any) {
+        console.error("[NudgeLoop] Failed:", err.message);
+        break;
+      }
     }
   }
 
-  // If we exhaust tool rounds, do a final call without tools
+  // Force a final text response — build a summary of what tools found
+  const toolSummary = toolResults.map((tr) => {
+    let brief = "";
+    try {
+      const r = tr.result;
+      if (typeof r === "string") brief = r.slice(0, 500);
+      else if (r?.stdout) brief = r.stdout.slice(0, 500);
+      else if (r?.result) brief = String(r.result).slice(0, 500);
+      else if (r?.content) brief = String(r.content).slice(0, 500);
+      else if (r?.ok === false) brief = `Error: ${r.error || "failed"}`;
+      else brief = JSON.stringify(r).slice(0, 500);
+    } catch { brief = "(result unavailable)"; }
+    return `[${tr.tool}]: ${brief}`;
+  }).join("\n\n");
+
+  allMessages.push({
+    role: "system",
+    content: `You have gathered results from ${totalToolCalls} tool calls. Here is a summary:\n\n${toolSummary}\n\nNow provide a clear, helpful response to the user based on these results. Do NOT call any more tools.`,
+  });
+
   try {
     const data = await llmCall(allMessages);
     const content = data.choices?.[0]?.message?.content || "";
-    return { content: content || "Reached tool limit. Here are the results so far.", usage: data.usage, toolResults };
+    if (content) {
+      return { content, usage: data.usage, toolResults };
+    }
   } catch (err: any) {
-    return { content: `Error in final response: ${err.message}`, toolResults };
+    console.error("[FinalResponse] Failed to generate summary:", err.message);
   }
+
+  // Absolute fallback: show tool results directly (skip internal skill docs)
+  const fallbackContent = toolResults.filter((tr) => tr.tool !== "load_skill").map((tr) => {
+    let text = "";
+    try {
+      const r = tr.result;
+      if (r?.stdout) text = r.stdout;
+      else if (r?.result) text = String(r.result);
+      else if (r?.content) text = String(r.content);
+      else if (r?.data) text = typeof r.data === "string" ? r.data : JSON.stringify(r.data, null, 2);
+      else text = JSON.stringify(r, null, 2);
+    } catch { text = "(no result)"; }
+    return `**${tr.tool}:**\n${text.slice(0, 2000)}`;
+  }).join("\n\n---\n\n");
+
+  return { content: fallbackContent || "No results from tools.", toolResults };
 }
 
 // Simple call without tools (backwards compat)

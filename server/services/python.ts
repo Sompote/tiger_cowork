@@ -20,7 +20,10 @@ export function runPython(
     const pythonPath = settings.pythonPath || "python3";
     const scriptPath = path.join(sandboxDir, `_run_${Date.now()}.py`);
 
-    // Wrap code to capture output files
+    // Wrap code to capture output files — work in output_file/ subfolder
+    const outputDir = path.join(sandboxDir, "output_file");
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
     const wrappedCode = `
 import os, sys, urllib.parse, urllib.request, json
 
@@ -36,7 +39,9 @@ try:
 except ImportError:
     pass
 
-os.chdir(${JSON.stringify(sandboxDir)})
+# PROJECT_DIR points to the project root (for accessing uploads/, data/, etc.)
+PROJECT_DIR = ${JSON.stringify(sandboxDir)}
+os.chdir(${JSON.stringify(outputDir)})
 ${code}
 `;
 
@@ -58,10 +63,10 @@ ${code}
       // Clean up temp script
       try { fs.unlinkSync(scriptPath); } catch {}
 
-      // Detect newly created files (including in subdirectories)
+      // Detect newly created files in output_file/ subfolder
       const outputFiles: string[] = [];
       const outputExts = [".pdf", ".docx", ".doc", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".svg", ".html", ".gif", ".webp"];
-      const scanDirs = [sandboxDir, path.join(sandboxDir, "uploads"), path.join(sandboxDir, "output")];
+      const scanDirs = [path.join(sandboxDir, "output_file")];
       try {
         for (const dir of scanDirs) {
           if (!fs.existsSync(dir)) continue;

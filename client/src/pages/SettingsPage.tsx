@@ -2,14 +2,25 @@ import { useState, useEffect } from "react";
 import { api } from "../utils/api";
 import "./PageStyles.css";
 
+interface McpStatus {
+  name: string;
+  connected: boolean;
+  toolCount: number;
+  tools: string[];
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<any>({});
   const [saved, setSaved] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [newTool, setNewTool] = useState({ name: "", url: "" });
+  const [mcpStatuses, setMcpStatuses] = useState<McpStatus[]>([]);
+  const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
+  const [mcpMessage, setMcpMessage] = useState<{ name: string; text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     api.getSettings().then(setSettings);
+    api.mcpStatus().then(setMcpStatuses).catch(() => {});
   }, []);
 
   const save = async () => {
@@ -45,6 +56,42 @@ export default function SettingsPage() {
     const tools = [...(settings.mcpTools || [])];
     tools[idx].enabled = !tools[idx].enabled;
     setSettings({ ...settings, mcpTools: tools });
+  };
+
+  const connectMcp = async (tool: { name: string; url: string }) => {
+    setMcpConnecting(tool.name);
+    setMcpMessage(null);
+    try {
+      const result = await api.mcpConnect(tool.name, tool.url);
+      if (result.ok) {
+        setMcpMessage({ name: tool.name, text: `Connected! ${result.tools} tools discovered`, ok: true });
+      } else {
+        setMcpMessage({ name: tool.name, text: result.error || "Connection failed", ok: false });
+      }
+      api.mcpStatus().then(setMcpStatuses).catch(() => {});
+    } catch (err: any) {
+      setMcpMessage({ name: tool.name, text: err.message, ok: false });
+    }
+    setMcpConnecting(null);
+  };
+
+  const disconnectMcp = async (name: string) => {
+    await api.mcpDisconnect(name);
+    setMcpMessage({ name, text: "Disconnected", ok: true });
+    api.mcpStatus().then(setMcpStatuses).catch(() => {});
+  };
+
+  const reconnectAll = async () => {
+    setMcpConnecting("__all__");
+    // Save settings first so server has latest config
+    await api.saveSettings(settings);
+    const result = await api.mcpReconnectAll();
+    setMcpStatuses(result.status || []);
+    setMcpConnecting(null);
+  };
+
+  const getMcpStatusFor = (name: string): McpStatus | undefined => {
+    return mcpStatuses.find((s) => s.name === name);
   };
 
   return (
@@ -124,21 +171,95 @@ export default function SettingsPage() {
         </section>
 
         <section className="card">
-          <h3>MCP Tools</h3>
-          <p className="hint" style={{ marginBottom: 12 }}>Connect external tools via MCP protocol</p>
-          {(settings.mcpTools || []).map((tool: any, idx: number) => (
-            <div key={idx} className="tool-item">
-              <label className="toggle-label">
-                <input type="checkbox" checked={tool.enabled} onChange={() => toggleTool(idx)} />
-                <span><strong>{tool.name}</strong> — {tool.url}</span>
-              </label>
-              <button className="btn btn-danger btn-sm" onClick={() => removeTool(idx)}>Remove</button>
-            </div>
-          ))}
-          <div className="inline-form">
-            <input placeholder="Tool name" value={newTool.name} onChange={(e) => setNewTool({ ...newTool, name: e.target.value })} />
-            <input placeholder="Tool URL" value={newTool.url} onChange={(e) => setNewTool({ ...newTool, url: e.target.value })} style={{ flex: 2 }} />
+          <h3>MCP Servers</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Connect external tools via Model Context Protocol (MCP). Supports HTTP/SSE URLs or stdio commands.
+          </p>
+
+          {(settings.mcpTools || []).map((tool: any, idx: number) => {
+            const status = getMcpStatusFor(tool.name);
+            const isConnected = status?.connected;
+            return (
+              <div key={idx} className="tool-item" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                <label className="toggle-label" style={{ flex: 1 }}>
+                  <input type="checkbox" checked={tool.enabled} onChange={() => toggleTool(idx)} />
+                  <span>
+                    <strong>{tool.name}</strong>
+                    <span style={{ opacity: 0.6, fontSize: 12, marginLeft: 6 }}>{tool.url}</span>
+                  </span>
+                </label>
+                {isConnected && (
+                  <span style={{ fontSize: 11, color: "#137333", fontWeight: 600 }}>
+                    {status!.toolCount} tools
+                  </span>
+                )}
+                <span style={{
+                  width: 8, height: 8, borderRadius: "50%",
+                  background: isConnected ? "#34a853" : "#ea4335",
+                  display: "inline-block",
+                }} title={isConnected ? "Connected" : "Disconnected"} />
+                {!isConnected ? (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => connectMcp(tool)}
+                    disabled={mcpConnecting === tool.name}
+                  >
+                    {mcpConnecting === tool.name ? "..." : "Connect"}
+                  </button>
+                ) : (
+                  <button className="btn btn-ghost btn-sm" onClick={() => disconnectMcp(tool.name)}>
+                    Disconnect
+                  </button>
+                )}
+                <button className="btn btn-danger btn-sm" onClick={() => removeTool(idx)}>Remove</button>
+                {mcpMessage && mcpMessage.name === tool.name && (
+                  <span style={{ fontSize: 11, color: mcpMessage.ok ? "#137333" : "#c5221f" }}>
+                    {mcpMessage.text}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Show discovered tools for connected servers */}
+          {mcpStatuses.some((s) => s.connected && s.toolCount > 0) && (
+            <details style={{ marginTop: 8, fontSize: 13 }}>
+              <summary style={{ cursor: "pointer", opacity: 0.7 }}>Discovered MCP Tools</summary>
+              <div style={{ padding: "8px 0", maxHeight: 200, overflow: "auto" }}>
+                {mcpStatuses.filter((s) => s.connected).map((s) => (
+                  <div key={s.name} style={{ marginBottom: 8 }}>
+                    <strong>{s.name}</strong>
+                    <div style={{ paddingLeft: 12, opacity: 0.7 }}>
+                      {s.tools.map((t) => <div key={t}>{t}</div>)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+
+          <div className="inline-form" style={{ marginTop: 8 }}>
+            <input
+              placeholder="Server name (e.g. github)"
+              value={newTool.name}
+              onChange={(e) => setNewTool({ ...newTool, name: e.target.value.replace(/\s+/g, "-").toLowerCase() })}
+            />
+            <input
+              placeholder="URL or command (e.g. http://localhost:8080/mcp or npx @mcp/server)"
+              value={newTool.url}
+              onChange={(e) => setNewTool({ ...newTool, url: e.target.value })}
+              style={{ flex: 2 }}
+            />
             <button className="btn btn-secondary" onClick={addTool}>Add</button>
+          </div>
+          <div className="form-actions" style={{ marginTop: 8 }}>
+            <button
+              className="btn btn-primary"
+              onClick={reconnectAll}
+              disabled={mcpConnecting === "__all__"}
+            >
+              {mcpConnecting === "__all__" ? "Reconnecting..." : "Save & Connect All"}
+            </button>
           </div>
         </section>
       </div>

@@ -1,5 +1,7 @@
 import { Router } from "express";
-import { clawhubSearch, clawhubInstall, listInstalledSkills, readSkill } from "../services/clawhub";
+import { v4 as uuid } from "uuid";
+import { clawhubSearch, clawhubInstall, clawhubInfo, listInstalledSkills, readSkill } from "../services/clawhub";
+import { getSkills, saveSkills } from "../services/data";
 
 export const clawhubRouter = Router();
 
@@ -32,12 +34,40 @@ clawhubRouter.get("/search", async (req, res) => {
   }
 });
 
+// Get skill detail/info from clawhub
+clawhubRouter.get("/info/:slug", async (req, res) => {
+  const slug = req.params.slug;
+  try {
+    const result = await clawhubInfo(slug);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Install a skill from clawhub
 clawhubRouter.post("/install", async (req, res) => {
   const { slug, force } = req.body;
   if (!slug) return res.status(400).json({ error: "slug required" });
   try {
     const result = await clawhubInstall(slug, Boolean(force));
+    // Register in skills.json so it appears in the installed list
+    if (result.ok && result.installed) {
+      const skills = getSkills();
+      const existing = skills.find((s) => s.name === slug && s.source === "clawhub");
+      if (!existing) {
+        skills.push({
+          id: uuid(),
+          name: slug,
+          description: result.warning || `ClawHub skill: ${slug}`,
+          source: "clawhub",
+          script: slug,
+          enabled: true,
+          installedAt: new Date().toISOString(),
+        });
+        saveSkills(skills);
+      }
+    }
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message });

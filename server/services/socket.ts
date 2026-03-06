@@ -40,10 +40,13 @@ Available tools:
 
 Rules:
 - USE TOOLS actively. When asked to search, use web_search. When asked to fetch a page, use fetch_url.
+- IMPORTANT: Do NOT call the same tool repeatedly with the same arguments. If a tool returns a result, use that result — do not call it again.
+- IMPORTANT: If a tool (especially run_shell) returns an error like "command not found", do NOT retry it. Tell the user what needs to be installed and how.
+- When using skills (after load_skill), you may need several tool calls to complete the workflow — that's OK. But if a command fails, explain the error to the user instead of retrying.
 - For web search tasks: prefer using the installed duckduckgo-search skill via run_python (it gives better results than the basic web_search). Load the skill first with load_skill("duckduckgo-search") to see usage.
 - For coding tasks, use run_python, run_react, or run_shell to execute code directly.
 - For interactive UIs, dashboards, or React components, use run_react. It supports hooks, state, and CDN libraries like Recharts and Tailwind CSS.
-- For file operations, use read_file, write_file, list_files.
+- For file operations, use read_file, write_file, list_files. Call list_files ONCE, not repeatedly.
 - Be concise and actionable.
 - If web_search returns limited results, follow up with fetch_url on relevant URLs.
 - If you generate files (PDF, Word, etc.), mention them so the user can download.
@@ -52,8 +55,13 @@ Rules:
 - When a user asks about skills, call list_skills to show what's available.
 - CHARTS & PLOTS: When creating charts/graphs with matplotlib or plotly, ALWAYS save to a .png file (e.g. plt.savefig('chart.png', dpi=150, bbox_inches='tight')). The image will be rendered in the output panel on the right. Never call plt.show(). For interactive charts, use run_react with Recharts.
 - REPORTS: When generating HTML reports, save to a .html file. It will be rendered in the output panel. For PDF reports, save to .pdf and it will show an embedded preview.
+- OUTPUT FILES: The Python working directory is output_file/ inside the sandbox. All output files (plots, reports, etc.) are saved here automatically.
+- IMPORTANT WORKFLOW: When the user asks for analysis, charts, graphs, or reports — DO NOT just print data. You MUST generate actual output files (PNG charts, HTML reports, etc.) in the SAME run_python call or in a follow-up call. Combine data reading and chart generation in one run_python call when possible. For example: read the data, process it, AND create matplotlib charts all in a single code block. Do NOT spend multiple rounds just exploring data — go straight to producing visual outputs.
+- MULTI-CHART: When asked for analysis or report graphs, generate multiple relevant charts (e.g. depth profiles, property distributions, scatter plots, summary tables) in one or two run_python calls. Save each chart as a separate PNG file.
+- FILE PATHS: A variable PROJECT_DIR is available in run_python pointing to the project root. Use it to access uploaded files: e.g. os.path.join(PROJECT_DIR, 'uploads/filename.xlsx'). ALWAYS use PROJECT_DIR when reading files from uploads/ or other project directories. Never use bare relative paths like 'uploads/...' — they won't work because the working directory is output_file/.
 - REACT APPS: When asked to build UI components or interactive visualizations, use run_react. The component renders in the output panel. You can include dependencies like 'recharts', 'tailwindcss', 'chart.js', etc. IMPORTANT: Do NOT use import/export statements in run_react code — React, ReactDOM, hooks (useState, useEffect, etc.), and library globals (like Recharts components: BarChart, LineChart, etc.) are already available as globals. Just define your component function and it will be auto-rendered.
-- Use matplotlib.use('Agg') is already set automatically. Just import matplotlib.pyplot and save figures.${skillsList}`;
+- Use matplotlib.use('Agg') is already set automatically. Just import matplotlib.pyplot and save figures.
+- MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}`;
 }
 
 export function setupSocket(io: Server): void {
@@ -123,27 +131,14 @@ export function setupSocket(io: Server): void {
         const result = await callTigerBotWithTools(
           chatMessages,
           buildSystemPrompt(),
-          // onToolCall — show what tool is being called
+          // onToolCall — show status only (no chunks)
           (name, args) => {
             toolsUsed.push(name);
             socket.emit("chat:status", { status: "tool_call", tool: name, args });
-            // Stream a visible progress indicator
-            const argSummary = name === "web_search" ? `: "${args.query}"`
-              : name === "fetch_url" ? `: ${args.url}`
-              : name === "run_shell" ? `: \`${args.command}\``
-              : name === "clawhub_search" ? `: "${args.query}"`
-              : name === "clawhub_install" ? `: ${args.slug}`
-              : name === "read_file" ? `: ${args.path}`
-              : name === "load_skill" ? `: ${args.skill}`
-              : name === "run_python" ? ""
-              : name === "run_react" ? `: ${args.title || "component"}`
-              : "";
-            socket.emit("chat:chunk", { sessionId, content: `\n> **${name}**${argSummary}\n` });
           },
-          // onToolResult — show brief result
+          // onToolResult — collect output files, show status only
           (name, toolResult) => {
             socket.emit("chat:status", { status: "tool_result", tool: name });
-            // Collect output files
             if (toolResult?.outputFiles) {
               outputFiles.push(...toolResult.outputFiles);
             }
@@ -155,9 +150,7 @@ export function setupSocket(io: Server): void {
           socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
         }
 
-        // Build full content including tool call indicators
-        const toolLines = toolsUsed.map((t) => `> **${t}**`).join("\n");
-        const fullResponse = (toolLines ? toolLines + "\n\n" : "") + result.content +
+        const fullResponse = result.content +
           (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
 
         session.messages.push({

@@ -274,6 +274,11 @@
   color: #ea8600;
 }
 
+.source-badge.clawhub {
+  background: #e6f4ea;
+  color: #137333;
+}
+
 /* Tabs */
 .tab-bar {
   display: flex;

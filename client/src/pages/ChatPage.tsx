@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import { Icon } from "../components/Layout";
@@ -370,7 +371,7 @@ export default function ChatPage() {
                 <div className="message-avatar">{msg.role === "user" ? "U" : "C"}</div>
                 <div className="message-content">
                   {msg.role === "assistant" ? (
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                   ) : (
                     <>
                       {msg.attachments && msg.attachments.length > 0 && (
@@ -406,7 +407,7 @@ export default function ChatPage() {
               <div className="message assistant">
                 <div className="message-avatar">C</div>
                 <div className="message-content">
-                  <ReactMarkdown>{streaming}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
                 </div>
               </div>
             )}

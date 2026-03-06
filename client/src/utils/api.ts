@@ -42,6 +42,7 @@ export const api = {
   // Clawhub
   clawhubSearch: (query: string, limit = 10) => request(`/clawhub/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   clawhubInstall: (slug: string, force = false) => request("/clawhub/install", { method: "POST", body: JSON.stringify({ slug, force }) }),
+  clawhubInfo: (slug: string) => request(`/clawhub/info/${encodeURIComponent(slug)}`),
   clawhubSkills: () => request("/clawhub/skills"),
 
   // Chat file upload
@@ -59,4 +60,10 @@ export const api = {
 
   // Tools
   webSearch: (query: string) => request("/tools/web-search", { method: "POST", body: JSON.stringify({ query }) }),
+
+  // MCP
+  mcpStatus: () => request("/settings/mcp/status"),
+  mcpConnect: (name: string, url: string) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url }) }),
+  mcpDisconnect: (name: string) => request("/settings/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }),
+  mcpReconnectAll: () => request("/settings/mcp/reconnect-all", { method: "POST" }),
 };

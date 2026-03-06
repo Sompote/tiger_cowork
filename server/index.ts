@@ -14,6 +14,7 @@ import { pythonRouter } from "./routes/python";
 import { toolsRouter } from "./routes/tools";
 import { clawhubRouter } from "./routes/clawhub";
 import { setupSocket } from "./services/socket";
+import { initMcpServers } from "./services/mcp";
 
 const app = express();
 const server = createServer(app);
@@ -26,7 +27,7 @@ const SANDBOX_DIR = process.env.SANDBOX_DIR || path.resolve(".");
 const DATA_DIR = path.resolve("data");
 
 // Ensure directories exist
-[SANDBOX_DIR, DATA_DIR, path.resolve("skills")].forEach((dir) => {
+[SANDBOX_DIR, DATA_DIR, path.resolve("skills"), path.join(SANDBOX_DIR, "output_file")].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -88,6 +89,8 @@ async function start() {
   server.listen(PORT, () => {
     console.log(`Tiger Cowork running on http://localhost:${PORT}`);
     console.log(`Sandbox directory: ${SANDBOX_DIR}`);
+    // Initialize MCP servers in background (don't block startup)
+    initMcpServers().catch((err) => console.error("[MCP] Init error:", err.message));
   });
 }
 
