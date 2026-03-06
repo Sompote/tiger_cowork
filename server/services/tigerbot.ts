@@ -91,16 +91,27 @@ export async function callTigerBotWithTools(
     }
 
     const choice = data.choices?.[0];
-    if (!choice) return { content: "No response from API.", usage: data.usage, toolResults };
+    if (!choice) {
+      console.log(`[ToolLoop] No response from API at round ${round}. Breaking to generate summary.`);
+      break;
+    }
 
     const message = choice.message;
     const toolCalls = message.tool_calls || [];
 
-    // Add assistant message to context
+    // Add assistant message to context — truncate large tool_call args to prevent context overflow
+    const truncatedToolCalls = toolCalls.length ? toolCalls.map((tc: any) => {
+      const args = tc.function?.arguments || "";
+      const argsStr = typeof args === "string" ? args : JSON.stringify(args);
+      if (argsStr.length > 4000) {
+        return { ...tc, function: { ...tc.function, arguments: argsStr.slice(0, 4000) + "..." } };
+      }
+      return tc;
+    }) : undefined;
     allMessages.push({
       role: "assistant",
       content: message.content || "",
-      tool_calls: toolCalls.length ? toolCalls : undefined,
+      tool_calls: truncatedToolCalls,
     });
 
     // If no tool calls, we're done — return the text response
@@ -311,28 +322,37 @@ export async function callTigerBotWithTools(
     }
   }
 
-  // Force a final text response — build a summary of what tools found
+  // Build a compact summary of tool results for the final response
   const toolSummary = toolResults.map((tr) => {
     let brief = "";
     try {
       const r = tr.result;
-      if (typeof r === "string") brief = r.slice(0, 500);
-      else if (r?.stdout) brief = r.stdout.slice(0, 500);
-      else if (r?.result) brief = String(r.result).slice(0, 500);
-      else if (r?.content) brief = String(r.content).slice(0, 500);
+      if (r?.outputFiles?.length > 0) brief = `Generated: ${r.outputFiles.join(", ")}`;
       else if (r?.ok === false) brief = `Error: ${r.error || "failed"}`;
-      else brief = JSON.stringify(r).slice(0, 500);
+      else if (r?.stdout) brief = r.stdout.slice(0, 300);
+      else if (typeof r === "string") brief = r.slice(0, 300);
+      else brief = JSON.stringify(r).slice(0, 300);
     } catch { brief = "(result unavailable)"; }
     return `[${tr.tool}]: ${brief}`;
-  }).join("\n\n");
+  }).join("\n");
 
-  allMessages.push({
+  // Build a minimal message list for the final summary call to avoid context overflow
+  // Keep: system prompt, user messages, and a compact summary — drop all tool call details
+  const finalMessages: ChatMessage[] = [];
+  for (const m of allMessages) {
+    if (m.role === "system" && finalMessages.length === 0) {
+      finalMessages.push(m); // keep system prompt
+    } else if (m.role === "user") {
+      finalMessages.push(m);
+    }
+  }
+  finalMessages.push({
     role: "system",
-    content: `You have gathered results from ${totalToolCalls} tool calls. Here is a summary:\n\n${toolSummary}\n\nNow provide a clear, helpful response to the user based on these results. Do NOT call any more tools.`,
+    content: `You executed ${totalToolCalls} tool calls. Summary:\n${toolSummary}\n\nProvide a clear, helpful response to the user. Mention any generated files. Do NOT call tools.`,
   });
 
   try {
-    const data = await llmCall(allMessages);
+    const data = await llmCall(finalMessages);
     const content = data.choices?.[0]?.message?.content || "";
     if (content) {
       return { content, usage: data.usage, toolResults };
@@ -341,21 +361,23 @@ export async function callTigerBotWithTools(
     console.error("[FinalResponse] Failed to generate summary:", err.message);
   }
 
-  // Absolute fallback: show tool results directly (skip internal skill docs)
-  const fallbackContent = toolResults.filter((tr) => tr.tool !== "load_skill").map((tr) => {
-    let text = "";
-    try {
-      const r = tr.result;
-      if (r?.stdout) text = r.stdout;
-      else if (r?.result) text = String(r.result);
-      else if (r?.content) text = String(r.content);
-      else if (r?.data) text = typeof r.data === "string" ? r.data : JSON.stringify(r.data, null, 2);
-      else text = JSON.stringify(r, null, 2);
-    } catch { text = "(no result)"; }
-    return `**${tr.tool}:**\n${text.slice(0, 2000)}`;
-  }).join("\n\n---\n\n");
+  // Absolute fallback: build a simple summary directly
+  const outputFiles = toolResults.flatMap((tr) => tr.result?.outputFiles || []);
+  const errors = toolResults.filter((tr) => tr.result?.exitCode === 1).map((tr) => tr.result?.stderr?.slice(0, 200) || "").filter(Boolean);
+  const stdouts = toolResults.filter((tr) => tr.result?.stdout).map((tr) => tr.result.stdout.slice(0, 500));
 
-  return { content: fallbackContent || "No results from tools.", toolResults };
+  let fallback = "";
+  if (outputFiles.length > 0) {
+    fallback += `Generated ${outputFiles.length} file(s): ${outputFiles.join(", ")}\n\n`;
+  }
+  if (stdouts.length > 0) {
+    fallback += stdouts.join("\n---\n").slice(0, 3000);
+  }
+  if (errors.length > 0) {
+    fallback += `\n\nSome errors occurred:\n${errors.join("\n")}`;
+  }
+
+  return { content: fallback || "Task completed. Check the output panel for results.", toolResults };
 }
 
 // Simple call without tools (backwards compat)
