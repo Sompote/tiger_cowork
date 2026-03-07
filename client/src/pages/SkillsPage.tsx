@@ -51,9 +51,11 @@ export default function SkillsPage() {
     setClawhubInstalling(slug);
     try {
       const res = await api.clawhubInstall(slug);
-      if (res.ok) {
+      if (res.ok && res.installed) {
         setClawhubResults((prev) => prev + `\n\nInstalled "${slug}" successfully!`);
         api.getSkills().then(setInstalled);
+      } else if (res.ok && !res.installed) {
+        setClawhubResults((prev) => prev + `\n\nFailed to install "${slug}": skill files were not created. ${res.output || ""}`);
       } else {
         setClawhubResults((prev) => prev + `\n\nFailed to install "${slug}": ${res.error || res.output}`);
       }

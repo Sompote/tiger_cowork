@@ -32,41 +32,103 @@ export async function clawhubInstall(slug: string, force = false) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
     return { ok: false, error: "Invalid slug format" };
   }
+  const skillPath = path.join(SKILLS_DIR, slug, "SKILL.md");
   const bin = await findClawhubBin();
   const argv = ["install", slug, "--no-input", "--workdir", TIGER_BOT_DIR, "--dir", "skills"];
   if (force) argv.push("--force");
 
-  const { stdout, stderr } = await execFileAsync(bin, argv, {
-    timeout: 120000,
-    maxBuffer: 1024 * 1024,
-  });
+  try {
+    const { stdout, stderr } = await execFileAsync(bin, argv, {
+      timeout: 120000,
+      maxBuffer: 1024 * 1024,
+    });
+    return {
+      ok: true,
+      slug,
+      installed: fs.existsSync(skillPath),
+      output: stdout.trim(),
+      warning: stderr.trim(),
+    };
+  } catch (err: any) {
+    const msg = err.stderr || err.message || "";
 
-  const skillPath = path.join(SKILLS_DIR, slug, "SKILL.md");
-  return {
-    ok: true,
-    slug,
-    installed: fs.existsSync(skillPath),
-    output: stdout.trim(),
-    warning: stderr.trim(),
-  };
+    // Already installed on disk — treat as success
+    if (msg.includes("Already installed") && fs.existsSync(skillPath)) {
+      return { ok: true, slug, installed: true, output: "Skill already installed", warning: "" };
+    }
+
+    // Rate limit — retry once after a short delay
+    if (msg.includes("Rate limit")) {
+      try {
+        await new Promise((r) => setTimeout(r, 3000));
+        const { stdout, stderr } = await execFileAsync(bin, argv, {
+          timeout: 120000,
+          maxBuffer: 1024 * 1024,
+        });
+        return {
+          ok: true,
+          slug,
+          installed: fs.existsSync(skillPath),
+          output: stdout.trim(),
+          warning: stderr.trim(),
+        };
+      } catch (retryErr: any) {
+        // If still rate-limited but skill exists on disk, treat as success
+        if (fs.existsSync(skillPath)) {
+          return { ok: true, slug, installed: true, output: "Skill files found on disk", warning: "" };
+        }
+        return { ok: false, slug, installed: false, error: retryErr.stderr || retryErr.message || "Rate limit exceeded, please try again later" };
+      }
+    }
+
+    // Other errors — still check if files exist on disk
+    if (fs.existsSync(skillPath)) {
+      return { ok: true, slug, installed: true, output: "Skill files found on disk", warning: msg };
+    }
+
+    return { ok: false, slug, installed: false, error: msg };
+  }
 }
 
 export function listInstalledSkills() {
   if (!fs.existsSync(SKILLS_DIR)) return [];
+
+  // Read lock.json for version info
+  const lockFile = path.join(TIGER_BOT_DIR, ".clawhub", "lock.json");
+  let lockData: Record<string, { version?: string }> = {};
+  if (fs.existsSync(lockFile)) {
+    try {
+      const lock = JSON.parse(fs.readFileSync(lockFile, "utf-8"));
+      lockData = lock.skills || {};
+    } catch {}
+  }
+
   return fs
     .readdirSync(SKILLS_DIR, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => {
       const skillFile = path.join(SKILLS_DIR, d.name, "SKILL.md");
-      const meta = path.join(SKILLS_DIR, d.name, "_meta.json");
       let description = "";
-      if (fs.existsSync(meta)) {
+
+      // Read description from SKILL.md frontmatter
+      if (fs.existsSync(skillFile)) {
         try {
-          const m = JSON.parse(fs.readFileSync(meta, "utf-8"));
-          description = m.description || "";
+          const content = fs.readFileSync(skillFile, "utf-8");
+          const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+          if (fmMatch) {
+            for (const line of fmMatch[1].split("\n")) {
+              const idx = line.indexOf(":");
+              if (idx > 0 && line.slice(0, idx).trim() === "description") {
+                description = line.slice(idx + 1).trim();
+                break;
+              }
+            }
+          }
         } catch {}
       }
-      return { name: d.name, installed: fs.existsSync(skillFile), description };
+
+      const version = lockData[d.name]?.version || "";
+      return { name: d.name, installed: fs.existsSync(skillFile), description, version };
     });
 }
 

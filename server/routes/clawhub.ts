@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { v4 as uuid } from "uuid";
+import fs from "fs";
+import path from "path";
 import { clawhubSearch, clawhubInstall, clawhubInfo, listInstalledSkills, readSkill } from "../services/clawhub";
 import { getSkills, saveSkills } from "../services/data";
 
@@ -52,14 +54,32 @@ clawhubRouter.post("/install", async (req, res) => {
   try {
     const result = await clawhubInstall(slug, Boolean(force));
     // Register in skills.json so it appears in the installed list
-    if (result.ok && result.installed) {
+    if (result.installed) {
       const skills = getSkills();
       const existing = skills.find((s) => s.name === slug && s.source === "clawhub");
       if (!existing) {
+        // Read description from SKILL.md frontmatter
+        let description = `ClawHub skill: ${slug}`;
+        const skillFile = path.join(process.cwd(), "Tiger_bot", "skills", slug, "SKILL.md");
+        if (fs.existsSync(skillFile)) {
+          try {
+            const content = fs.readFileSync(skillFile, "utf-8");
+            const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+            if (fmMatch) {
+              for (const line of fmMatch[1].split("\n")) {
+                const idx = line.indexOf(":");
+                if (idx > 0 && line.slice(0, idx).trim() === "description") {
+                  description = line.slice(idx + 1).trim();
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
         skills.push({
           id: uuid(),
           name: slug,
-          description: result.warning || `ClawHub skill: ${slug}`,
+          description,
           source: "clawhub",
           script: slug,
           enabled: true,

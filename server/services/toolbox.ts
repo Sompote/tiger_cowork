@@ -487,8 +487,9 @@ function loadSkillTool(args: { skill: string }): any {
   if (!skillName) return { ok: false, error: "Missing skill name" };
 
   const skillFile = path.join(SKILLS_DIR, skillName, "SKILL.md");
+  const skillBaseDir = path.join(SKILLS_DIR, skillName);
   if (fs.existsSync(skillFile)) {
-    const content = fs.readFileSync(skillFile, "utf8");
+    const content = fs.readFileSync(skillFile, "utf8").replace(/\{baseDir\}/g, skillBaseDir);
     // Also check for _meta.json
     let meta: any = {};
     const metaFile = path.join(SKILLS_DIR, skillName, "_meta.json");
