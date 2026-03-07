@@ -7,3 +7,5 @@ data/chat_history.json
 data/settings.json
 input_file/
 output_file/
+nohup.out
+data/skills.json
