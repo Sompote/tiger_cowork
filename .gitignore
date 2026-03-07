@@ -4,5 +4,6 @@ uploads/
 .env
 .env.*
 data/chat_history.json
+data/settings.json
 input_file/
 output_file/
