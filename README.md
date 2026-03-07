@@ -105,12 +105,13 @@ The bottom section shows all **Available Tools** organized by category — web s
 ### Recommended: Run in Docker (Ubuntu)
 
 ```bash
-docker run -it --name cowork -p 3001:3001 ubuntu:22.04 bash
+docker run -it -p 3001:3001 ubuntu bash
 
 # Inside the container:
-apt update && apt install -y curl git python3
-curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-apt install -y nodejs
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+
+node --version
 
 git clone https://github.com/Sompote/tiger_cowork.git
 cd tiger_cowork
