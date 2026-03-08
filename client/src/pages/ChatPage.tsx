@@ -51,6 +51,40 @@ function getFileExt(name: string): string {
   return (name.split(".").pop() || "").toLowerCase();
 }
 
+function DocPreview({ file }: { file: string }) {
+  const [html, setHtml] = useState<string>("");
+  const [info, setInfo] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    setLoading(true);
+    setError("");
+    api.previewFile(file).then((data: any) => {
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setHtml(data.html || "");
+        if (data.pages) setInfo(`${data.pages} page${data.pages > 1 ? "s" : ""}`);
+      }
+      setLoading(false);
+    }).catch((err: any) => {
+      setError(err.message || "Failed to load preview");
+      setLoading(false);
+    });
+  }, [file]);
+
+  if (loading) return <div className="doc-preview-loading">Loading preview...</div>;
+  if (error) return <div className="doc-preview-error">Preview unavailable: {error}</div>;
+
+  return (
+    <div className="doc-preview-content">
+      {info && <div className="doc-preview-info">{info}</div>}
+      <div className="doc-preview-body" dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+}
+
 function OutputCanvas({ files }: { files: string[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -58,7 +92,8 @@ function OutputCanvas({ files }: { files: string[] }) {
   const reactFiles = files.filter((f) => f.endsWith(".jsx.js"));
   const htmlFiles = files.filter((f) => getFileExt(f) === "html" && !f.endsWith(".jsx.js"));
   const pdfFiles = files.filter((f) => getFileExt(f) === "pdf");
-  const otherFiles = files.filter((f) => !images.includes(f) && !reactFiles.includes(f) && !htmlFiles.includes(f) && !pdfFiles.includes(f));
+  const docFiles = files.filter((f) => ["doc", "docx"].includes(getFileExt(f)));
+  const otherFiles = files.filter((f) => !images.includes(f) && !reactFiles.includes(f) && !htmlFiles.includes(f) && !pdfFiles.includes(f) && !docFiles.includes(f));
 
   return (
     <div className="output-canvas">
@@ -117,11 +152,11 @@ function OutputCanvas({ files }: { files: string[] }) {
         </div>
       ))}
 
-      {/* PDF preview */}
+      {/* PDF preview with extracted text */}
       {pdfFiles.map((f) => (
-        <div key={f} className="canvas-pdf-wrap">
-          <div className="canvas-pdf-header">
-            <div className="canvas-pdf-icon">PDF</div>
+        <div key={f} className="canvas-doc-wrap">
+          <div className="canvas-doc-header">
+            <div className="canvas-doc-icon pdf">PDF</div>
             <span>{f.split("/").pop()}</span>
             <div style={{ display: "flex", gap: 6 }}>
               <a href={`/sandbox/${f}`} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
@@ -132,7 +167,23 @@ function OutputCanvas({ files }: { files: string[] }) {
               </a>
             </div>
           </div>
-          <iframe src={`/sandbox/${f}?t=${Date.now()}`} className="canvas-pdf-iframe" title={f} />
+          <DocPreview file={f} />
+        </div>
+      ))}
+
+      {/* Word document preview */}
+      {docFiles.map((f) => (
+        <div key={f} className="canvas-doc-wrap">
+          <div className="canvas-doc-header">
+            <div className="canvas-doc-icon doc">DOC</div>
+            <span>{f.split("/").pop()}</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              </a>
+            </div>
+          </div>
+          <DocPreview file={f} />
         </div>
       ))}
 

@@ -76,7 +76,7 @@ ${code}
             if (outputExts.includes(ext)) {
               const fullPath = path.join(dir, f);
               const stat = fs.statSync(fullPath);
-              if (Date.now() - stat.mtimeMs < 10000) {
+              if (Date.now() - stat.mtimeMs < 30000) {
                 // Store relative path from sandboxDir
                 const relPath = path.relative(sandboxDir, fullPath);
                 outputFiles.push(relPath);

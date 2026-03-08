@@ -3,6 +3,9 @@ import { listFiles, readFile, writeFile, deleteFile, validatePath } from "../ser
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import mammoth from "mammoth";
+// @ts-ignore
+import pdfParse from "pdf-parse";
 
 export const filesRouter = Router();
 
@@ -118,6 +121,39 @@ filesRouter.post("/chat-upload", chatUpload.array("files", 10), (req, res) => {
       });
     }
     res.json({ success: true, files: uploaded });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Preview PDF / DOCX — returns extracted HTML content
+filesRouter.get("/preview", async (req, res) => {
+  try {
+    const filePath = req.query.path as string;
+    if (!filePath) return res.status(400).json({ error: "path required" });
+    const resolved = validatePath(req.app.locals.sandboxDir, filePath);
+    if (!fs.existsSync(resolved)) return res.status(404).json({ error: "File not found" });
+
+    const ext = path.extname(resolved).toLowerCase();
+
+    if (ext === ".pdf") {
+      const buffer = fs.readFileSync(resolved);
+      const data = await pdfParse(buffer);
+      // Return pages of text as HTML
+      const html = data.text
+        .split(/\f/) // form-feed = page break in pdf-parse
+        .map((page: string) => page.trim())
+        .filter((p: string) => p.length > 0)
+        .map((page: string) => `<div class="pdf-page">${page.replace(/\n/g, "<br/>")}</div>`)
+        .join('<hr class="page-break"/>');
+      res.json({ type: "pdf", pages: data.numpages, html });
+    } else if (ext === ".docx" || ext === ".doc") {
+      const buffer = fs.readFileSync(resolved);
+      const result = await mammoth.convertToHtml({ buffer });
+      res.json({ type: "docx", html: result.value });
+    } else {
+      res.status(400).json({ error: "Unsupported file type for preview" });
+    }
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

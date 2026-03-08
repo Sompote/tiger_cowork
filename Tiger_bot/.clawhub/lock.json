@@ -44,6 +44,10 @@
     "agent-browser": {
       "version": "0.2.0",
       "installedAt": 1772878778867
+    },
+    "nano-pdf": {
+      "version": "1.0.0",
+      "installedAt": 1772929726307
     }
   }
 }

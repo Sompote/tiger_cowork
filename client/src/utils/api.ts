@@ -22,6 +22,7 @@ export const api = {
   writeFile: (path: string, content: string) => request("/files/write", { method: "POST", body: JSON.stringify({ path, content }) }),
   deleteFile: (path: string) => request(`/files?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   mkdir: (path: string) => request("/files/mkdir", { method: "POST", body: JSON.stringify({ path }) }),
+  previewFile: (path: string) => request(`/files/preview?path=${encodeURIComponent(path)}`),
   downloadUrl: (path: string) => `/api/files/download?path=${encodeURIComponent(path)}`,
   uploadFile: async (file: File, destPath: string) => {
     const form = new FormData();

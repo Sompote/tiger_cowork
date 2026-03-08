@@ -425,7 +425,12 @@ function writeFileTool(args: { path: string; content: string; append?: boolean }
   } else {
     fs.writeFileSync(target, args.content, "utf8");
   }
-  return { ok: true, path: target, bytes: Buffer.byteLength(args.content) };
+  // Return outputFiles so the file appears in the output panel
+  const ext = path.extname(args.path).toLowerCase();
+  const outputExts = [".pdf", ".docx", ".doc", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".svg", ".html", ".gif", ".webp"];
+  const relPath = path.relative(sandboxDir, target);
+  const outputFiles = outputExts.includes(ext) ? [relPath] : [];
+  return { ok: true, path: target, bytes: Buffer.byteLength(args.content), outputFiles };
 }
 
 function listFilesTool(args: { path?: string; recursive?: boolean }): any {

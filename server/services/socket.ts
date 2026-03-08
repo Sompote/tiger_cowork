@@ -56,6 +56,7 @@ Rules:
 - When a user asks about skills, call list_skills to show what's available.
 - CHARTS & PLOTS: When creating charts/graphs with matplotlib or plotly, ALWAYS save to a .png file (e.g. plt.savefig('chart.png', dpi=150, bbox_inches='tight')). The image will be rendered in the output panel on the right. Never call plt.show(). For interactive charts, use run_react with Recharts.
 - REPORTS: When generating HTML reports, save to a .html file. It will be rendered in the output panel. For PDF reports, save to .pdf and it will show an embedded preview.
+- WORD FILES: When asked to create Word/DOCX files, ALWAYS use run_python with the python-docx library. Example: from docx import Document; doc = Document(); doc.add_heading('Title', 0); doc.add_paragraph('Content'); doc.save('report.docx'). The .docx file will be rendered with its content in the output panel. NEVER use write_file for Word documents — it only writes text, not binary formats.
 - OUTPUT FILES: The Python working directory is output_file/ inside the sandbox. All output files (plots, reports, etc.) are saved here automatically.
 - IMPORTANT WORKFLOW: When the user asks for analysis, charts, graphs, or reports — DO NOT just print data. You MUST generate actual output files (PNG charts, HTML reports, etc.) in the SAME run_python call or in a follow-up call. Combine data reading and chart generation in one run_python call when possible. For example: read the data, process it, AND create matplotlib charts all in a single code block. Do NOT spend multiple rounds just exploring data — go straight to producing visual outputs.
 - MULTI-CHART: When asked for analysis or report graphs, generate multiple relevant charts (e.g. depth profiles, property distributions, scatter plots, summary tables) in one or two run_python calls. Save each chart as a separate PNG file.
@@ -215,19 +216,31 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
       } catch (err: any) {
-        // Fallback to simple call without tools
+        // Fallback to simple call without tools — still include any outputFiles collected during tool calls
         try {
           const result = await callTigerBot(chatMessages, buildSystemPrompt());
+          const fallbackContent = result.content +
+            (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
           session.messages.push({
             role: "assistant",
-            content: result.content,
+            content: fallbackContent,
             timestamp: new Date().toISOString(),
+            files: outputFiles.length > 0 ? outputFiles : undefined,
           });
           saveChatHistory(sessions);
-          socket.emit("chat:response", { sessionId, content: result.content, done: true });
+          socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         } catch (fallbackErr: any) {
           const errMsg = `Error: ${fallbackErr.message || err.message}`;
-          socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+          const errorContent = errMsg +
+            (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+          session.messages.push({
+            role: "assistant",
+            content: errorContent,
+            timestamp: new Date().toISOString(),
+            files: outputFiles.length > 0 ? outputFiles : undefined,
+          });
+          saveChatHistory(sessions);
+          socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         }
       }
     });
