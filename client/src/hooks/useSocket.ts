@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
+import { getAccessToken } from "../utils/api";
 
 export function useSocket() {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
+    const token = getAccessToken();
+    const socket = io(window.location.origin, {
+      transports: ["websocket", "polling"],
+      auth: { token },
+    });
     socketRef.current = socket;
     socket.on("connect", () => setConnected(true));
     socket.on("disconnect", () => setConnected(false));

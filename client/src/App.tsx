@@ -1,5 +1,6 @@
 import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
+import AuthGate from "./components/AuthGate";
 import ChatPage from "./pages/ChatPage";
 import FilesPage from "./pages/FilesPage";
 import TasksPage from "./pages/TasksPage";
@@ -8,14 +9,16 @@ import SettingsPage from "./pages/SettingsPage";
 
 export default function App() {
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<ChatPage />} />
-        <Route path="/files" element={<FilesPage />} />
-        <Route path="/tasks" element={<TasksPage />} />
-        <Route path="/skills" element={<SkillsPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-      </Routes>
-    </Layout>
+    <AuthGate>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<ChatPage />} />
+          <Route path="/files" element={<FilesPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+        </Routes>
+      </Layout>
+    </AuthGate>
   );
 }

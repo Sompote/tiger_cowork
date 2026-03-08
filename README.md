@@ -118,6 +118,11 @@ git clone https://github.com/Sompote/tiger_cowork.git
 cd tiger_cowork
 npm i -g clawhub
 npm install && cd client && npm install && cd ..
+
+# Set access token (recommended)
+cp .env.example .env
+echo 'ACCESS_TOKEN=your-secret-token' > .env
+
 npm run dev
 ```
 
@@ -147,22 +152,38 @@ npm install
 cd client && npm install && cd ..
 ```
 
-### 3. Run in development mode
+### 3. Set up access token (optional but recommended)
+
+Create a `.env` file to protect the app with an access token:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set your token:
+
+```env
+ACCESS_TOKEN=your-secret-token-here
+```
+
+If you skip this step, the app will run without authentication (open to anyone who can reach it).
+
+### 4. Run in development mode
 
 ```bash
 npm run dev
 ```
 
-The app starts at **http://localhost:3001** with hot-reload via Vite.
+The app starts at **http://localhost:3001**. If you set an access token, you'll see a login screen — enter your token to continue.
 
-### 4. Build and run for production
+### 5. Build and run for production
 
 ```bash
 npm run build
 npm start
 ```
 
-### 5. Running in background (production)
+### 6. Running in background (production)
 
 **Option A — Using `nohup`** (simple, no extra dependencies):
 
@@ -208,16 +229,46 @@ pm2 save
 5. Choose a **Model** — e.g. `z-ai/glm-5`, `TigerBot-70B-Chat`, etc.
 6. Click **Test Connection** to verify
 
-### Environment Variables
+### Access Token Protection
 
-| Variable      | Default            | Description                          |
-|---------------|--------------------|--------------------------------------|
-| `PORT`        | `3001`             | Server port                          |
-| `SANDBOX_DIR` | `.` (project root) | Directory for file manager sandbox   |
-| `NODE_ENV`    | `development`      | Set to `production` for built assets |
+Tiger Cowork supports a simple access token to protect the app from unauthorized access. When enabled, users must enter the token before they can use the app.
+
+**Setup:**
+
+1. Create a `.env` file in the project root (or copy from `.env.example`):
 
 ```bash
-PORT=8080 SANDBOX_DIR=/home/user/workspace npm run dev
+cp .env.example .env
+```
+
+2. Set your access token:
+
+```env
+ACCESS_TOKEN=your-secret-token-here
+```
+
+3. Restart the server — a login screen will appear requiring the token.
+
+**How it works:**
+
+- All `/api/*` routes require a valid `Authorization: Bearer <token>` header
+- Socket.IO connections require the token via `auth.token` in the handshake
+- The client stores the token in `localStorage` after successful login
+- If the token is invalid or missing, the client shows a login screen
+- File downloads pass the token via `?token=` query parameter
+- To **disable** auth, leave `ACCESS_TOKEN` empty or remove it from `.env`
+
+### Environment Variables
+
+| Variable       | Default            | Description                          |
+|----------------|--------------------|--------------------------------------|
+| `ACCESS_TOKEN` | *(empty)*          | Access token to protect the app (leave empty to disable) |
+| `PORT`         | `3001`             | Server port                          |
+| `SANDBOX_DIR`  | `.` (project root) | Directory for file manager sandbox   |
+| `NODE_ENV`     | `development`      | Set to `production` for built assets |
+
+```bash
+ACCESS_TOKEN=mysecret PORT=8080 SANDBOX_DIR=/home/user/workspace npm run dev
 ```
 
 ### MCP Server Configuration
@@ -298,6 +349,7 @@ tiger_cowork/
 │   │   ├── pages/                  # Chat, Files, Tasks, Skills, Settings pages
 │   │   │   └── ChatPage.tsx        # Main chat interface with output panel
 │   │   ├── components/
+│   │   │   ├── AuthGate.tsx        # Access token login gate
 │   │   │   ├── Layout.tsx          # App layout with sidebar navigation
 │   │   │   └── ReactComponentRenderer.tsx  # Native React component renderer
 │   │   ├── hooks/                  # useSocket custom hook
@@ -337,6 +389,7 @@ tiger_cowork/
 
 | Method | Endpoint                           | Description                   |
 |--------|------------------------------------|-------------------------------|
+| POST   | `/api/auth/verify`                 | Verify access token           |
 | GET    | `/api/chat/sessions`               | List all chat sessions        |
 | POST   | `/api/chat/sessions`               | Create a new chat session     |
 | GET    | `/api/chat/sessions/:id`           | Get session with messages     |
@@ -375,7 +428,8 @@ tiger_cowork/
 
 ## Changelog
 
-### v0.1.2 (2026-03-07)
+### v0.1.2 (2026-03-08)
+- Add access token authentication to protect the app (`.env` based, optional)
 - Fix context overflow causing "No response from API" after tool loops
 - Improve tool loop reliability with loop detection and error tracking
 - Add automatic chart generation retry for analysis tasks

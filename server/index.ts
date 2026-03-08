@@ -4,6 +4,7 @@ import { Server } from "socket.io";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { chatRouter } from "./routes/chat";
 import { filesRouter } from "./routes/files";
@@ -15,6 +16,10 @@ import { toolsRouter } from "./routes/tools";
 import { clawhubRouter } from "./routes/clawhub";
 import { setupSocket } from "./services/socket";
 import { initMcpServers } from "./services/mcp";
+
+dotenv.config();
+
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN || "";
 
 const app = express();
 const server = createServer(app);
@@ -50,6 +55,27 @@ app.use(express.json({ limit: "50mb" }));
 app.locals.sandboxDir = SANDBOX_DIR;
 app.locals.dataDir = DATA_DIR;
 
+// Access token verification endpoint (no auth required)
+app.post("/api/auth/verify", (req, res) => {
+  if (!ACCESS_TOKEN) {
+    return res.json({ ok: true, required: false });
+  }
+  const token = req.body.token;
+  if (token === ACCESS_TOKEN) {
+    return res.json({ ok: true });
+  }
+  return res.status(401).json({ ok: false, error: "Invalid access token" });
+});
+
+// Access token middleware for all /api routes (except /api/auth/verify)
+app.use("/api", (req, res, next) => {
+  if (req.path === "/auth/verify") return next();
+  if (!ACCESS_TOKEN) return next();
+  const token = req.headers.authorization?.replace("Bearer ", "") || req.query.token;
+  if (token === ACCESS_TOKEN) return next();
+  return res.status(401).json({ error: "Unauthorized — invalid or missing access token" });
+});
+
 // API routes
 app.use("/api/chat", chatRouter);
 app.use("/api/files", filesRouter);
@@ -62,6 +88,15 @@ app.use("/api/clawhub", clawhubRouter);
 
 // Serve sandbox files for preview
 app.use("/sandbox", express.static(SANDBOX_DIR));
+
+// Socket.io access token auth
+if (ACCESS_TOKEN) {
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (token === ACCESS_TOKEN) return next();
+    return next(new Error("Unauthorized — invalid or missing access token"));
+  });
+}
 
 setupSocket(io);
 

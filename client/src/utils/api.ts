@@ -1,10 +1,32 @@
 const BASE = "/api";
 
+export function getAccessToken(): string {
+  return localStorage.getItem("access_token") || "";
+}
+
+export function setAccessToken(token: string) {
+  localStorage.setItem("access_token", token);
+}
+
+export function clearAccessToken() {
+  localStorage.removeItem("access_token");
+}
+
 async function request(path: string, options?: RequestInit) {
+  const token = getAccessToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: { ...headers, ...(options?.headers || {}) },
   });
+  if (res.status === 401) {
+    clearAccessToken();
+    window.location.reload();
+    throw new Error("Unauthorized");
+  }
   return res.json();
 }
 
@@ -23,12 +45,20 @@ export const api = {
   deleteFile: (path: string) => request(`/files?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   mkdir: (path: string) => request("/files/mkdir", { method: "POST", body: JSON.stringify({ path }) }),
   previewFile: (path: string) => request(`/files/preview?path=${encodeURIComponent(path)}`),
-  downloadUrl: (path: string) => `/api/files/download?path=${encodeURIComponent(path)}`,
+  downloadUrl: (path: string) => {
+    const token = getAccessToken();
+    return `/api/files/download?path=${encodeURIComponent(path)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+  },
   uploadFile: async (file: File, destPath: string) => {
     const form = new FormData();
     form.append("file", file);
     form.append("path", destPath);
-    const res = await fetch(`${BASE}/files/upload`, { method: "POST", body: form });
+    const token = getAccessToken();
+    const res = await fetch(`${BASE}/files/upload`, {
+      method: "POST",
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     return res.json();
   },
 
@@ -48,7 +78,12 @@ export const api = {
   uploadSkill: async (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${BASE}/skills/upload`, { method: "POST", body: form });
+    const token = getAccessToken();
+    const res = await fetch(`${BASE}/skills/upload`, {
+      method: "POST",
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     return res.json();
   },
   updateSkill: (id: string, data: any) => request(`/skills/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -64,7 +99,12 @@ export const api = {
   chatUpload: async (files: File[]) => {
     const form = new FormData();
     for (const f of files) form.append("files", f);
-    const res = await fetch(`${BASE}/files/chat-upload`, { method: "POST", body: form });
+    const token = getAccessToken();
+    const res = await fetch(`${BASE}/files/chat-upload`, {
+      method: "POST",
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     return res.json();
   },
 
