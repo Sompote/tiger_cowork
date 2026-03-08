@@ -118,11 +118,9 @@ node --version
 
 git clone https://github.com/Sompote/tiger_cowork.git
 cd tiger_cowork
-npm i -g clawhub
-npm install && cd client && npm install && cd ..
+bash setup.sh
 
 # Set access token (recommended)
-cp .env.example .env
 echo 'ACCESS_TOKEN=your-secret-token' > .env
 
 npm run dev
@@ -146,12 +144,28 @@ git clone https://github.com/Sompote/tiger_cowork.git
 cd tiger_cowork
 ```
 
-### 2. Install dependencies
+### 2. Quick setup (recommended)
+
+Run the interactive setup script — it installs dependencies and prompts for your ClawHub token:
+
+```bash
+bash setup.sh
+```
+
+This will:
+- Install server and client dependencies
+- Prompt you to enter your **ClawHub token** (get one at [clawhub.ai](https://www.clawhub.ai))
+- Create `.env` from `.env.example`
+
+> You can skip the ClawHub token by pressing Enter. To login later: `clawhub login`
+
+### 2b. Manual install (alternative)
 
 ```bash
 npm i -g clawhub
 npm install
 cd client && npm install && cd ..
+clawhub login   # optional: authenticate with ClawHub
 ```
 
 ### 3. Set up access token (optional but recommended)
