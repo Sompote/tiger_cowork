@@ -239,30 +239,66 @@ This ensures that any code execution, shell commands, or skill scripts run in an
 
 ### Mounting External Folders in Docker
 
-To let projects access folders on your host machine, use Docker volume mounts:
+To let the app access folders on your host machine, use Docker `-v` volume mounts when starting the container.
+
+#### Quick start (no external folders)
+
+```bash
+# Run the app without any external folders — uses only the internal /app directory
+docker run -it -p 3001:3001 ubuntu bash
+# Then install and run inside the container (see above)
+```
+
+#### Mount a parent folder for full access
+
+The easiest approach — mount a large parent folder so you can access anything inside it from the app without restarting Docker:
+
+```bash
+# macOS
+docker run -it -p 3001:3001 \
+  -v /Users/yourname:/mnt/host:rw \
+  ubuntu bash
+
+# Linux
+docker run -it -p 3001:3001 \
+  -v /home/yourname:/mnt/host:rw \
+  ubuntu bash
+```
+
+Then in the app, create a project with **External Folder** pointing to `/mnt/host/any-subfolder`.
+
+#### Mount specific folders
 
 ```bash
 # Mount a single folder (read-write)
 docker run -it -p 3001:3001 \
-  -v /home/user/research:/mnt/projects/research:rw \
+  -v /Users/yourname/research:/mnt/projects/research:rw \
   ubuntu bash
 
 # Mount read-only
 docker run -it -p 3001:3001 \
-  -v /home/user/data:/mnt/projects/data:ro \
+  -v /Users/yourname/data:/mnt/projects/data:ro \
   ubuntu bash
 
 # Mount multiple folders
 docker run -it -p 3001:3001 \
-  -v /home/user/project-a:/mnt/projects/a:rw \
-  -v /home/user/project-b:/mnt/projects/b:ro \
+  -v /Users/yourname/project-a:/mnt/projects/a:rw \
+  -v /Users/yourname/project-b:/mnt/projects/b:ro \
   ubuntu bash
 ```
 
-You can also generate these commands automatically from the app:
+#### Important notes
+
+- **Folders must be mounted at startup** — you cannot add new host folders after the container is running. If you need a new folder, stop and restart with the updated `-v` flags.
+- **Tip:** Mount a big parent folder (like your home directory) to avoid restarting when you need to access a new subfolder.
+- `:rw` = read-write access, `:ro` = read-only access.
+
+#### Auto-generate mount commands from the app
+
+You can also generate these commands automatically:
 1. Create projects with **External Folder** working folders
 2. Set the desired access level for each
-3. Go to **Overview** tab > **Docker Volume Mounts** to get the exact commands
+3. Go to **Overview** tab > **Docker Volume Mounts** to get the exact `docker run` and `docker-compose` commands
 
 ## Prerequisites
 
