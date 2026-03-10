@@ -229,6 +229,38 @@ export default function SettingsPage() {
             <input type="number" value={settings.agentToolResultMaxLen || 6000} onChange={(e) => setSettings({ ...settings, agentToolResultMaxLen: Math.max(1000, parseInt(e.target.value) || 6000) })} min={1000} max={50000} step={1000} />
             <p className="hint">Max characters per tool result before truncation (default: 6000)</p>
           </div>
+          <div className="form-group">
+            <label>Temperature</label>
+            <input type="number" value={settings.agentTemperature ?? 0.7} onChange={(e) => setSettings({ ...settings, agentTemperature: Math.min(2, Math.max(0, parseFloat(e.target.value) || 0)) })} min={0} max={2} step={0.1} />
+            <p className="hint">LLM temperature (0 = deterministic, 2 = very creative, default: 0.7)</p>
+          </div>
+        </section>
+
+        <section className="card">
+          <h3>Reflection Loop Check</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            After the agent finishes, evaluate if the result satisfies the objective. If the score is below the threshold, the agent retries to address gaps. Disable to save tokens.
+          </p>
+          <div className="form-group">
+            <label className="toggle-label">
+              <input type="checkbox" checked={settings.agentReflectionEnabled || false} onChange={(e) => setSettings({ ...settings, agentReflectionEnabled: e.target.checked })} />
+              <span>Enable Reflection Loop</span>
+            </label>
+          </div>
+          {settings.agentReflectionEnabled && (
+            <>
+              <div className="form-group">
+                <label>Evaluation Score Threshold</label>
+                <input type="number" value={settings.agentEvalThreshold ?? 0.7} onChange={(e) => setSettings({ ...settings, agentEvalThreshold: Math.min(1, Math.max(0, parseFloat(e.target.value) || 0.7)) })} min={0} max={1} step={0.05} />
+                <p className="hint">Minimum score (0.0–1.0) to consider objective satisfied (default: 0.7)</p>
+              </div>
+              <div className="form-group">
+                <label>Max Reflection Retries</label>
+                <input type="number" value={settings.agentMaxReflectionRetries ?? 2} onChange={(e) => setSettings({ ...settings, agentMaxReflectionRetries: Math.min(5, Math.max(1, parseInt(e.target.value) || 2)) })} min={1} max={5} />
+                <p className="hint">How many times to re-evaluate and retry (default: 2, max: 5)</p>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="card">

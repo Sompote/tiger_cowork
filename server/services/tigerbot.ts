@@ -28,10 +28,11 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
   const { apiKey, model, apiUrl } = getApiConfig();
   if (!apiKey) throw new Error("API key not configured");
 
+  const settings = getSettings();
   const body: any = {
     model: options.model || model,
     messages,
-    temperature: 0.7,
+    temperature: settings.agentTemperature ?? 0.7,
     max_tokens: 81920,
   };
   if (options.tools && options.tools.length) {
@@ -89,6 +90,8 @@ export async function callTigerBotWithTools(
   let totalToolCalls = 0;
   let usesSkill = false; // Track if a skill was loaded (needs more tool calls)
   let consecutiveErrors = 0;
+  let lastUsage: any = undefined;
+  let earlyContent: string | null = null;
 
   for (let round = 0; round < maxToolRounds; round++) {
     let data: any;
@@ -106,6 +109,7 @@ export async function callTigerBotWithTools(
 
     const message = choice.message;
     const toolCalls = message.tool_calls || [];
+    lastUsage = data.usage;
 
     // Add assistant message to context — truncate large tool_call args to prevent context overflow
     const truncatedToolCalls = toolCalls.length ? toolCalls.map((tc: any) => {
@@ -122,13 +126,10 @@ export async function callTigerBotWithTools(
       tool_calls: truncatedToolCalls,
     });
 
-    // If no tool calls, we're done — return the text response
+    // If no tool calls, save the content and break to allow reflection check
     if (!toolCalls.length) {
-      return {
-        content: message.content || "No response generated.",
-        usage: data.usage,
-        toolResults,
-      };
+      earlyContent = message.content || "No response generated.";
+      break;
     }
 
     // Loop detection: same tools with same args called 3 rounds in a row → stop
@@ -253,7 +254,164 @@ export async function callTigerBotWithTools(
     if (totalToolCalls >= maxToolCalls || consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3)) break;
   }
 
-  console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls. Generating final response...`);
+  console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls.`);
+
+  // If no tools were called and we have early content, return it directly (no reflection needed)
+  if (earlyContent && totalToolCalls === 0) {
+    console.log(`[ToolLoop] No tool calls made. Returning direct response.`);
+    return { content: earlyContent, usage: lastUsage, toolResults };
+  }
+
+  // === Reflection Loop Check (optional — saves tokens when disabled) ===
+  const reflectionEnabled = settings.agentReflectionEnabled ?? false;
+  const evalThreshold = settings.agentEvalThreshold ?? 0.7;
+  const maxReflectionRetries = settings.agentMaxReflectionRetries ?? 2;
+
+  console.log(`[Reflection] Settings: enabled=${reflectionEnabled}, threshold=${evalThreshold}, maxRetries=${maxReflectionRetries}, toolCalls=${totalToolCalls}`);
+
+  if (reflectionEnabled && totalToolCalls > 0) {
+    try {
+    // Extract the original user objective from messages
+    const userObjective = allMessages
+      .filter(m => m.role === "user")
+      .map(m => {
+        if (typeof m.content === "string") return m.content;
+        if (Array.isArray(m.content)) return m.content.map((p: any) => p.text || "").join(" ");
+        return "";
+      })
+      .join("\n");
+
+    console.log(`[Reflection] User objective (first 200 chars): ${userObjective.slice(0, 200)}`);
+
+    for (let retryRound = 0; retryRound < maxReflectionRetries; retryRound++) {
+      console.log(`[Reflection] Round ${retryRound + 1}/${maxReflectionRetries} — evaluating objective satisfaction...`);
+
+      // Build evaluation prompt
+      const evalMessages: ChatMessage[] = [];
+      if (systemPrompt) evalMessages.push({ role: "system", content: systemPrompt });
+
+      const toolSummaryForEval = toolResults.map(tr => {
+        const r = tr.result;
+        if (r?.outputFiles?.length) return `[${tr.tool}] Generated: ${r.outputFiles.join(", ")}`;
+        if (r?.ok === false) return `[${tr.tool}] Error: ${r.error || "failed"}`;
+        if (r?.stdout) return `[${tr.tool}] ${r.stdout.slice(0, 300)}`;
+        return `[${tr.tool}] ${JSON.stringify(r).slice(0, 300)}`;
+      }).join("\n");
+
+      evalMessages.push({
+        role: "user",
+        content: `You are an evaluation judge. Score how well the agent satisfied the user's objective.
+
+USER OBJECTIVE:
+${userObjective}
+
+AGENT ACTIONS (${totalToolCalls} tool calls):
+${toolSummaryForEval}
+
+LAST ASSISTANT MESSAGE:
+${allMessages.filter(m => m.role === "assistant").pop()?.content || "(none)"}
+
+Respond in EXACTLY this JSON format (no other text):
+{"score": <0.0-1.0>, "satisfied": <true/false>, "missing": "<what is missing or incomplete, empty string if satisfied>"}
+
+Scoring guide:
+- 1.0: Fully satisfied, all parts addressed
+- 0.7-0.9: Mostly satisfied, minor gaps
+- 0.4-0.6: Partially satisfied, significant gaps
+- 0.0-0.3: Not satisfied, major parts missing`
+      });
+
+      try {
+        const evalData = await llmCall(evalMessages);
+        const evalContent = evalData.choices?.[0]?.message?.content || "";
+        console.log(`[Reflection] Raw eval response: ${evalContent.slice(0, 300)}`);
+
+        // Parse the evaluation JSON
+        const jsonMatch = evalContent.match(/\{[\s\S]*?"score"[\s\S]*?\}/);
+        if (!jsonMatch) {
+          console.log("[Reflection] Could not parse eval JSON. Skipping reflection.");
+          break;
+        }
+
+        const evalResult = JSON.parse(jsonMatch[0]);
+        const score = parseFloat(evalResult.score) || 0;
+        const satisfied = evalResult.satisfied === true;
+        const missing = evalResult.missing || "";
+
+        console.log(`[Reflection] Score: ${score}, Satisfied: ${satisfied}, Missing: ${missing.slice(0, 200)}`);
+
+        // If score meets threshold, we're done
+        if (score >= evalThreshold || satisfied) {
+          console.log(`[Reflection] Score ${score} >= threshold ${evalThreshold}. Objective satisfied.`);
+          break;
+        }
+
+        // Score below threshold — retry the main agent with guidance on what's missing
+        console.log(`[Reflection] Score ${score} < threshold ${evalThreshold}. Re-entering agent loop to address gaps...`);
+
+        allMessages.push({
+          role: "system",
+          content: `REFLECTION CHECK: Your work scored ${score}/1.0 (threshold: ${evalThreshold}). The evaluation found these gaps:\n${missing}\n\nPlease address what's missing to fully satisfy the user's objective. Use tools as needed.`
+        });
+
+        // Run additional tool rounds to address the gaps
+        const retryMaxRounds = Math.min(maxToolRounds, 5);
+        for (let round = 0; round < retryMaxRounds; round++) {
+          let data: any;
+          try {
+            data = await llmCall(allMessages, { tools: getTools() });
+          } catch (err: any) {
+            console.error(`[Reflection retry] LLM call failed: ${err.message}`);
+            break;
+          }
+
+          const choice = data.choices?.[0];
+          if (!choice) break;
+
+          const message = choice.message;
+          const retryToolCalls = message.tool_calls || [];
+
+          allMessages.push({
+            role: "assistant",
+            content: message.content || "",
+            tool_calls: retryToolCalls.length ? retryToolCalls : undefined,
+          });
+
+          if (!retryToolCalls.length) break; // LLM done
+
+          for (const tc of retryToolCalls) {
+            const fnName = tc.function?.name || "";
+            let fnArgs: any = {};
+            try { fnArgs = JSON.parse(tc.function?.arguments || "{}"); } catch { fnArgs = {}; }
+            if (onToolCall) onToolCall(fnName, fnArgs);
+            let result: any;
+            try { result = await callTool(fnName, fnArgs); } catch (err: any) { result = { ok: false, error: err.message }; }
+            if (onToolResult) onToolResult(fnName, result);
+            toolResults.push({ tool: fnName, result });
+            totalToolCalls++;
+            let resultStr = JSON.stringify(result);
+            const maxLen = settings.agentToolResultMaxLen || 6000;
+            if (resultStr.length > maxLen) resultStr = resultStr.slice(0, maxLen) + "\n...(truncated)";
+            allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
+          }
+        }
+        // Loop back to re-evaluate
+      } catch (err: any) {
+        console.error(`[Reflection] Eval failed: ${err.message}`);
+        break;
+      }
+    }
+    } catch (outerErr: any) {
+      console.error(`[Reflection] Unexpected error in reflection block: ${outerErr.message}`);
+    }
+  }
+
+  // If agent finished naturally with content and reflection didn't trigger a retry, return early content
+  if (earlyContent && !reflectionEnabled) {
+    return { content: earlyContent, usage: lastUsage, toolResults };
+  }
+
+  console.log(`[ToolLoop] Final total: ${totalToolCalls} tool calls. Generating final response...`);
 
   // Check if user likely wanted output files but none were generated
   const hasOutputFiles = toolResults.some((tr) => tr.result?.outputFiles?.length > 0);
@@ -449,6 +607,7 @@ export async function streamTigerBot(
   onDone: () => void
 ): Promise<void> {
   const { apiKey, model, apiUrl } = getApiConfig();
+  const settings = getSettings();
 
   if (!apiKey) {
     onChunk("TigerBot API key not configured. Go to Settings to add your API key.");
@@ -468,7 +627,7 @@ export async function streamTigerBot(
       body: JSON.stringify({
         model,
         messages: allMessages,
-        temperature: 0.7,
+        temperature: settings.agentTemperature ?? 0.7,
         max_tokens: 40960,
         stream: true,
       }),

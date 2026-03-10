@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.1.4
+# Tiger Cowork v0.1.5
 
 > **⚠️ WARNING: This application executes AI-generated code, shell commands, and third-party skills on your machine. Please run it inside a sandboxed environment (e.g. Docker) to protect your host system. See [Security Notice](#security-notice) below.**
 
@@ -28,12 +28,95 @@ The diagram above illustrates the **Tool Use & Reasoning Loop** at the core of T
 4. **Select Tool → Execute Tool** — The agent picks the appropriate tool (e.g. `web_search`, `run_python`, `fetch_url`, `run_react`) and executes it.
 5. **Observation** — The tool result is captured and fed back into the agent's context.
 6. **Update Context** — Memory and conversation context are updated with the new result.
-7. **Task Done?** — Another decision point: if the task requires more information, the agent loops back to select and execute additional tools (configurable, default 8 rounds / 12 calls). Once complete, it generates the final response.
-8. **User Output** — The final answer, along with any generated files (charts, components, reports), is delivered to the user.
+7. **Task Done?** — Another decision point: if the task requires more information, the agent loops back to select and execute additional tools (configurable, default 8 rounds / 12 calls). Once complete, it proceeds to reflection.
+8. **Reflection Loop Check** — If enabled, the agent evaluates whether it satisfied the user's objective (see below). If the score is below the threshold, it re-enters the tool loop to address gaps.
+9. **User Output** — The final answer, along with any generated files (charts, components, reports), is delivered to the user.
 
 The bottom section shows all **Available Tools** organized by category — web search, URL fetching, Python/React execution, shell commands, file operations, skill management, ClawHub marketplace, and external MCP tools.
 
-## What's New in v0.1.4
+### Agent Reflection Loop Protocol
+
+The Reflection Loop is an optional self-evaluation mechanism that checks whether the agent's work actually satisfied the user's objective before returning a response. When enabled, it adds an extra quality-assurance step after the tool loop completes.
+
+**How it works:**
+
+```
+Tool Loop Completes
+       │
+       ▼
+┌─────────────────────────┐
+│ Extract user objective   │
+│ from conversation        │
+└───────────┬─────────────┘
+            ▼
+┌─────────────────────────┐
+│ LLM Evaluation Call      │◄──────────────────┐
+│ (judge role)             │                   │
+│                          │                   │
+│ Scores 0.0 – 1.0        │                   │
+│ Returns: score,          │                   │
+│   satisfied, missing     │                   │
+└───────────┬─────────────┘                   │
+            ▼                                  │
+     score >= threshold                        │
+     OR satisfied=true?                        │
+        │          │                           │
+       YES         NO                          │
+        │          │                           │
+        ▼          ▼                           │
+   ┌────────┐  ┌──────────────────┐           │
+   │ PASS   │  │ Inject feedback: │           │
+   │ Done!  │  │ "Score X, gaps:  │           │
+   └────────┘  │  {missing}"      │           │
+               │ Re-enter tool    │───────────┘
+               │ loop to fix gaps │  (up to maxReflectionRetries)
+               └──────────────────┘
+```
+
+1. **Objective Extraction** — The system collects all user messages from the conversation to determine the original objective.
+2. **Evaluation Judge** — A separate LLM call evaluates the agent's work. It receives the user objective, a summary of all tool actions taken, and the agent's last response. It returns a structured JSON score:
+   ```json
+   {"score": 0.95, "satisfied": true, "missing": ""}
+   ```
+3. **Scoring Guide:**
+   - `1.0` — Fully satisfied, all parts addressed
+   - `0.7–0.9` — Mostly satisfied, minor gaps
+   - `0.4–0.6` — Partially satisfied, significant gaps
+   - `0.0–0.3` — Not satisfied, major parts missing
+4. **Pass/Fail Decision** — If `score >= agentEvalThreshold` (default 0.7) OR `satisfied: true`, the agent passes and proceeds to generate the final response.
+5. **Retry on Failure** — If the score is below the threshold, the system injects a feedback message describing the gaps and re-enters the tool loop. The agent gets additional tool rounds to address what's missing. This retry can repeat up to `agentMaxReflectionRetries` times (default 2).
+
+**Settings for Reflection Loop:**
+
+| Setting | Default | Description |
+|---|---|---|
+| `agentReflectionEnabled` | `false` | Enable/disable the reflection evaluation after tool loops |
+| `agentEvalThreshold` | `0.7` | Minimum score (0.0–1.0) to pass. Lower = more lenient, higher = stricter |
+| `agentMaxReflectionRetries` | `2` | Max times the agent can retry if evaluation fails |
+
+**Example log output when reflection is active:**
+```
+[ToolLoop] Ended after 5 tool calls.
+[Reflection] Settings: enabled=true, threshold=0.7, maxRetries=2, toolCalls=5
+[Reflection] User objective (first 200 chars): Tell me who is Sompote Youwai and review about his research
+[Reflection] Round 1/2 — evaluating objective satisfaction...
+[Reflection] Raw eval response: {"score": 0.95, "satisfied": true, "missing": ""}
+[Reflection] Score: 0.95, Satisfied: true, Missing:
+[Reflection] Score 0.95 >= threshold 0.7. Objective satisfied.
+[ToolLoop] Final total: 5 tool calls. Generating final response...
+```
+
+**Trade-offs:**
+- **Enabled** — Higher quality responses, catches incomplete work, but uses extra API tokens for the evaluation call (and potentially retry rounds)
+- **Disabled** — Faster and cheaper, but the agent may return incomplete work without self-checking
+
+## What's New in v0.1.5
+
+- **Agent Reflection Loop** — After the tool loop completes, the agent now self-evaluates whether it satisfied the user's objective. A separate LLM call scores the work 0.0–1.0. If the score is below the threshold (default 0.7), the agent automatically retries to address gaps. Enable in Settings > Agent Parameters > Reflection Enabled.
+- **New reflection settings** — Three new parameters: `agentReflectionEnabled` (on/off), `agentEvalThreshold` (pass score 0.0–1.0), `agentMaxReflectionRetries` (max retry attempts).
+- **Bug fix: reflection was never triggered** — The previous tool loop had an early `return` that skipped the reflection block entirely. Changed to `break` so the code flows through to the evaluation step.
+
+### Previous: v0.1.4
 
 - **Working folder: Sandbox vs External** — Projects now let you choose where the working folder lives. **In Sandbox** creates a folder inside the sandbox directory with full access. **External Folder** lets you mount any local path (outside the sandbox) with configurable access levels.
 - **Agent access control** — External folders support three access levels: **Read Only** (agent can only read files), **Read & Write** (agent can read and write), and **Full Access** (agent can read, write, and execute shell commands). Sandbox folders always have full access.
@@ -47,6 +130,7 @@ The bottom section shows all **Available Tools** organized by category — web s
 - Conversational AI assistant with automatic tool use
 - 12 built-in tools: web search, URL fetch, Python execution, React rendering, shell commands, file read/write/list, skill management, and ClawHub marketplace
 - Configurable tool loop limits: max tool rounds (default 8), max tool calls (default 12), consecutive error threshold, and result truncation length — all adjustable in Settings > Agent Parameters
+- **Reflection Loop** — Optional self-evaluation after tool loops. The agent scores its own work against the user's objective and retries if the score is below the threshold. Configurable: enable/disable, score threshold (0.0–1.0), max retries
 - Real-time streaming of responses and tool call progress via Socket.IO
 - Automatic output file generation for analysis/chart requests
 - File attachments with image vision support
@@ -415,7 +499,7 @@ tiger_cowork/
 │   │   ├── tools.ts                # Web search, URL fetch, MCP proxy
 │   │   └── clawhub.ts              # ClawHub skill marketplace
 │   └── services/
-│       ├── tigerbot.ts             # LLM API client (chat, streaming, tool loop)
+│       ├── tigerbot.ts             # LLM API client (chat, streaming, tool loop, reflection eval)
 │       ├── toolbox.ts              # 12 built-in tool definitions + dispatcher
 │       ├── mcp.ts                  # MCP client (connect, discover, call tools)
 │       ├── socket.ts               # Real-time Socket.IO event handlers (chat + project chat)
@@ -523,6 +607,14 @@ tiger_cowork/
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.1.5 (2026-03-10)
+- Add **Agent Reflection Loop** — self-evaluation protocol that checks whether the agent satisfied the user's objective after tool loops, with automatic retry on failure
+- New settings: `agentReflectionEnabled`, `agentEvalThreshold` (default 0.7), `agentMaxReflectionRetries` (default 2)
+- Fix critical bug: reflection block was unreachable due to early `return` in the tool loop — changed to `break` so execution flows through to reflection
+- Add safe content handling for null/non-string user messages in reflection objective extraction
+- Add outer try-catch around reflection block to prevent silent crashes
+- Add diagnostic logging: reflection settings, user objective preview, and evaluation scores appear in server logs
 
 ### v0.1.4 (2026-03-09)
 - Add working folder location choice: **In Sandbox** (full access) or **External Folder** (with configurable access level)
