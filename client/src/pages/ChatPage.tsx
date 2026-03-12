@@ -214,6 +214,7 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [activeTaskSessions, setActiveTaskSessions] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -252,6 +253,7 @@ export default function ChatPage() {
     load_skill: "Loading skill",
     clawhub_search: "Searching ClawHub",
     clawhub_install: "Installing skill",
+    spawn_subagent: "Spawning sub-agent",
   };
 
   // Restore in-progress state on mount, reconnect, or session switch
@@ -262,6 +264,8 @@ export default function ChatPage() {
     const checkActiveTasks = () => {
       api.getActiveTasks().then((tasks: any[]) => {
         if (cancelled) return;
+        // Track all sessions with active tasks for sidebar indicators
+        setActiveTaskSessions(new Set(tasks.map((t: any) => t.sessionId).filter(Boolean)));
         const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
         if (activeTask) {
           setIsLoading(true);
@@ -295,6 +299,14 @@ export default function ChatPage() {
       }
     });
     const unsub2 = onResponse((data) => {
+      // Remove completed task from sidebar indicators
+      if (data.sessionId) {
+        setActiveTaskSessions((prev) => {
+          const next = new Set(prev);
+          next.delete(data.sessionId);
+          return next;
+        });
+      }
       if (data.sessionId === activeSession) {
         // Refresh messages from server to get the complete history including the new response
         api.getSession(activeSession).then((session: any) => {
@@ -306,7 +318,17 @@ export default function ChatPage() {
       }
     });
     const unsub3 = onStatus((data: any) => {
-      // Status events now include sessionId — only process for active session
+      // Track active task sessions for sidebar indicators
+      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call")) {
+        setActiveTaskSessions((prev) => {
+          if (prev.has(data.sessionId)) return prev;
+          const next = new Set(prev);
+          next.add(data.sessionId);
+          return next;
+        });
+      }
+
+      // Only update loading/status UI for active session
       if (data.sessionId && data.sessionId !== activeSession) return;
 
       if (data.status === "thinking") {
@@ -322,6 +344,20 @@ export default function ChatPage() {
       } else if (data.status === "tool_result") {
         const label = toolLabels[data.tool] || data.tool;
         setStatus(`${label} done, thinking...`);
+      } else if (data.status === "subagent_spawn") {
+        setIsLoading(true);
+        setStatus(`Sub-agent "${data.label}" spawned...`);
+      } else if (data.status === "subagent_tool") {
+        setIsLoading(true);
+        const label = toolLabels[data.tool] || data.tool;
+        setStatus(`Sub-agent "${data.label}": ${label}...`);
+      } else if (data.status === "subagent_tool_done") {
+        const label = toolLabels[data.tool] || data.tool;
+        setStatus(`Sub-agent "${data.label}": ${label} done...`);
+      } else if (data.status === "subagent_done") {
+        setStatus(`Sub-agent "${data.label}" completed`);
+      } else if (data.status === "subagent_error") {
+        setStatus(`Sub-agent "${data.label}" failed: ${data.error}`);
       } else {
         setStatus("");
       }
@@ -469,6 +505,7 @@ export default function ChatPage() {
               className={`session-item ${activeSession === s.id ? "active" : ""}`}
               onClick={() => { setActiveSession(s.id); setMobileSidebar(false); }}
             >
+              {activeTaskSessions.has(s.id) && <span className="session-running-indicator" title="Task running" />}
               <span className="session-title">{s.title}</span>
               <button className="session-delete btn-icon btn-ghost" onClick={(e) => deleteSession(s.id, e)}>
                 <Icon name="close" />

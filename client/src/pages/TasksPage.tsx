@@ -58,6 +58,16 @@ export default function TasksPage() {
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
   const [refreshing, setRefreshing] = useState(false);
 
+  const killTask = async (taskId: string) => {
+    try {
+      await api.killActiveTask(taskId);
+      loadActiveTasks();
+    } catch {
+      // Task may have already completed
+      loadActiveTasks();
+    }
+  };
+
   const loadActiveTasks = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -128,7 +138,12 @@ export default function TasksPage() {
                     <span className="source-badge clawhub">{task.projectName}</span>
                   )}
                 </div>
-                <span className="active-task-elapsed">{elapsed(task.startedAt)}</span>
+                <div className="active-task-actions">
+                  <span className="active-task-elapsed">{elapsed(task.startedAt)}</span>
+                  <button className="btn btn-danger btn-sm" onClick={() => killTask(task.id)} title="Kill task">
+                    Kill
+                  </button>
+                </div>
               </div>
               <div className="card-body">
                 <div className="card-detail">

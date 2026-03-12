@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.1.5
+# Tiger Cowork v0.2.0
 
 > **⚠️ WARNING: This application executes AI-generated code, shell commands, and third-party skills on your machine. Please run it inside a sandboxed environment (e.g. Docker) to protect your host system. See [Security Notice](#security-notice) below.**
 
@@ -110,7 +110,84 @@ Tool Loop Completes
 - **Enabled** — Higher quality responses, catches incomplete work, but uses extra API tokens for the evaluation call (and potentially retry rounds)
 - **Disabled** — Faster and cheaper, but the agent may return incomplete work without self-checking
 
-## What's New in v0.1.5
+### Sub-Agent System
+
+The Sub-Agent system allows the main agent to delegate specific sub-tasks to independent child agents. Each sub-agent runs its own tool loop, has access to the same tools, and returns results back to the parent agent. This enables parallel task decomposition and hierarchical problem solving.
+
+**How it works:**
+
+```
+Parent Agent (processing user request)
+       │
+       ├── Decides a sub-task can be delegated
+       │
+       ▼
+┌─────────────────────────────┐
+│ spawn_subagent tool call     │
+│                              │
+│ task: "Analyze sales.csv"    │
+│ label: "Data Analyst"        │
+│ context: "Focus on Q1 trends"│
+└──────────────┬──────────────┘
+               ▼
+┌─────────────────────────────┐
+│ Sub-Agent Created            │
+│ ID: subagent_17732_a3f1      │
+│ Depth: 1                     │
+│                              │
+│ Gets own system prompt       │
+│ Gets own tool loop           │
+│ Full tool access (minus      │
+│   spawn_subagent at max      │
+│   depth)                     │
+└──────────────┬──────────────┘
+               │
+               ├── Executes tools (read_file, run_python, etc.)
+               ├── Streams status via Socket.IO
+               │
+               ▼
+┌─────────────────────────────┐
+│ Returns to Parent:           │
+│  • result (final response)   │
+│  • toolCalls (tools used)    │
+│  • outputFiles (generated)   │
+└─────────────────────────────┘
+```
+
+**Key features:**
+
+- **Depth control** — Sub-agents can spawn their own sub-agents up to a configurable max depth (default 2). At max depth, the `spawn_subagent` tool is removed from the available tools to prevent infinite recursion.
+- **Concurrency limit** — Controls how many sub-agents can run simultaneously (default 3).
+- **Timeout** — Each sub-agent has a configurable timeout (default 120 seconds) enforced via AbortController.
+- **Model override** — Sub-agents can use a different model than the parent (e.g. a faster/cheaper model for simple sub-tasks).
+- **Real-time status** — All sub-agent events (spawn, tool execution, completion, errors) are broadcast via Socket.IO and displayed in the chat UI.
+- **Auto-cleanup** — Completed sub-agents are automatically removed from the tracking map after 60 seconds (30 seconds on error).
+
+**Settings for Sub-Agent System:**
+
+| Setting | Default | Description |
+|---|---|---|
+| `subAgentEnabled` | `false` | Enable/disable sub-agent spawning |
+| `subAgentModel` | *(empty)* | Model override for sub-agents (uses main model if empty) |
+| `subAgentMaxDepth` | `2` | Maximum nesting depth (1–5) |
+| `subAgentMaxConcurrent` | `3` | Maximum simultaneous sub-agents (1–10) |
+| `subAgentTimeout` | `120` | Timeout per sub-agent in seconds (30–600) |
+
+Configure these in **Settings > Agent Parameters > Sub-Agent**.
+
+**Example use cases:**
+- Research tasks: spawn one sub-agent to search the web while another analyzes local files
+- Multi-file operations: delegate file processing to sub-agents in parallel
+- Complex analysis: break a report into sections, each handled by a dedicated sub-agent
+
+## What's New in v0.2.0
+
+- **Sub-Agent System** — The main agent can now spawn independent sub-agents to handle specific sub-tasks. Each sub-agent gets its own tool loop and can use all available tools. Supports configurable depth limits, concurrency, timeout, and optional model override. Enable in Settings > Agent Parameters > Sub-Agent.
+- **New sub-agent settings** — Five new parameters: `subAgentEnabled` (on/off), `subAgentModel` (optional model override), `subAgentMaxDepth` (1–5, default 2), `subAgentMaxConcurrent` (1–10, default 3), `subAgentTimeout` (30–600s, default 120s).
+- **New tool: `spawn_subagent`** — Allows the AI to delegate sub-tasks with a task description, optional label, and optional context.
+- **Real-time sub-agent status** — Socket.IO broadcasts sub-agent lifecycle events (spawn, tool calls, completion, errors) to the chat UI.
+
+### Previous: v0.1.5
 
 - **Agent Reflection Loop** — After the tool loop completes, the agent now self-evaluates whether it satisfied the user's objective. A separate LLM call scores the work 0.0–1.0. If the score is below the threshold (default 0.7), the agent automatically retries to address gaps. Enable in Settings > Agent Parameters > Reflection Enabled.
 - **New reflection settings** — Three new parameters: `agentReflectionEnabled` (on/off), `agentEvalThreshold` (pass score 0.0–1.0), `agentMaxReflectionRetries` (max retry attempts).
@@ -128,8 +205,9 @@ Tool Loop Completes
 
 ### AI Chat with Tool Calling
 - Conversational AI assistant with automatic tool use
-- 12 built-in tools: web search, URL fetch, Python execution, React rendering, shell commands, file read/write/list, skill management, and ClawHub marketplace
+- 13 built-in tools: web search, URL fetch, Python execution, React rendering, shell commands, file read/write/list, skill management, ClawHub marketplace, and sub-agent spawning
 - Configurable tool loop limits: max tool rounds (default 8), max tool calls (default 12), consecutive error threshold, and result truncation length — all adjustable in Settings > Agent Parameters
+- **Sub-Agent Spawning** — Delegate sub-tasks to independent child agents with their own tool loops. Configurable: depth limits, concurrency, timeout, and model override
 - **Reflection Loop** — Optional self-evaluation after tool loops. The agent scores its own work against the user's objective and retries if the score is below the threshold. Configurable: enable/disable, score threshold (0.0–1.0), max retries
 - Real-time streaming of responses and tool call progress via Socket.IO
 - Automatic output file generation for analysis/chart requests
@@ -588,6 +666,7 @@ tiger_cowork/
 | `load_skill`     | Load a skill's SKILL.md instructions                     |
 | `clawhub_search` | Search the ClawHub skill marketplace                     |
 | `clawhub_install`| Install a skill from ClawHub by slug                     |
+| `spawn_subagent` | Spawn an independent sub-agent for a specific sub-task   |
 
 ## API Endpoints
 
@@ -638,11 +717,20 @@ tiger_cowork/
 | `chat:chunk`        | Server → Client  | Streamed AI response chunk           |
 | `chat:status`       | Server → Client  | Status update (thinking, tool call)  |
 | `chat:response`     | Server → Client  | Final complete response with files   |
+| `chat:subagent`     | Server → Client  | Sub-agent status (spawn, tool, done, error) |
 | `python:run`        | Client → Server  | Execute Python code                  |
 | `python:status`     | Server → Client  | Python execution status              |
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.2.0 (2026-03-12)
+- Add **Sub-Agent System** — main agent can spawn independent sub-agents to handle sub-tasks with their own tool loops, depth control, concurrency limits, and timeout enforcement
+- New tool: `spawn_subagent` with `task`, `label`, and `context` parameters
+- New settings: `subAgentEnabled`, `subAgentModel`, `subAgentMaxDepth` (default 2), `subAgentMaxConcurrent` (default 3), `subAgentTimeout` (default 120s)
+- Real-time sub-agent status broadcasting via Socket.IO (spawn, tool calls, completion, errors)
+- Sub-agent tracking with auto-cleanup (60s after completion, 30s after error)
+- Depth-aware tool filtering: `spawn_subagent` tool is excluded at max depth to prevent infinite recursion
 
 ### v0.1.5 (2026-03-10)
 - Add **Agent Reflection Loop** — self-evaluation protocol that checks whether the agent satisfied the user's objective after tool loops, with automatic retry on failure

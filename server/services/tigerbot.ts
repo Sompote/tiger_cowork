@@ -45,7 +45,7 @@ function getApiConfig() {
 }
 
 // Single LLM call (no tool loop)
-async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string } = {}): Promise<any> {
+async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string; signal?: AbortSignal } = {}): Promise<any> {
   const { apiKey, model, apiUrl } = getApiConfig();
   if (!apiKey) throw new Error("API key not configured");
 
@@ -68,6 +68,7 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -90,7 +91,8 @@ export async function callTigerBotWithTools(
   messages: ChatMessage[],
   systemPrompt?: string,
   onToolCall?: (name: string, args: any) => void,
-  onToolResult?: (name: string, result: any) => void
+  onToolResult?: (name: string, result: any) => void,
+  signal?: AbortSignal
 ): Promise<TigerBotResponse> {
   const { apiKey } = getApiConfig();
   if (!apiKey) {
@@ -115,10 +117,16 @@ export async function callTigerBotWithTools(
   let earlyContent: string | null = null;
 
   for (let round = 0; round < maxToolRounds; round++) {
+    if (signal?.aborted) {
+      return { content: earlyContent || "Task was cancelled.", toolResults };
+    }
     let data: any;
     try {
-      data = await llmCall(allMessages, { tools: getTools() });
+      data = await llmCall(allMessages, { tools: getTools(), signal });
     } catch (err: any) {
+      if (err.name === "AbortError") {
+        return { content: earlyContent || "Task was cancelled.", toolResults };
+      }
       return { content: `Connection error: ${err.message}`, toolResults };
     }
 
@@ -172,6 +180,11 @@ export async function callTigerBotWithTools(
 
     // Execute each tool call
     for (const tc of toolCalls) {
+      // Check abort before each tool call
+      if (signal?.aborted) {
+        return { content: earlyContent || "Task was cancelled.", toolResults };
+      }
+
       const fnName = tc.function?.name || "";
       let fnArgs: any = {};
       const rawArgs = tc.function?.arguments || "{}";
@@ -260,6 +273,11 @@ export async function callTigerBotWithTools(
         content: resultStr,
         tool_call_id: tc.id,
       });
+
+      // Check abort after tool completes
+      if (signal?.aborted) {
+        return { content: earlyContent || "Task was cancelled.", toolResults };
+      }
 
       // Stop if too many consecutive errors (tool/command not available)
       const maxConsecutiveErrors = settings.agentMaxConsecutiveErrors || 3;

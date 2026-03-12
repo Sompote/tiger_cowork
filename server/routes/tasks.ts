@@ -2,7 +2,7 @@ import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { getTasks, saveTasks } from "../services/data";
 import { scheduleTask, stopTask } from "../services/scheduler";
-import { getActiveTasks } from "../services/socket";
+import { getActiveTasks, killActiveTask } from "../services/socket";
 
 export const tasksRouter = Router();
 
@@ -12,6 +12,12 @@ tasksRouter.get("/", (_req, res) => {
 
 tasksRouter.get("/active", (_req, res) => {
   res.json(getActiveTasks());
+});
+
+tasksRouter.post("/active/:id/kill", (req, res) => {
+  const killed = killActiveTask(req.params.id);
+  if (!killed) return res.status(404).json({ error: "Task not found or already completed" });
+  res.json({ success: true });
 });
 
 tasksRouter.post("/", (req, res) => {

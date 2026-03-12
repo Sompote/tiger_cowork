@@ -208,6 +208,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
   const [status, setStatus] = useState("");
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [mobileSessions, setMobileSessions] = useState(false);
+  const [activeTaskSessions, setActiveTaskSessions] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { connected, sendProjectMessage, onChunk, onResponse, onStatus } = useSocket();
@@ -252,6 +253,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     const checkActiveTasks = () => {
       api.getActiveTasks().then((tasks: any[]) => {
         if (cancelled) return;
+        setActiveTaskSessions(new Set(tasks.map((t: any) => t.sessionId).filter(Boolean)));
         const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
         if (activeTask) {
           setIsLoading(true);
@@ -283,6 +285,13 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       }
     });
     const unsub2 = onResponse((data) => {
+      if (data.sessionId) {
+        setActiveTaskSessions((prev) => {
+          const next = new Set(prev);
+          next.delete(data.sessionId);
+          return next;
+        });
+      }
       if (data.sessionId === activeSession) {
         api.getSession(activeSession).then((session: any) => {
           setMessages(session.messages || []);
@@ -293,6 +302,15 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       }
     });
     const unsub3 = onStatus((data: any) => {
+      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call")) {
+        setActiveTaskSessions((prev) => {
+          if (prev.has(data.sessionId)) return prev;
+          const next = new Set(prev);
+          next.add(data.sessionId);
+          return next;
+        });
+      }
+
       if (data.sessionId && data.sessionId !== activeSession) return;
 
       if (data.status === "thinking") { setIsLoading(true); setStatus("Thinking..."); }
@@ -379,6 +397,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
           <div className="project-session-list">
             {sessions.map((s) => (
               <div key={s.id} className={`session-item ${activeSession === s.id ? "active" : ""}`} onClick={() => { setActiveSession(s.id); setMobileSessions(false); }}>
+                {activeTaskSessions.has(s.id) && <span className="session-running-indicator" title="Task running" />}
                 <span className="session-title">{s.title.replace(`[${project.name}] `, "")}</span>
                 <button className="session-delete btn-icon btn-ghost" onClick={(e) => deleteSession(s.id, e)}>
                   <Icon name="close" />

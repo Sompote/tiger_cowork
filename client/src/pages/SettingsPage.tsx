@@ -273,6 +273,43 @@ export default function SettingsPage() {
         </section>
 
         <section className="card">
+          <h3>Sub-Agent</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Allow the AI to spawn independent sub-agents for complex tasks. Sub-agents run their own tool-calling loop and return results to the parent agent. Useful for parallel research, multi-step analysis, or breaking down large tasks.
+          </p>
+          <div className="form-group">
+            <label className="toggle-label">
+              <input type="checkbox" checked={settings.subAgentEnabled || false} onChange={(e) => setSettings({ ...settings, subAgentEnabled: e.target.checked })} />
+              <span>Enable Sub-Agent Spawning</span>
+            </label>
+          </div>
+          {settings.subAgentEnabled && (
+            <>
+              <div className="form-group">
+                <label>Sub-Agent Model (optional)</label>
+                <input value={settings.subAgentModel || ""} onChange={(e) => setSettings({ ...settings, subAgentModel: e.target.value })} placeholder="Leave empty to use main model" />
+                <p className="hint">Override the LLM model for sub-agents (e.g. use a smaller/cheaper model)</p>
+              </div>
+              <div className="form-group">
+                <label>Max Depth</label>
+                <input type="number" value={settings.subAgentMaxDepth ?? 2} onChange={(e) => setSettings({ ...settings, subAgentMaxDepth: Math.min(5, Math.max(1, parseInt(e.target.value) || 2)) })} min={1} max={5} />
+                <p className="hint">How many levels deep sub-agents can spawn other sub-agents (default: 2, max: 5)</p>
+              </div>
+              <div className="form-group">
+                <label>Max Concurrent Sub-Agents</label>
+                <input type="number" value={settings.subAgentMaxConcurrent ?? 3} onChange={(e) => setSettings({ ...settings, subAgentMaxConcurrent: Math.min(10, Math.max(1, parseInt(e.target.value) || 3)) })} min={1} max={10} />
+                <p className="hint">Maximum sub-agents running at the same time (default: 3)</p>
+              </div>
+              <div className="form-group">
+                <label>Timeout (seconds)</label>
+                <input type="number" value={settings.subAgentTimeout ?? 120} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(600, Math.max(30, parseInt(e.target.value) || 120)) })} min={30} max={600} step={10} />
+                <p className="hint">Max time per sub-agent before timeout (default: 120s, max: 600s)</p>
+              </div>
+            </>
+          )}
+        </section>
+
+        <section className="card">
           <h3>Reflection Loop Check</h3>
           <p className="hint" style={{ marginBottom: 12 }}>
             After the agent finishes, evaluate if the result satisfies the objective. If the score is below the threshold, the agent retries to address gaps. Disable to save tokens.

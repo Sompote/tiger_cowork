@@ -159,17 +159,27 @@ export default function SkillsPage() {
 
   const handleSkillFile = (file: File) => {
     setUploadFile(file);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      const { fm, body } = parseFrontmatter(content);
+    const isZip = file.name.toLowerCase().endsWith(".zip");
+    if (isZip) {
+      // For zip files, show basic info without parsing content
       setUploadPreview({
-        name: fm.name || file.name.replace(/\.[^.]+$/, ""),
-        description: fm.description || "",
-        body,
+        name: file.name.replace(/\.zip$/i, ""),
+        description: `Skill folder (${(file.size / 1024).toFixed(1)} KB zip)`,
+        body: `**Zip archive** containing skill folder with supporting files.\nFiles will be extracted to the skills directory upon install.`,
       });
-    };
-    reader.readAsText(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        const { fm, body } = parseFrontmatter(content);
+        setUploadPreview({
+          name: fm.name || file.name.replace(/\.[^.]+$/, ""),
+          description: fm.description || "",
+          body,
+        });
+      };
+      reader.readAsText(file);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -199,6 +209,12 @@ export default function SkillsPage() {
       alert("Upload error: " + err.message);
     }
     setUploading(false);
+  };
+
+  const getInstallButtonLabel = () => {
+    if (uploading) return "Installing...";
+    if (uploadFile?.name.toLowerCase().endsWith(".zip")) return "Install Skill Folder";
+    return "Install Skill";
   };
 
   const isInstalled = (name: string) => installed.some((s) => s.name === name);
@@ -429,12 +445,12 @@ export default function SkillsPage() {
 
       {tab === "custom" && (
         <div className="card form-card">
-          <h3>Upload SKILL.md File</h3>
+          <h3>Upload Skill</h3>
           <div
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={handleDrop}
-            onClick={() => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".md,.txt"; inp.onchange = (e) => { const f = (e.target as HTMLInputElement).files?.[0]; if (f) handleSkillFile(f); }; inp.click(); }}
+            onClick={() => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".md,.txt,.zip"; inp.onchange = (e) => { const f = (e.target as HTMLInputElement).files?.[0]; if (f) handleSkillFile(f); }; inp.click(); }}
             style={{
               border: `2px dashed ${dragOver ? "#1967d2" : "var(--border, #ccc)"}`,
               borderRadius: 8,
@@ -453,8 +469,8 @@ export default function SkillsPage() {
               </div>
             ) : (
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>Drop SKILL.md file here or click to browse</div>
-                <div style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>Supports .md and .txt files</div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>Drop skill file here or click to browse</div>
+                <div style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>Supports SKILL.md or .zip folder (with supporting files)</div>
               </div>
             )}
           </div>
@@ -473,7 +489,7 @@ export default function SkillsPage() {
               />
               <div className="form-actions" style={{ marginTop: 10 }}>
                 <button className="btn btn-primary" onClick={installUploadedSkill} disabled={uploading}>
-                  {uploading ? "Installing..." : "Install Skill"}
+                  {getInstallButtonLabel()}
                 </button>
                 <button className="btn btn-ghost" onClick={() => { setUploadFile(null); setUploadPreview(null); }}>
                   Clear

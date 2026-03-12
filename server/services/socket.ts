@@ -3,6 +3,7 @@ import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
+import { setSubagentStatusCallback, setCallContext } from "./toolbox";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -21,25 +22,98 @@ export interface ActiveTask {
 }
 
 const activeTasks = new Map<string, ActiveTask>();
+const taskAbortControllers = new Map<string, AbortController>();
 
 export function getActiveTasks(): ActiveTask[] {
   return Array.from(activeTasks.values());
 }
 
+export function killActiveTask(taskId: string): boolean {
+  const controller = taskAbortControllers.get(taskId);
+  if (controller) {
+    controller.abort();
+    return true;
+  }
+  return false;
+}
+
 function buildSystemPrompt(): string {
   // Gather installed clawhub skills
-  const skillsDir = path.resolve("Tiger_bot/skills");
-  let installedSkills: string[] = [];
+  const clawhubDir = path.resolve("Tiger_bot/skills");
+  let clawhubSkills: string[] = [];
   try {
-    if (fs.existsSync(skillsDir)) {
-      installedSkills = fs.readdirSync(skillsDir, { withFileTypes: true })
-        .filter((d: any) => d.isDirectory() && fs.existsSync(path.join(skillsDir, d.name, "SKILL.md")))
+    if (fs.existsSync(clawhubDir)) {
+      clawhubSkills = fs.readdirSync(clawhubDir, { withFileTypes: true })
+        .filter((d: any) => d.isDirectory() && fs.existsSync(path.join(clawhubDir, d.name, "SKILL.md")))
         .map((d: any) => d.name);
     }
   } catch {}
 
-  const skillsList = installedSkills.length > 0
-    ? `\n\nInstalled ClawHub skills: ${installedSkills.join(", ")}\nTo use a skill, call list_skills then load_skill to read its SKILL.md, then follow its instructions using run_python or run_shell.`
+  // Gather custom uploaded skills from /skills/
+  const customDir = path.resolve("skills");
+  let customSkills: { name: string; description: string; files: string[] }[] = [];
+  try {
+    if (fs.existsSync(customDir)) {
+      const dirs = fs.readdirSync(customDir, { withFileTypes: true }).filter((d: any) => d.isDirectory());
+      for (const d of dirs) {
+        const skillMdPath = path.join(customDir, d.name, "SKILL.md");
+        let desc = "";
+        if (fs.existsSync(skillMdPath)) {
+          const content = fs.readFileSync(skillMdPath, "utf8");
+          const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+          if (fmMatch) {
+            for (const line of fmMatch[1].split("\n")) {
+              const idx = line.indexOf(":");
+              if (idx > 0) {
+                const key = line.slice(0, idx).trim().toLowerCase();
+                const val = line.slice(idx + 1).trim();
+                if (key === "description") desc = val;
+              }
+            }
+          }
+        }
+        // List supporting files in the skill folder
+        const files = fs.readdirSync(path.join(customDir, d.name), { withFileTypes: true })
+          .filter((f: any) => !f.isDirectory())
+          .map((f: any) => f.name);
+        customSkills.push({ name: d.name, description: desc, files });
+      }
+    }
+  } catch {}
+
+  // Also include enabled skills from skills.json that aren't already listed
+  let registeredSkills: string[] = [];
+  try {
+    const allSkills = getSkills();
+    registeredSkills = allSkills
+      .filter((s) => s.enabled && !clawhubSkills.includes(s.name) && !customSkills.some((cs) => cs.name === s.name))
+      .map((s) => `${s.name} (${s.source})`);
+  } catch {}
+
+  let skillsList = "";
+  if (clawhubSkills.length > 0 || customSkills.length > 0 || registeredSkills.length > 0) {
+    skillsList += `\n\n=== INSTALLED SKILLS ===`;
+    skillsList += `\nIMPORTANT: BEFORE answering any user request, scan the skill list below. If a skill's description matches the user's task, you MUST load and use that skill FIRST by calling load_skill("<skill-name>"), then follow its SKILL.md instructions. Do NOT write your own code from scratch when a matching skill exists. Skills contain tested implementations and supporting files (like Python engines) that should be used.`;
+  }
+  if (customSkills.length > 0) {
+    skillsList += `\n\nCustom skills (priority — always prefer these):`;
+    for (const cs of customSkills) {
+      skillsList += `\n- "${cs.name}"${cs.description ? ": " + cs.description : ""} [files: ${cs.files.join(", ")}]`;
+    }
+  }
+  if (clawhubSkills.length > 0) {
+    skillsList += `\n\nClawHub skills: ${clawhubSkills.join(", ")}`;
+  }
+  if (registeredSkills.length > 0) {
+    skillsList += `\n\nOther registered skills: ${registeredSkills.join(", ")}`;
+  }
+  if (skillsList) {
+    skillsList += `\n\nSkill usage workflow: 1) call load_skill("<name>") to read SKILL.md and see supporting files, 2) if the skill has supporting .py files, use read_file to load them, 3) use run_python or run_shell to execute following the skill instructions.`;
+  }
+
+  const settings = getSettings();
+  const subAgentInfo = settings.subAgentEnabled
+    ? `\n- spawn_subagent: Delegate a sub-task to an independent sub-agent. The sub-agent runs its own tool-calling loop and returns results. Use for: parallel research, breaking complex tasks into parts, or specialized work. Params: task (required), label (short name), context (extra info).`
     : "";
 
   return `You are Tiger Cowork, a powerful AI assistant with direct access to tools for internet, files, code execution, and skill marketplace.
@@ -56,13 +130,15 @@ Available tools:
 - list_skills: List all installed skills (ClawHub + built-in)
 - load_skill: Load a skill's SKILL.md to learn how to use it
 - clawhub_search: Search the ClawHub/OpenClaw skill marketplace
-- clawhub_install: Install skills from ClawHub by slug
+- clawhub_install: Install skills from ClawHub by slug${subAgentInfo}
 
-Rules:
+Rules:${settings.subAgentEnabled ? `
+- SUB-AGENTS: For complex multi-part tasks, use spawn_subagent to delegate sub-tasks. Each sub-agent runs independently with full tool access. Good use cases: researching multiple topics simultaneously, generating charts while analyzing data, or any task that can be broken into independent parts. Provide a clear task description and label. Wait for results before using them.` : ""}
+- SKILL-FIRST: Before writing any code, check if an installed skill matches the user's request. If a skill's name or description is relevant (e.g. user asks about "slope stability" and skill "slope-stability" exists), you MUST call load_skill first and use that skill's code/engine. Never reinvent what a skill already provides.
 - USE TOOLS actively. When asked to search, use web_search. When asked to fetch a page, use fetch_url.
 - IMPORTANT: Do NOT call the same tool repeatedly with the same arguments. If a tool returns a result, use that result — do not call it again.
 - IMPORTANT: If a tool (especially run_shell) returns an error like "command not found", do NOT retry it. Tell the user what needs to be installed and how.
-- When using skills (after load_skill), you may need several tool calls to complete the workflow — that's OK. But if a command fails, explain the error to the user instead of retrying.
+- When using skills (after load_skill), you may need several tool calls to complete the workflow — that's OK. But if a command fails, explain the error to the user instead of retrying. If the skill has supporting files (e.g. gle_engine.py), read them with read_file and use them in your run_python code.
 - For web search tasks: prefer using the installed duckduckgo-search skill via run_python (it gives better results than the basic web_search). Load the skill first with load_skill("duckduckgo-search") to see usage.
 - For coding tasks, use run_python, run_react, or run_shell to execute code directly.
 - For interactive UIs, dashboards, or React components, use run_react. It supports hooks, state, and CDN libraries like Recharts and Tailwind CSS.
@@ -95,6 +171,9 @@ function broadcastStatus(data: Record<string, any>) {
 
 export function setupSocket(io: Server): void {
   ioRef = io;
+
+  // Wire up sub-agent status broadcasting
+  setSubagentStatusCallback((data) => broadcastStatus(data));
 
   io.on("connection", (socket: Socket) => {
     console.log("Client connected:", socket.id);
@@ -234,8 +313,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         lastUpdate: new Date().toISOString(),
       };
       activeTasks.set(taskId, activeTask);
+      const abortController = new AbortController();
+      taskAbortControllers.set(taskId, abortController);
 
       try {
+        // Set call context for sub-agent spawning
+        setCallContext(sessionId, 0);
+
         const result = await callTigerBotWithTools(
           chatMessages,
           buildSystemPrompt(),
@@ -256,7 +340,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             if (toolResult?.outputFiles) {
               outputFiles.push(...toolResult.outputFiles);
             }
-          }
+          },
+          abortController.signal
         );
 
         // Stream the final AI response
@@ -276,34 +361,49 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
       } catch (err: any) {
-        // Fallback to simple call without tools — still include any outputFiles collected during tool calls
-        try {
-          const result = await callTigerBot(chatMessages, buildSystemPrompt());
-          const fallbackContent = result.content +
+        // If aborted, don't fallback — just report cancellation
+        if (abortController.signal.aborted) {
+          const cancelMsg = "Task was cancelled." +
             (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
           session.messages.push({
             role: "assistant",
-            content: fallbackContent,
+            content: cancelMsg,
             timestamp: new Date().toISOString(),
             files: outputFiles.length > 0 ? outputFiles : undefined,
           });
           saveChatHistory(sessions);
-          socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
-        } catch (fallbackErr: any) {
-          const errMsg = `Error: ${fallbackErr.message || err.message}`;
-          const errorContent = errMsg +
-            (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
-          session.messages.push({
-            role: "assistant",
-            content: errorContent,
-            timestamp: new Date().toISOString(),
-            files: outputFiles.length > 0 ? outputFiles : undefined,
-          });
-          saveChatHistory(sessions);
-          socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+          socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+        } else {
+          // Fallback to simple call without tools — still include any outputFiles collected during tool calls
+          try {
+            const result = await callTigerBot(chatMessages, buildSystemPrompt());
+            const fallbackContent = result.content +
+              (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+            session.messages.push({
+              role: "assistant",
+              content: fallbackContent,
+              timestamp: new Date().toISOString(),
+              files: outputFiles.length > 0 ? outputFiles : undefined,
+            });
+            saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+          } catch (fallbackErr: any) {
+            const errMsg = `Error: ${fallbackErr.message || err.message}`;
+            const errorContent = errMsg +
+              (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+            session.messages.push({
+              role: "assistant",
+              content: errorContent,
+              timestamp: new Date().toISOString(),
+              files: outputFiles.length > 0 ? outputFiles : undefined,
+            });
+            saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+          }
         }
       } finally {
         activeTasks.delete(taskId);
+        taskAbortControllers.delete(taskId);
       }
     });
 
@@ -448,8 +548,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         lastUpdate: new Date().toISOString(),
       };
       activeTasks.set(taskId, activeTask);
+      const abortController = new AbortController();
+      taskAbortControllers.set(taskId, abortController);
 
       try {
+        // Set call context for sub-agent spawning
+        setCallContext(sessionId, 0);
+
         const result = await callTigerBotWithTools(
           chatMessages,
           projectPrompt,
@@ -464,7 +569,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.status = `${name} done, thinking...`;
             activeTask.lastUpdate = new Date().toISOString();
             if (toolResult?.outputFiles) outputFiles.push(...toolResult.outputFiles);
-          }
+          },
+          abortController.signal
         );
 
         if (result.content) {
@@ -483,30 +589,44 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
       } catch (err: any) {
-        try {
-          const result = await callTigerBot(chatMessages, projectPrompt);
-          const fallbackContent = result.content +
+        if (abortController.signal.aborted) {
+          const cancelMsg = "Task was cancelled." +
             (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
           session.messages.push({
             role: "assistant",
-            content: fallbackContent,
+            content: cancelMsg,
             timestamp: new Date().toISOString(),
             files: outputFiles.length > 0 ? outputFiles : undefined,
           });
           saveChatHistory(sessions);
-          socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
-        } catch (fallbackErr: any) {
-          const errMsg = `Error: ${fallbackErr.message || err.message}`;
-          session.messages.push({
-            role: "assistant",
-            content: errMsg,
-            timestamp: new Date().toISOString(),
-          });
-          saveChatHistory(sessions);
-          socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+          socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+        } else {
+          try {
+            const result = await callTigerBot(chatMessages, projectPrompt);
+            const fallbackContent = result.content +
+              (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+            session.messages.push({
+              role: "assistant",
+              content: fallbackContent,
+              timestamp: new Date().toISOString(),
+              files: outputFiles.length > 0 ? outputFiles : undefined,
+            });
+            saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+          } catch (fallbackErr: any) {
+            const errMsg = `Error: ${fallbackErr.message || err.message}`;
+            session.messages.push({
+              role: "assistant",
+              content: errMsg,
+              timestamp: new Date().toISOString(),
+            });
+            saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+          }
         }
       } finally {
         activeTasks.delete(taskId);
+        taskAbortControllers.delete(taskId);
       }
     });
 

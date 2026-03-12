@@ -61,6 +61,11 @@ export interface Settings {
   webSearchApiKey?: string;
   webSearchEngine?: string;
   pythonPath?: string;
+  subAgentEnabled?: boolean;
+  subAgentModel?: string;
+  subAgentMaxDepth?: number;
+  subAgentMaxConcurrent?: number;
+  subAgentTimeout?: number;
   [key: string]: any;
 }
 

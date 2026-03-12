@@ -188,6 +188,24 @@ const builtinTools = [
   },
 ];
 
+// Sub-agent spawning tool (conditionally included)
+const spawnSubagentTool = {
+  type: "function" as const,
+  function: {
+    name: "spawn_subagent",
+    description: "Spawn a sub-agent to handle a specific sub-task independently. The sub-agent gets its own tool-calling loop and returns results when done. Use this for: parallel research, breaking complex tasks into parts, or delegating specialized work. Each sub-agent runs autonomously with full tool access.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Clear description of the sub-task for the sub-agent to complete" },
+        label: { type: "string", description: "Short label for this sub-agent (e.g. 'research-api', 'generate-chart')" },
+        context: { type: "string", description: "Optional additional context or data the sub-agent needs" },
+      },
+      required: ["task"],
+    },
+  },
+};
+
 // OpenRouter Web Search tool (conditionally included)
 const openRouterSearchTool = {
   type: "function" as const,
@@ -204,14 +222,25 @@ const openRouterSearchTool = {
   },
 };
 
-// Dynamic tools getter: built-in + MCP tools + conditional OpenRouter search
-export function getTools() {
+// Dynamic tools getter: built-in + MCP tools + conditional OpenRouter search + sub-agent
+export function getTools(opts?: { excludeSubagent?: boolean }) {
   const settings = getSettings();
-  const tools = [...builtinTools];
+  const tools: any[] = [...builtinTools];
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     tools.push(openRouterSearchTool);
   }
+  if (settings.subAgentEnabled && !opts?.excludeSubagent) {
+    tools.push(spawnSubagentTool);
+  }
   return [...tools, ...getMcpTools()];
+}
+
+// Get tools for sub-agents (no spawn_subagent to prevent infinite recursion at max depth)
+export function getToolsForSubagent(currentDepth: number): ReturnType<typeof getTools> {
+  const settings = getSettings();
+  const maxDepth = settings.subAgentMaxDepth || 2;
+  // Sub-agents can spawn their own sub-agents if not at max depth
+  return getTools({ excludeSubagent: currentDepth >= maxDepth });
 }
 
 // Keep backward-compat export (static reference for imports that use `tools`)
@@ -493,34 +522,54 @@ function listFilesTool(args: { path?: string; recursive?: boolean }): any {
 }
 
 const SKILLS_DIR = path.resolve("Tiger_bot/skills");
+const CUSTOM_SKILLS_DIR = path.resolve("skills");
 
 function listSkillsTool(): any {
-  const clawhubSkills: string[] = [];
+  // ClawHub skills
+  const clawhubSkills: { name: string; files: string[] }[] = [];
   if (fs.existsSync(SKILLS_DIR)) {
     const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
     for (const d of dirs) {
       if (d.isDirectory() && fs.existsSync(path.join(SKILLS_DIR, d.name, "SKILL.md"))) {
-        clawhubSkills.push(d.name);
+        const files = fs.readdirSync(path.join(SKILLS_DIR, d.name), { withFileTypes: true })
+          .filter((f: any) => !f.isDirectory() && !f.name.startsWith("."))
+          .map((f: any) => f.name);
+        clawhubSkills.push({ name: d.name, files });
       }
     }
   }
 
-  // Also get skills from data/skills.json
-  const dataSkills = getSettings();  // just to check
-  let builtinSkills: string[] = [];
+  // Custom uploaded skills
+  const customSkills: { name: string; files: string[] }[] = [];
+  if (fs.existsSync(CUSTOM_SKILLS_DIR)) {
+    const dirs = fs.readdirSync(CUSTOM_SKILLS_DIR, { withFileTypes: true });
+    for (const d of dirs) {
+      if (d.isDirectory()) {
+        const files = fs.readdirSync(path.join(CUSTOM_SKILLS_DIR, d.name), { withFileTypes: true })
+          .filter((f: any) => !f.isDirectory() && !f.name.startsWith("."))
+          .map((f: any) => f.name);
+        customSkills.push({ name: d.name, files });
+      }
+    }
+  }
+
+  // Registered skills from data/skills.json
+  let registeredSkills: { name: string; source: string; enabled: boolean }[] = [];
   try {
     const skillsFile = path.resolve("data/skills.json");
     if (fs.existsSync(skillsFile)) {
       const skills = JSON.parse(fs.readFileSync(skillsFile, "utf8"));
-      builtinSkills = skills.filter((s: any) => s.enabled).map((s: any) => s.name);
+      registeredSkills = skills.map((s: any) => ({ name: s.name, source: s.source, enabled: s.enabled }));
     }
   } catch {}
 
   return {
     clawhub_skills: clawhubSkills,
-    builtin_skills: builtinSkills,
-    skills_dir: SKILLS_DIR,
-    hint: "Use load_skill with a clawhub skill name to see its SKILL.md with usage instructions.",
+    custom_skills: customSkills,
+    registered_skills: registeredSkills,
+    clawhub_dir: SKILLS_DIR,
+    custom_dir: CUSTOM_SKILLS_DIR,
+    hint: "Use load_skill with a skill name to see its SKILL.md and supporting files. Works for both ClawHub and custom skills.",
   };
 }
 
@@ -528,26 +577,57 @@ function loadSkillTool(args: { skill: string }): any {
   const skillName = args.skill.trim();
   if (!skillName) return { ok: false, error: "Missing skill name" };
 
-  const skillFile = path.join(SKILLS_DIR, skillName, "SKILL.md");
-  const skillBaseDir = path.join(SKILLS_DIR, skillName);
-  if (fs.existsSync(skillFile)) {
-    const content = fs.readFileSync(skillFile, "utf8").replace(/\{baseDir\}/g, skillBaseDir);
-    // Also check for _meta.json
-    let meta: any = {};
-    const metaFile = path.join(SKILLS_DIR, skillName, "_meta.json");
-    if (fs.existsSync(metaFile)) {
-      try { meta = JSON.parse(fs.readFileSync(metaFile, "utf8")); } catch {}
+  // Search in both ClawHub and custom skills directories
+  const searchDirs = [
+    { dir: SKILLS_DIR, label: "clawhub" },
+    { dir: CUSTOM_SKILLS_DIR, label: "custom" },
+  ];
+
+  for (const { dir, label } of searchDirs) {
+    const skillBaseDir = path.join(dir, skillName);
+    const skillFile = path.join(skillBaseDir, "SKILL.md");
+    if (fs.existsSync(skillFile)) {
+      const content = fs.readFileSync(skillFile, "utf8").replace(/\{baseDir\}/g, skillBaseDir);
+
+      // Collect metadata
+      let meta: any = {};
+      const metaFile = path.join(skillBaseDir, "_meta.json");
+      if (fs.existsSync(metaFile)) {
+        try { meta = JSON.parse(fs.readFileSync(metaFile, "utf8")); } catch {}
+      }
+
+      // List all supporting files in the skill folder (recursive)
+      const supportingFiles: string[] = [];
+      const walkSkillDir = (d: string, prefix: string) => {
+        try {
+          const entries = fs.readdirSync(d, { withFileTypes: true });
+          for (const e of entries) {
+            if (e.name.startsWith(".") || e.name === "__MACOSX") continue;
+            const rel = prefix ? `${prefix}/${e.name}` : e.name;
+            if (e.isDirectory()) {
+              walkSkillDir(path.join(d, e.name), rel);
+            } else if (e.name !== "SKILL.md" && e.name !== "_meta.json") {
+              supportingFiles.push(rel);
+            }
+          }
+        } catch {}
+      };
+      walkSkillDir(skillBaseDir, "");
+
+      return {
+        ok: true,
+        skill: skillName,
+        source: label,
+        skillDir: skillBaseDir,
+        content: content.slice(0, 15000),
+        meta,
+        supportingFiles,
+        truncated: content.length > 15000,
+      };
     }
-    return {
-      ok: true,
-      skill: skillName,
-      content: content.slice(0, 15000),
-      meta,
-      truncated: content.length > 15000,
-    };
   }
 
-  return { ok: false, error: `Skill "${skillName}" not found in ${SKILLS_DIR}` };
+  return { ok: false, error: `Skill "${skillName}" not found in ${SKILLS_DIR} or ${CUSTOM_SKILLS_DIR}` };
 }
 
 async function clawhubSearchTool(args: { query: string; limit?: number }): Promise<any> {
@@ -686,7 +766,228 @@ async function openRouterWebSearch(args: { query: string }): Promise<any> {
   }
 }
 
+// --- Sub-agent spawning ---
+
+// Active sub-agent tracking
+interface SubagentRun {
+  id: string;
+  label: string;
+  task: string;
+  depth: number;
+  status: "running" | "completed" | "error";
+  startedAt: string;
+  completedAt?: string;
+  result?: string;
+  toolCalls: string[];
+}
+
+const activeSubagents = new Map<string, SubagentRun>();
+
+export function getActiveSubagents(): SubagentRun[] {
+  return Array.from(activeSubagents.values());
+}
+
+// Sub-agent status broadcast callback (set by socket.ts)
+let subagentStatusCallback: ((data: Record<string, any>) => void) | null = null;
+
+export function setSubagentStatusCallback(cb: (data: Record<string, any>) => void) {
+  subagentStatusCallback = cb;
+}
+
+// Import callTigerBotWithTools lazily to avoid circular dependency
+let _callTigerBotForSubagent: typeof import("./tigerbot").callTigerBotWithTools | null = null;
+
+async function getSubagentCaller() {
+  if (!_callTigerBotForSubagent) {
+    const mod = await import("./tigerbot");
+    _callTigerBotForSubagent = mod.callTigerBotWithTools;
+  }
+  return _callTigerBotForSubagent;
+}
+
+export async function spawnSubagent(
+  args: { task: string; label?: string; context?: string },
+  parentSessionId?: string,
+  currentDepth: number = 0,
+  signal?: AbortSignal,
+): Promise<any> {
+  const settings = getSettings();
+  if (!settings.subAgentEnabled) {
+    return { ok: false, error: "Sub-agents are disabled. Enable them in Settings > Sub-Agent." };
+  }
+
+  const maxDepth = settings.subAgentMaxDepth || 2;
+  if (currentDepth >= maxDepth) {
+    return { ok: false, error: `Sub-agent depth limit reached (max ${maxDepth}). Cannot spawn deeper.` };
+  }
+
+  // Check concurrent limit
+  const maxConcurrent = settings.subAgentMaxConcurrent || 3;
+  const runningCount = Array.from(activeSubagents.values()).filter(s => s.status === "running").length;
+  if (runningCount >= maxConcurrent) {
+    return { ok: false, error: `Too many concurrent sub-agents (${runningCount}/${maxConcurrent}). Wait for one to finish.` };
+  }
+
+  const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const label = args.label || "subagent";
+  const timeout = (settings.subAgentTimeout || 120) * 1000; // default 120s
+
+  const run: SubagentRun = {
+    id: subagentId,
+    label,
+    task: args.task,
+    depth: currentDepth + 1,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    toolCalls: [],
+  };
+  activeSubagents.set(subagentId, run);
+
+  // Broadcast sub-agent spawn status
+  if (subagentStatusCallback) {
+    subagentStatusCallback({
+      sessionId: parentSessionId,
+      status: "subagent_spawn",
+      subagentId,
+      label,
+      task: args.task.slice(0, 200),
+      depth: currentDepth + 1,
+    });
+  }
+
+  console.log(`[SubAgent:${label}] Spawned at depth ${currentDepth + 1}. Task: ${args.task.slice(0, 200)}`);
+
+  // Build sub-agent system prompt
+  const subModel = settings.subAgentModel || undefined; // use default model if not set
+  const subPrompt = `You are a focused sub-agent. You have been spawned by a parent agent to complete a specific task.
+
+YOUR TASK:
+${args.task}
+
+${args.context ? `ADDITIONAL CONTEXT:\n${args.context}\n` : ""}
+
+RULES:
+- Focus ONLY on completing the assigned task
+- Be concise and efficient — minimize unnecessary tool calls
+- Return your findings/results clearly so the parent agent can use them
+- You have full access to tools (web search, file read/write, Python, shell, etc.)
+- Do NOT ask follow-up questions — work with what you have
+- If the task is ambiguous, make reasonable assumptions and proceed
+- When done, provide a clear summary of what you accomplished
+
+You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
+
+  try {
+    const callAgent = await getSubagentCaller();
+
+    // Create abort with timeout
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), timeout);
+
+    // Combine parent signal and timeout
+    const combinedSignal = signal && typeof (AbortSignal as any).any === "function"
+      ? (AbortSignal as any).any([signal, timeoutController.signal])
+      : timeoutController.signal;
+
+    const result = await callAgent(
+      [{ role: "user" as const, content: args.task }],
+      subPrompt,
+      // onToolCall
+      (name: string, toolArgs: any) => {
+        run.toolCalls.push(name);
+        console.log(`[SubAgent:${label}] Tool: ${name}`);
+        if (subagentStatusCallback) {
+          subagentStatusCallback({
+            sessionId: parentSessionId,
+            status: "subagent_tool",
+            subagentId,
+            label,
+            tool: name,
+          });
+        }
+      },
+      // onToolResult
+      (name: string, toolResult: any) => {
+        if (subagentStatusCallback) {
+          subagentStatusCallback({
+            sessionId: parentSessionId,
+            status: "subagent_tool_done",
+            subagentId,
+            label,
+            tool: name,
+          });
+        }
+      },
+      combinedSignal,
+    );
+
+    clearTimeout(timeoutId);
+
+    run.status = "completed";
+    run.completedAt = new Date().toISOString();
+    run.result = result.content?.slice(0, 5000);
+
+    console.log(`[SubAgent:${label}] Completed. ${run.toolCalls.length} tool calls.`);
+
+    // Broadcast completion
+    if (subagentStatusCallback) {
+      subagentStatusCallback({
+        sessionId: parentSessionId,
+        status: "subagent_done",
+        subagentId,
+        label,
+      });
+    }
+
+    // Clean up after a delay
+    setTimeout(() => activeSubagents.delete(subagentId), 60000);
+
+    return {
+      ok: true,
+      subagentId,
+      label,
+      result: result.content,
+      toolCalls: run.toolCalls,
+      outputFiles: result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []) || [],
+    };
+  } catch (err: any) {
+    run.status = "error";
+    run.completedAt = new Date().toISOString();
+
+    console.error(`[SubAgent:${label}] Error: ${err.message}`);
+
+    if (subagentStatusCallback) {
+      subagentStatusCallback({
+        sessionId: parentSessionId,
+        status: "subagent_error",
+        subagentId,
+        label,
+        error: err.message,
+      });
+    }
+
+    setTimeout(() => activeSubagents.delete(subagentId), 30000);
+
+    return {
+      ok: false,
+      subagentId,
+      label,
+      error: err.name === "AbortError" ? "Sub-agent timed out" : err.message,
+      toolCalls: run.toolCalls,
+    };
+  }
+}
+
 // --- Dispatcher ---
+
+// Track parent session ID and depth for sub-agent context
+let _currentParentSessionId: string | undefined;
+let _currentSubagentDepth: number = 0;
+
+export function setCallContext(sessionId?: string, depth?: number) {
+  _currentParentSessionId = sessionId;
+  _currentSubagentDepth = depth || 0;
+}
 
 export async function callTool(name: string, args: any): Promise<any> {
   switch (name) {
@@ -703,6 +1004,7 @@ export async function callTool(name: string, args: any): Promise<any> {
     case "load_skill": return loadSkillTool(args);
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
+    case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth);
     default:
       // Route MCP tools to MCP client
       if (isMcpTool(name)) return callMcpTool(name, args);

@@ -502,6 +502,13 @@
   50% { opacity: 0.5; transform: scale(0.8); }
 }
 
+.active-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .active-task-elapsed {
   font-size: 12px;
   color: var(--text-tertiary);

@@ -78,6 +78,7 @@ export const api = {
   // Tasks
   getTasks: () => request("/tasks"),
   getActiveTasks: () => request("/tasks/active"),
+  killActiveTask: (id: string) => request(`/tasks/active/${id}/kill`, { method: "POST" }),
   createTask: (data: any) => request("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: any) => request(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteTask: (id: string) => request(`/tasks/${id}`, { method: "DELETE" }),
