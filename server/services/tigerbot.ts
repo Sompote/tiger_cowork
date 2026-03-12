@@ -14,6 +14,27 @@ interface TigerBotResponse {
   toolResults?: Array<{ tool: string; result: any }>;
 }
 
+// Strip internal tool call markers from LLM responses before showing to users
+// Handles various formats the LLM may use to represent tool calls inline
+function sanitizeToolCallContent(content: string): string {
+  if (!content) return content;
+  let cleaned = content;
+  // Remove [tool_name]({"param": "value", ...}) style markers (JSON args)
+  cleaned = cleaned.replace(/\[(\w+)\]\s*\(\s*\{[^}]*\}\s*\)/g, "");
+  // Remove [tool_name](<parameter name="...">...</parameter>) style markers (XML-like, single line)
+  cleaned = cleaned.replace(/\[(\w+)\]\s*\(<parameter[^)]*\)/g, "");
+  // Remove multi-line XML parameter blocks: [tool_name](<parameter name="key">value</parameter>)
+  // Also handles malformed variants like <fetch_url](<parameter...
+  cleaned = cleaned.replace(/\[?\w+\]?\s*\(<parameter\s+name="[^"]*">[^<]*<\/parameter>\s*\)/g, "");
+  // Remove standalone [tool_name] markers for known internal tools
+  cleaned = cleaned.replace(/\[(web_search|fetch_url|run_python|run_react|read_file|write_file|list_files|web_fetch|load_skill)\]/g, "");
+  // Remove lines that are just tool call artifacts (e.g., bare parameter tags)
+  cleaned = cleaned.replace(/^.*<parameter\s+name="[^"]*">.*<\/parameter>.*$/gm, "");
+  // Clean up excessive blank lines left after removal
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  return cleaned.trim();
+}
+
 function getApiConfig() {
   const settings = getSettings();
   const apiKey = settings.tigerBotApiKey;
@@ -259,7 +280,7 @@ export async function callTigerBotWithTools(
   // If no tools were called and we have early content, return it directly (no reflection needed)
   if (earlyContent && totalToolCalls === 0) {
     console.log(`[ToolLoop] No tool calls made. Returning direct response.`);
-    return { content: earlyContent, usage: lastUsage, toolResults };
+    return { content: sanitizeToolCallContent(earlyContent), usage: lastUsage, toolResults };
   }
 
   // === Reflection Loop Check (optional — saves tokens when disabled) ===
@@ -523,14 +544,14 @@ Scoring guide:
   }
   finalMessages.push({
     role: "system",
-    content: `You executed ${totalToolCalls} tool calls. Summary:\n${toolSummary}\n\nProvide a clear, helpful response to the user. Mention any generated files. Do NOT call tools.`,
+    content: `You executed ${totalToolCalls} tool calls. Summary:\n${toolSummary}\n\nProvide a clear, helpful response to the user. Mention any generated files. Do NOT call tools. IMPORTANT: Do NOT include any internal tool call syntax, function names, parameter details, or markers like [web_search], [fetch_url], etc. in your response. The user should only see the final results, not the tools you used.`,
   });
 
   try {
     const data = await llmCall(finalMessages);
     const content = data.choices?.[0]?.message?.content || "";
     if (content) {
-      return { content, usage: data.usage, toolResults };
+      return { content: sanitizeToolCallContent(content), usage: data.usage, toolResults };
     }
   } catch (err: any) {
     console.error("[FinalResponse] Failed to generate summary:", err.message);
@@ -552,7 +573,7 @@ Scoring guide:
     fallback += `\n\nSome errors occurred:\n${errors.join("\n")}`;
   }
 
-  return { content: fallback || "Task completed. Check the output panel for results.", toolResults };
+  return { content: sanitizeToolCallContent(fallback) || "Task completed. Check the output panel for results.", toolResults };
 }
 
 // Simple call without tools (backwards compat)

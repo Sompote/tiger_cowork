@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { api } from "../utils/api";
 import "./PageStyles.css";
 
@@ -13,6 +13,18 @@ interface Task {
   createdAt: string;
 }
 
+interface ActiveTask {
+  id: string;
+  sessionId: string;
+  projectId?: string;
+  projectName?: string;
+  title: string;
+  status: string;
+  toolCalls: string[];
+  startedAt: string;
+  lastUpdate: string;
+}
+
 const CRON_PRESETS = [
   { label: "Every minute", value: "* * * * *" },
   { label: "Every hour", value: "0 * * * *" },
@@ -21,14 +33,53 @@ const CRON_PRESETS = [
   { label: "Every 5 minutes", value: "*/5 * * * *" },
 ];
 
+function timeAgo(dateStr: string): string {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m ago`;
+}
+
+function elapsed(startStr: string): string {
+  const seconds = Math.floor((Date.now() - new Date(startStr).getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadActiveTasks = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const data = await api.getActiveTasks();
+      setActiveTasks(data);
+    } catch {
+      // ignore
+    }
+    setRefreshing(false);
+  }, []);
 
   useEffect(() => {
     api.getTasks().then(setTasks);
-  }, []);
+    loadActiveTasks();
+  }, [loadActiveTasks]);
+
+  // Auto-refresh active tasks every 5 seconds when there are active tasks
+  useEffect(() => {
+    if (activeTasks.length === 0) return;
+    const interval = setInterval(loadActiveTasks, 5000);
+    return () => clearInterval(interval);
+  }, [activeTasks.length, loadActiveTasks]);
 
   const createTask = async () => {
     const task = await api.createTask(form);
@@ -49,6 +100,66 @@ export default function TasksPage() {
 
   return (
     <div className="page">
+      {/* ─── Running Agent Tasks ─── */}
+      <div className="page-header">
+        <h1>Running Agent Tasks</h1>
+        <button
+          className={`btn btn-ghost btn-sm${refreshing ? " spin-btn" : ""}`}
+          onClick={loadActiveTasks}
+          disabled={refreshing}
+          title="Refresh"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" className={refreshing ? "spin" : ""}>
+            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+
+      {activeTasks.length > 0 ? (
+        <div className="card-list" style={{ marginBottom: 32 }}>
+          {activeTasks.map((task) => (
+            <div key={task.id} className="card active-task-card">
+              <div className="card-header">
+                <div className="card-title-row">
+                  <div className="active-task-indicator" />
+                  <h3>{task.title}</h3>
+                  {task.projectName && (
+                    <span className="source-badge clawhub">{task.projectName}</span>
+                  )}
+                </div>
+                <span className="active-task-elapsed">{elapsed(task.startedAt)}</span>
+              </div>
+              <div className="card-body">
+                <div className="card-detail">
+                  <strong>Status:</strong> <span className="active-task-status">{task.status}</span>
+                </div>
+                {task.toolCalls.length > 0 && (
+                  <div className="card-detail">
+                    <strong>Tools used:</strong>{" "}
+                    <span className="active-task-tools">
+                      {task.toolCalls.map((t, i) => (
+                        <code key={i}>{t}</code>
+                      ))}
+                    </span>
+                  </div>
+                )}
+                <div className="card-detail">
+                  <strong>Started:</strong> {new Date(task.startedAt).toLocaleTimeString()}
+                  {" · "}
+                  <strong>Last update:</strong> {timeAgo(task.lastUpdate)}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state" style={{ marginBottom: 32, padding: "24px 0" }}>
+          <p style={{ color: "var(--text-tertiary)", fontSize: 13 }}>No agent tasks running</p>
+        </div>
+      )}
+
+      {/* ─── Scheduled Tasks ─── */}
       <div className="page-header">
         <h1>Scheduled Tasks</h1>
         <button className="btn btn-primary" onClick={() => setShowForm(true)}>New task</button>

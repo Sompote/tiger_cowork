@@ -7,6 +7,25 @@ import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
 
+// ─── Active Agent Task Tracking ───
+export interface ActiveTask {
+  id: string;
+  sessionId: string;
+  projectId?: string;
+  projectName?: string;
+  title: string;
+  status: string;
+  toolCalls: string[];
+  startedAt: string;
+  lastUpdate: string;
+}
+
+const activeTasks = new Map<string, ActiveTask>();
+
+export function getActiveTasks(): ActiveTask[] {
+  return Array.from(activeTasks.values());
+}
+
 function buildSystemPrompt(): string {
   // Gather installed clawhub skills
   const skillsDir = path.resolve("Tiger_bot/skills");
@@ -66,9 +85,31 @@ Rules:
 - MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}`;
 }
 
+// Store io reference for broadcasting status to all connected clients
+let ioRef: Server | null = null;
+
+// Broadcast status to ALL connected sockets (so reconnected clients get updates)
+function broadcastStatus(data: Record<string, any>) {
+  if (ioRef) ioRef.emit("chat:status", data);
+}
+
 export function setupSocket(io: Server): void {
+  ioRef = io;
+
   io.on("connection", (socket: Socket) => {
     console.log("Client connected:", socket.id);
+
+    // Send active tasks to newly connected client so they can restore progress state
+    const active = getActiveTasks();
+    if (active.length > 0) {
+      for (const task of active) {
+        socket.emit("chat:status", {
+          sessionId: task.sessionId,
+          status: task.status.startsWith("Running:") ? "tool_call" : "thinking",
+          tool: task.status.startsWith("Running:") ? task.status.replace("Running: ", "") : undefined,
+        });
+      }
+    }
 
     socket.on("chat:send", async (data: { sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
       const { sessionId, message, images } = data;
@@ -99,7 +140,7 @@ export function setupSocket(io: Server): void {
       if (pythonMatch) {
         const settings = getSettings();
         const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-        socket.emit("chat:status", { status: "running_python" });
+        broadcastStatus({ sessionId, status: "running_python" });
         const result = await runPython(pythonMatch[1], sandboxDir);
         const resultMsg = [
           result.stdout && `Output:\n\`\`\`\n${result.stdout}\`\`\``,
@@ -177,9 +218,22 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         (chatMessages[lastIdx] as any).content = contentParts;
       }
 
-      socket.emit("chat:status", { status: "thinking" });
+      broadcastStatus({ sessionId, status: "thinking" });
       const toolsUsed: string[] = [];
       const outputFiles: string[] = [];
+
+      // Track active task
+      const taskId = uuid();
+      const activeTask: ActiveTask = {
+        id: taskId,
+        sessionId,
+        title: message.slice(0, 80),
+        status: "Thinking...",
+        toolCalls: [],
+        startedAt: new Date().toISOString(),
+        lastUpdate: new Date().toISOString(),
+      };
+      activeTasks.set(taskId, activeTask);
 
       try {
         const result = await callTigerBotWithTools(
@@ -188,11 +242,17 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           // onToolCall — show status only (no chunks)
           (name, args) => {
             toolsUsed.push(name);
-            socket.emit("chat:status", { status: "tool_call", tool: name, args });
+            broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            // Update active task
+            activeTask.status = `Running: ${name}`;
+            activeTask.toolCalls.push(name);
+            activeTask.lastUpdate = new Date().toISOString();
           },
           // onToolResult — collect output files, show status only
           (name, toolResult) => {
-            socket.emit("chat:status", { status: "tool_result", tool: name });
+            broadcastStatus({ sessionId, status: "tool_result", tool: name });
+            activeTask.status = `${name} done, thinking...`;
+            activeTask.lastUpdate = new Date().toISOString();
             if (toolResult?.outputFiles) {
               outputFiles.push(...toolResult.outputFiles);
             }
@@ -242,6 +302,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         }
+      } finally {
+        activeTasks.delete(taskId);
       }
     });
 
@@ -369,18 +431,38 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         (chatMessages[lastIdx] as any).content = contentParts;
       }
 
-      socket.emit("chat:status", { status: "thinking" });
+      broadcastStatus({ sessionId, status: "thinking" });
       const outputFiles: string[] = [];
+
+      // Track active task for project chat
+      const taskId = uuid();
+      const activeTask: ActiveTask = {
+        id: taskId,
+        sessionId,
+        projectId,
+        projectName: project.name,
+        title: message.slice(0, 80),
+        status: "Thinking...",
+        toolCalls: [],
+        startedAt: new Date().toISOString(),
+        lastUpdate: new Date().toISOString(),
+      };
+      activeTasks.set(taskId, activeTask);
 
       try {
         const result = await callTigerBotWithTools(
           chatMessages,
           projectPrompt,
           (name, args) => {
-            socket.emit("chat:status", { status: "tool_call", tool: name, args });
+            broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            activeTask.status = `Running: ${name}`;
+            activeTask.toolCalls.push(name);
+            activeTask.lastUpdate = new Date().toISOString();
           },
           (name, toolResult) => {
-            socket.emit("chat:status", { status: "tool_result", tool: name });
+            broadcastStatus({ sessionId, status: "tool_result", tool: name });
+            activeTask.status = `${name} done, thinking...`;
+            activeTask.lastUpdate = new Date().toISOString();
             if (toolResult?.outputFiles) outputFiles.push(...toolResult.outputFiles);
           }
         );
@@ -423,6 +505,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: errMsg, done: true });
         }
+      } finally {
+        activeTasks.delete(taskId);
       }
     });
 

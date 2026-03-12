@@ -1,5 +1,10 @@
 import { Router } from "express";
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
 import { getSettings } from "../services/data";
+
+const execAsync = promisify(exec);
 
 export const toolsRouter = Router();
 
@@ -14,21 +19,10 @@ toolsRouter.post("/web-search", async (req, res) => {
   }
 
   try {
-    // Support multiple search engines
     const engine = settings.webSearchEngine || "duckduckgo";
     let results: any[] = [];
 
-    if (engine === "duckduckgo") {
-      const response = await fetch(
-        `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`
-      );
-      const data = await response.json();
-      results = (data.RelatedTopics || []).slice(0, 5).map((t: any) => ({
-        title: t.Text?.slice(0, 80),
-        url: t.FirstURL,
-        snippet: t.Text,
-      }));
-    } else if (engine === "google" && settings.webSearchApiKey) {
+    if (engine === "google" && settings.webSearchApiKey) {
       const cx = settings.googleSearchCx || "";
       const response = await fetch(
         `https://www.googleapis.com/customsearch/v1?key=${settings.webSearchApiKey}&cx=${cx}&q=${encodeURIComponent(query)}`
@@ -38,6 +32,31 @@ toolsRouter.post("/web-search", async (req, res) => {
         title: item.title,
         url: item.link,
         snippet: item.snippet,
+      }));
+    } else {
+      // DuckDuckGo via Python library (HTTP API is blocked by bot detection)
+      const safeQuery = query.replace(/'/g, "\\'");
+      const pyScript = [
+        "import json",
+        "try:",
+        "    from ddgs import DDGS",
+        `    r = list(DDGS().text('${safeQuery}', max_results=5))`,
+        "    print(json.dumps(r))",
+        "except ImportError:",
+        "    from duckduckgo_search import DDGS",
+        "    with DDGS() as ddgs:",
+        `        r = list(ddgs.text('${safeQuery}', max_results=5))`,
+        "        print(json.dumps(r))",
+      ].join("\n");
+      const tmpFile = `/tmp/ddg_search_${Date.now()}.py`;
+      fs.writeFileSync(tmpFile, pyScript);
+      const { stdout } = await execAsync(`python3 ${tmpFile}`, { timeout: 30000 });
+      try { fs.unlinkSync(tmpFile); } catch {}
+      const ddgResults = JSON.parse(stdout.trim());
+      results = ddgResults.map((r: any) => ({
+        title: r.title || "",
+        url: r.href || r.link || "",
+        snippet: r.body || r.snippet || "",
       }));
     }
 

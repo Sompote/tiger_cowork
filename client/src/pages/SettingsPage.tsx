@@ -9,6 +9,13 @@ interface McpStatus {
   tools: string[];
 }
 
+interface FileToken {
+  id: string;
+  name: string;
+  token: string;
+  createdAt: string;
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<any>({});
   const [saved, setSaved] = useState(false);
@@ -17,10 +24,15 @@ export default function SettingsPage() {
   const [mcpStatuses, setMcpStatuses] = useState<McpStatus[]>([]);
   const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
   const [mcpMessage, setMcpMessage] = useState<{ name: string; text: string; ok: boolean } | null>(null);
+  const [fileTokens, setFileTokens] = useState<FileToken[]>([]);
+  const [newTokenName, setNewTokenName] = useState("");
+  const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
+  const [showTokenId, setShowTokenId] = useState<string | null>(null);
 
   useEffect(() => {
     api.getSettings().then(setSettings);
     api.mcpStatus().then(setMcpStatuses).catch(() => {});
+    api.getFileTokens().then(setFileTokens).catch(() => {});
   }, []);
 
   const save = async () => {
@@ -88,6 +100,30 @@ export default function SettingsPage() {
     const result = await api.mcpReconnectAll();
     setMcpStatuses(result.status || []);
     setMcpConnecting(null);
+  };
+
+  const createFileToken = async () => {
+    const token = await api.createFileToken(newTokenName || `Token ${fileTokens.length + 1}`);
+    setFileTokens([...fileTokens, token]);
+    setNewTokenName("");
+  };
+
+  const deleteFileToken = async (id: string) => {
+    if (!confirm("Delete this file access token? Any links using it will stop working.")) return;
+    await api.deleteFileToken(id);
+    setFileTokens(fileTokens.filter((t) => t.id !== id));
+  };
+
+  const regenerateFileToken = async (id: string) => {
+    if (!confirm("Regenerate this token? The old token will stop working immediately.")) return;
+    const updated = await api.regenerateFileToken(id);
+    setFileTokens(fileTokens.map((t) => (t.id === id ? updated : t)));
+  };
+
+  const copyToken = (id: string, token: string) => {
+    navigator.clipboard.writeText(token);
+    setCopiedTokenId(id);
+    setTimeout(() => setCopiedTokenId(null), 2000);
   };
 
   const getMcpStatusFor = (name: string): McpStatus | undefined => {
@@ -261,6 +297,67 @@ export default function SettingsPage() {
               </div>
             </>
           )}
+        </section>
+
+        <section className="card">
+          <h3>File Access Tokens</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Tokens protect sandbox file access. Without a valid token, external users cannot view or download files via the port.
+            Share a token only with people you want to grant file access.
+          </p>
+
+          {fileTokens.map((ft) => (
+            <div key={ft.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ flex: 1 }}>
+                <strong>{ft.name}</strong>
+                <div style={{ fontFamily: "monospace", fontSize: 12, marginTop: 2, color: "var(--text-muted)" }}>
+                  {showTokenId === ft.id ? ft.token : ft.token.slice(0, 8) + "••••••••" + ft.token.slice(-4)}
+                </div>
+                <div style={{ fontSize: 11, opacity: 0.5 }}>
+                  Created: {new Date(ft.createdAt).toLocaleDateString()}
+                </div>
+              </div>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setShowTokenId(showTokenId === ft.id ? null : ft.id)}
+                title={showTokenId === ft.id ? "Hide" : "Show"}
+              >
+                {showTokenId === ft.id ? "Hide" : "Show"}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => copyToken(ft.id, ft.token)}
+              >
+                {copiedTokenId === ft.id ? "Copied!" : "Copy"}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => regenerateFileToken(ft.id)}
+              >
+                Regenerate
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={() => deleteFileToken(ft.id)}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+
+          {fileTokens.length === 0 && (
+            <div style={{ padding: "12px 0", opacity: 0.6 }}>No file tokens yet. Create one to secure file access.</div>
+          )}
+
+          <div className="inline-form" style={{ marginTop: 8 }}>
+            <input
+              placeholder="Token name (e.g. Team, Public)"
+              value={newTokenName}
+              onChange={(e) => setNewTokenName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && createFileToken()}
+            />
+            <button className="btn btn-primary" onClick={createFileToken}>Create Token</button>
+          </div>
         </section>
 
         <section className="card">

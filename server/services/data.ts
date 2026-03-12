@@ -78,8 +78,6 @@ export interface Project {
   name: string;
   description: string;
   workingFolder: string;
-  folderLocation: "sandbox" | "external";  // inside sandbox or external local path
-  folderAccess: "readonly" | "readwrite" | "full";  // access level (for external folders)
   memory: string;
   skills: string[];
   createdAt: string;
@@ -92,6 +90,36 @@ export function getProjects(): Project[] {
 
 export function saveProjects(projects: Project[]): void {
   writeJSON("projects.json", projects);
+}
+
+// File Access Tokens
+export interface FileToken {
+  id: string;
+  name: string;
+  token: string;
+  createdAt: string;
+}
+
+export function getFileTokens(): FileToken[] {
+  return readJSON("file_tokens.json");
+}
+
+export function saveFileTokens(tokens: FileToken[]): void {
+  writeJSON("file_tokens.json", tokens);
+}
+
+export function generateToken(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let token = "";
+  for (let i = 0; i < 48; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+}
+
+export function isValidFileToken(token: string): boolean {
+  const tokens = getFileTokens();
+  return tokens.some((t) => t.token === token);
 }
 
 // Skills

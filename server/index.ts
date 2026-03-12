@@ -17,6 +17,7 @@ import { clawhubRouter } from "./routes/clawhub";
 import { projectsRouter } from "./routes/projects";
 import { setupSocket } from "./services/socket";
 import { initMcpServers } from "./services/mcp";
+import { getFileTokens, saveFileTokens, generateToken, isValidFileToken } from "./services/data";
 
 dotenv.config();
 
@@ -38,7 +39,7 @@ const DATA_DIR = path.resolve("data");
 });
 
 // Initialize data files
-const dataFiles = ["chat_history.json", "tasks.json", "settings.json", "skills.json", "projects.json"];
+const dataFiles = ["chat_history.json", "tasks.json", "settings.json", "skills.json", "projects.json", "file_tokens.json"];
 dataFiles.forEach((file) => {
   const fp = path.join(DATA_DIR, file);
   if (!fs.existsSync(fp)) {
@@ -48,6 +49,21 @@ dataFiles.forEach((file) => {
     fs.writeFileSync(fp, initial);
   }
 });
+
+// Auto-generate a default file access token if none exist
+{
+  const tokens = getFileTokens();
+  if (tokens.length === 0) {
+    const defaultToken = {
+      id: Date.now().toString(36),
+      name: "Default",
+      token: generateToken(),
+      createdAt: new Date().toISOString(),
+    };
+    saveFileTokens([defaultToken]);
+    console.log(`[Security] Auto-generated file access token: ${defaultToken.token}`);
+  }
+}
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -72,8 +88,10 @@ app.post("/api/auth/verify", (req, res) => {
 app.use("/api", (req, res, next) => {
   if (req.path === "/auth/verify") return next();
   if (!ACCESS_TOKEN) return next();
-  const token = req.headers.authorization?.replace("Bearer ", "") || req.query.token;
+  const token = req.headers.authorization?.replace("Bearer ", "") || (req.query.token as string);
   if (token === ACCESS_TOKEN) return next();
+  // Allow file token for /files routes
+  if (req.path.startsWith("/files") && token && isValidFileToken(token)) return next();
   return res.status(401).json({ error: "Unauthorized — invalid or missing access token" });
 });
 
@@ -88,8 +106,17 @@ app.use("/api/tools", toolsRouter);
 app.use("/api/clawhub", clawhubRouter);
 app.use("/api/projects", projectsRouter);
 
-// Serve sandbox files for preview
-app.use("/sandbox", express.static(SANDBOX_DIR));
+// Serve sandbox files for preview — protected by file token or access token
+app.use("/sandbox", (req, res, next) => {
+  const fileToken = (req.query.token as string) || req.headers.authorization?.replace("Bearer ", "");
+  // Allow if valid file token
+  if (fileToken && isValidFileToken(fileToken)) return next();
+  // Also allow if valid access token (for authenticated users)
+  if (ACCESS_TOKEN && fileToken === ACCESS_TOKEN) return next();
+  // If no access token configured AND no file tokens, allow (backwards compat)
+  if (!ACCESS_TOKEN && getFileTokens().length === 0) return next();
+  return res.status(401).json({ error: "Unauthorized — invalid or missing file access token" });
+}, express.static(SANDBOX_DIR));
 
 // Socket.io access token auth
 if (ACCESS_TOKEN) {

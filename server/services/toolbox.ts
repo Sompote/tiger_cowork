@@ -3,46 +3,9 @@ import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { runPython } from "./python";
-import { getSettings, getProjects } from "./data";
+import { getSettings } from "./data";
 import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
 
-// Check if a path is inside a project's working folder and return its access level
-// Sandbox projects always have full access — only external folders have restrictions
-function getProjectAccessForPath(filePath: string): { inProject: boolean; access: "readonly" | "readwrite" | "full"; projectName?: string } {
-  const resolved = path.resolve(filePath);
-  const projects = getProjects();
-  for (const p of projects) {
-    if (!p.workingFolder) continue;
-    const projectDir = path.resolve(p.workingFolder);
-    if (resolved === projectDir || resolved.startsWith(projectDir + path.sep)) {
-      // Sandbox folders always get full access
-      if (p.folderLocation !== "external") {
-        return { inProject: true, access: "full", projectName: p.name };
-      }
-      return { inProject: true, access: p.folderAccess || "readwrite", projectName: p.name };
-    }
-  }
-  return { inProject: false, access: "readwrite" };
-}
-
-// Check if write is allowed for a path (respects project folderAccess)
-function assertWriteAccess(filePath: string): void {
-  const { inProject, access, projectName } = getProjectAccessForPath(filePath);
-  if (inProject && access === "readonly") {
-    throw new Error(`Write denied: project "${projectName}" working folder is set to read-only access`);
-  }
-}
-
-// Check if shell/exec is allowed for a path (only "full" access allows shell)
-function assertFullAccess(dirPath: string): void {
-  const { inProject, access, projectName } = getProjectAccessForPath(dirPath);
-  if (inProject && access === "readonly") {
-    throw new Error(`Shell access denied: project "${projectName}" working folder is set to read-only access`);
-  }
-  if (inProject && access === "readwrite") {
-    throw new Error(`Shell/exec access denied: project "${projectName}" working folder is set to read-write only (no exec). Change to "full" access in project settings.`);
-  }
-}
 
 const execAsync = promisify(exec);
 
@@ -261,40 +224,55 @@ async function webSearch(args: { query: string }): Promise<any> {
   const query = args.query;
   const results: any[] = [];
 
-  // Try DuckDuckGo Instant Answer API
+  // Primary: DuckDuckGo Python library (reliable, bypasses bot detection)
   try {
-    const ddgRes = await fetch(
-      `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`
-    );
-    const ddg = await ddgRes.json();
-
-    if (ddg.Abstract) {
-      results.push({ source: "abstract", title: ddg.Heading, text: ddg.Abstract, url: ddg.AbstractURL });
-    }
-    for (const topic of (ddg.RelatedTopics || []).slice(0, 8)) {
-      if (topic.Text) {
-        results.push({ source: "related", text: topic.Text, url: topic.FirstURL });
-      }
-    }
-  } catch {}
-
-  // Also try DuckDuckGo HTML search for better results
-  try {
-    const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-      headers: { "User-Agent": "TigerCowork/1.0 (Web Search Bot)" },
-    });
-    const html = await res.text();
-    // Extract result links and snippets
-    const resultBlocks = [...html.matchAll(/<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)];
-    for (const m of resultBlocks.slice(0, 8)) {
+    const safeQuery = query.replace(/'/g, "\\'");
+    const pyScript = [
+      "import json",
+      "try:",
+      "    from ddgs import DDGS",
+      `    r = list(DDGS().text('${safeQuery}', max_results=8))`,
+      "    print(json.dumps(r))",
+      "except ImportError:",
+      "    from duckduckgo_search import DDGS",
+      "    with DDGS() as ddgs:",
+      `        r = list(ddgs.text('${safeQuery}', max_results=8))`,
+      "        print(json.dumps(r))",
+    ].join("\n");
+    const tmpFile = `/tmp/ddg_search_${Date.now()}.py`;
+    fs.writeFileSync(tmpFile, pyScript);
+    const { stdout } = await execAsync(`python3 ${tmpFile}`, { timeout: 30000 });
+    try { fs.unlinkSync(tmpFile); } catch {}
+    const ddgResults = JSON.parse(stdout.trim());
+    for (const r of ddgResults) {
       results.push({
         source: "web",
-        url: m[1],
-        title: m[2].replace(/<[^>]+>/g, "").trim(),
-        text: m[3].replace(/<[^>]+>/g, "").trim(),
+        title: r.title || "",
+        url: r.href || r.link || "",
+        text: r.body || r.snippet || "",
       });
     }
-  } catch {}
+  } catch (err: any) {
+    console.error("[webSearch] DuckDuckGo Python failed:", err.message);
+  }
+
+  // Fallback: DuckDuckGo Instant Answer API (for quick facts/definitions)
+  if (results.length === 0) {
+    try {
+      const ddgRes = await fetch(
+        `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`
+      );
+      const ddg = await ddgRes.json();
+      if (ddg.Abstract) {
+        results.push({ source: "abstract", title: ddg.Heading, text: ddg.Abstract, url: ddg.AbstractURL });
+      }
+      for (const topic of (ddg.RelatedTopics || []).slice(0, 5)) {
+        if (topic.Text) {
+          results.push({ source: "related", text: topic.Text, url: topic.FirstURL });
+        }
+      }
+    } catch {}
+  }
 
   // If Google is configured, also try Google
   if (settings.webSearchEngine === "google" && settings.webSearchApiKey) {
@@ -452,8 +430,6 @@ async function runShell(args: { command?: string; cmd?: string; cwd?: string }):
   if (!command) return { ok: false, error: "No command provided" };
   const settings = getSettings();
   const cwd = args.cwd || settings.sandboxDir || process.cwd();
-  // Check project access - shell requires "full" access
-  try { assertFullAccess(cwd); } catch (err: any) { return { ok: false, error: err.message }; }
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd,
@@ -480,8 +456,6 @@ function writeFileTool(args: { path: string; content: string; append?: boolean }
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
   const outputDir = path.join(sandboxDir, "output_file");
   const target = path.resolve(outputDir, args.path);
-  // Check project access before writing
-  assertWriteAccess(target);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   if (args.append) {
     fs.appendFileSync(target, args.content, "utf8");

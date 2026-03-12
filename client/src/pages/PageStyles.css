@@ -483,6 +483,63 @@
   margin-bottom: 4px;
 }
 
+/* ─── Active Agent Tasks ─── */
+.active-task-card {
+  border-left: 3px solid var(--accent);
+}
+
+.active-task-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+.active-task-elapsed {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.active-task-status {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.active-task-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.active-task-tools code {
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.spin-btn {
+  opacity: 0.7;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
 /* ─── Mobile ─── */
 @media (max-width: 768px) {
   .page {

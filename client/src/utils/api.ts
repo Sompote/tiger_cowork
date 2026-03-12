@@ -30,6 +30,16 @@ async function request(path: string, options?: RequestInit) {
   return res.json();
 }
 
+// Build a sandbox URL with the access token for file serving
+export function sandboxUrl(filePath: string, cacheBust = false): string {
+  const token = getAccessToken();
+  const params = new URLSearchParams();
+  if (token) params.set("token", token);
+  if (cacheBust) params.set("t", Date.now().toString());
+  const qs = params.toString();
+  return `/sandbox/${filePath}${qs ? `?${qs}` : ""}`;
+}
+
 export const api = {
   // Chat
   getSessions: () => request("/chat/sessions"),
@@ -67,6 +77,7 @@ export const api = {
 
   // Tasks
   getTasks: () => request("/tasks"),
+  getActiveTasks: () => request("/tasks/active"),
   createTask: (data: any) => request("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: any) => request(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteTask: (id: string) => request(`/tasks/${id}`, { method: "DELETE" }),
@@ -117,8 +128,6 @@ export const api = {
   getProjectMemory: (id: string) => request(`/projects/${id}/memory`),
   saveProjectMemory: (id: string, content: string) => request(`/projects/${id}/memory`, { method: "PUT", body: JSON.stringify({ content }) }),
   getProjectFiles: (id: string, path?: string) => request(`/projects/${id}/files?path=${encodeURIComponent(path || "")}`),
-  browseFolders: (path?: string) => request(`/projects/browse/folders?path=${encodeURIComponent(path || "/")}`),
-  getDockerMounts: () => request("/projects/docker/mounts"),
 
   // Settings
   getSettings: () => request("/settings"),
@@ -127,6 +136,12 @@ export const api = {
 
   // Tools
   webSearch: (query: string) => request("/tools/web-search", { method: "POST", body: JSON.stringify({ query }) }),
+
+  // File Access Tokens
+  getFileTokens: () => request("/settings/file-tokens"),
+  createFileToken: (name: string) => request("/settings/file-tokens", { method: "POST", body: JSON.stringify({ name }) }),
+  deleteFileToken: (id: string) => request(`/settings/file-tokens/${id}`, { method: "DELETE" }),
+  regenerateFileToken: (id: string) => request(`/settings/file-tokens/${id}/regenerate`, { method: "POST" }),
 
   // MCP
   mcpStatus: () => request("/settings/mcp/status"),

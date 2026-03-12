@@ -11,35 +11,6 @@ projectsRouter.get("/", (_req, res) => {
   res.json(getProjects());
 });
 
-// Generate Docker volume mount configuration for external project folders
-projectsRouter.get("/docker/mounts", (_req, res) => {
-  const projects = getProjects();
-  const mounts = projects
-    .filter((p) => p.workingFolder && p.folderLocation === "external")
-    .map((p) => {
-      const containerPath = `/mnt/projects/${p.id}`;
-      const accessFlag = p.folderAccess === "readonly" ? "ro" : "rw";
-      return {
-        projectId: p.id,
-        projectName: p.name,
-        hostPath: p.workingFolder,
-        containerPath,
-        access: p.folderAccess || "readwrite",
-        volumeFlag: `${p.workingFolder}:${containerPath}:${accessFlag}`,
-      };
-    });
-
-  const volumeArgs = mounts.map((m) => `-v ${m.volumeFlag}`).join(" \\\n  ");
-  const dockerRun = `docker run -p 3001:3001 \\\n  ${volumeArgs} \\\n  cowork`;
-
-  const composeVolumes = mounts.map((m) => {
-    const mode = m.access === "readonly" ? "ro" : "rw";
-    return `      - ${m.hostPath}:${m.containerPath}:${mode}`;
-  }).join("\n");
-
-  res.json({ mounts, dockerRun, composeVolumes });
-});
-
 // Get single project
 projectsRouter.get("/:id", (req, res) => {
   const projects = getProjects();
@@ -50,14 +21,13 @@ projectsRouter.get("/:id", (req, res) => {
 
 // Create project
 projectsRouter.post("/", (req, res) => {
-  const { name, description, workingFolder, folderLocation, folderAccess, skills } = req.body;
+  const { name, description, workingFolder, skills } = req.body;
   const projects = getProjects();
   const settings = getSettings();
 
-  // Resolve working folder path based on location
+  // Resolve working folder path relative to sandbox
   let resolvedFolder = workingFolder || "";
-  const loc = folderLocation || "sandbox";
-  if (loc === "sandbox" && resolvedFolder && !path.isAbsolute(resolvedFolder)) {
+  if (resolvedFolder && !path.isAbsolute(resolvedFolder)) {
     const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
     resolvedFolder = path.join(sandboxDir, resolvedFolder);
   }
@@ -67,8 +37,6 @@ projectsRouter.post("/", (req, res) => {
     name: name || "Untitled Project",
     description: description || "",
     workingFolder: resolvedFolder,
-    folderLocation: loc,
-    folderAccess: loc === "sandbox" ? "full" : (folderAccess || "readwrite"),
     memory: "",
     skills: skills || [],
     createdAt: new Date().toISOString(),
@@ -92,6 +60,9 @@ projectsRouter.patch("/:id", (req, res) => {
   if (idx === -1) return res.status(404).json({ error: "Project not found" });
 
   const updates = req.body;
+  // Remove legacy fields if present
+  delete updates.folderLocation;
+  delete updates.folderAccess;
   projects[idx] = { ...projects[idx], ...updates, updatedAt: new Date().toISOString() };
   saveProjects(projects);
   res.json(projects[idx]);
@@ -157,34 +128,6 @@ projectsRouter.put("/:id/memory", (req, res) => {
   projects[idx].updatedAt = new Date().toISOString();
   saveProjects(projects);
   res.json({ ok: true });
-});
-
-// Browse filesystem for folder picker (absolute paths)
-projectsRouter.get("/browse/folders", (_req, res) => {
-  const browsePath = (_req.query.path as string) || "/";
-  try {
-    if (!fs.existsSync(browsePath)) return res.json({ folders: [], current: browsePath });
-    const stat = fs.statSync(browsePath);
-    if (!stat.isDirectory()) return res.json({ folders: [], current: browsePath });
-
-    const entries = fs.readdirSync(browsePath, { withFileTypes: true });
-    const folders = entries
-      .filter((e) => {
-        if (!e.isDirectory()) return false;
-        // Skip hidden/system dirs
-        if (e.name.startsWith(".") || e.name === "node_modules" || e.name === "__pycache__") return false;
-        return true;
-      })
-      .map((e) => ({
-        name: e.name,
-        path: path.join(browsePath, e.name),
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    res.json({ folders, current: browsePath, parent: path.dirname(browsePath) });
-  } catch (err: any) {
-    res.json({ folders: [], current: browsePath, error: err.message });
-  }
 });
 
 // List files in project working folder

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api } from "../utils/api";
+import { api, sandboxUrl } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import { Icon } from "../components/Layout";
 import ReactComponentRenderer from "../components/ReactComponentRenderer";
@@ -103,7 +103,7 @@ function OutputCanvas({ files }: { files: string[] }) {
           {images.map((f) => (
             <div key={f} className="canvas-image-wrap">
               <img
-                src={`/sandbox/${f}?t=${Date.now()}`}
+                src={sandboxUrl(f, true)}
                 alt={f}
                 className={`canvas-image ${expanded === f ? "expanded" : ""}`}
                 onClick={() => setExpanded(expanded === f ? null : f)}
@@ -129,7 +129,7 @@ function OutputCanvas({ files }: { files: string[] }) {
             </a>
           </div>
           <div className="canvas-react-body">
-            <ReactComponentRenderer src={`/sandbox/${f}?t=${Date.now()}`} />
+            <ReactComponentRenderer src={sandboxUrl(f, true)} />
           </div>
         </div>
       ))}
@@ -140,7 +140,7 @@ function OutputCanvas({ files }: { files: string[] }) {
           <div className="canvas-html-header">
             <span>{f.split("/").pop()}</span>
             <div style={{ display: "flex", gap: 6 }}>
-              <a href={`/sandbox/${f}`} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open in new tab">
+              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open in new tab">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </a>
               <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
@@ -148,7 +148,7 @@ function OutputCanvas({ files }: { files: string[] }) {
               </a>
             </div>
           </div>
-          <iframe src={`/sandbox/${f}?t=${Date.now()}`} className="canvas-html-iframe" title={f} />
+          <iframe src={sandboxUrl(f, true)} className="canvas-html-iframe" title={f} />
         </div>
       ))}
 
@@ -159,7 +159,7 @@ function OutputCanvas({ files }: { files: string[] }) {
             <div className="canvas-doc-icon pdf">PDF</div>
             <span>{f.split("/").pop()}</span>
             <div style={{ display: "flex", gap: 6 }}>
-              <a href={`/sandbox/${f}`} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
+              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </a>
               <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
@@ -239,6 +239,55 @@ export default function ChatPage() {
     }
   }, [activeSession]);
 
+  const toolLabels: Record<string, string> = {
+    web_search: "Searching the web",
+    fetch_url: "Fetching URL",
+    run_python: "Running Python",
+    run_react: "Running React",
+    run_shell: "Running command",
+    read_file: "Reading file",
+    write_file: "Writing file",
+    list_files: "Listing files",
+    list_skills: "Listing skills",
+    load_skill: "Loading skill",
+    clawhub_search: "Searching ClawHub",
+    clawhub_install: "Installing skill",
+  };
+
+  // Restore in-progress state on mount, reconnect, or session switch
+  useEffect(() => {
+    if (!activeSession) return;
+    let cancelled = false;
+
+    const checkActiveTasks = () => {
+      api.getActiveTasks().then((tasks: any[]) => {
+        if (cancelled) return;
+        const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
+        if (activeTask) {
+          setIsLoading(true);
+          if (activeTask.status.startsWith("Running:")) {
+            const tool = activeTask.status.replace("Running: ", "");
+            const label = toolLabels[tool] || tool;
+            setStatus(`${label}...`);
+          } else if (activeTask.status.includes("done, thinking")) {
+            setStatus(activeTask.status);
+          } else {
+            setStatus("Thinking...");
+          }
+        }
+      }).catch(() => {});
+    };
+
+    checkActiveTasks();
+
+    // Poll every 5 seconds to keep status fresh after reconnect
+    const interval = setInterval(() => {
+      if (!cancelled) checkActiveTasks();
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeSession, connected]);
+
   useEffect(() => {
     const unsub1 = onChunk((data) => {
       if (data.sessionId === activeSession) {
@@ -247,32 +296,27 @@ export default function ChatPage() {
     });
     const unsub2 = onResponse((data) => {
       if (data.sessionId === activeSession) {
-        setMessages((prev) => [...prev, { role: "assistant", content: data.content, timestamp: new Date().toISOString(), files: data.files }]);
+        // Refresh messages from server to get the complete history including the new response
+        api.getSession(activeSession).then((session: any) => {
+          setMessages(session.messages || []);
+        });
         setStreaming("");
         setIsLoading(false);
         setStatus("");
       }
     });
     const unsub3 = onStatus((data: any) => {
-      const toolLabels: Record<string, string> = {
-        web_search: "Searching the web",
-        fetch_url: "Fetching URL",
-        run_python: "Running Python",
-        run_react: "Running React",
-        run_shell: "Running command",
-        read_file: "Reading file",
-        write_file: "Writing file",
-        list_files: "Listing files",
-        list_skills: "Listing skills",
-        load_skill: "Loading skill",
-        clawhub_search: "Searching ClawHub",
-        clawhub_install: "Installing skill",
-      };
+      // Status events now include sessionId — only process for active session
+      if (data.sessionId && data.sessionId !== activeSession) return;
+
       if (data.status === "thinking") {
+        setIsLoading(true);
         setStatus("Thinking...");
       } else if (data.status === "running_python") {
+        setIsLoading(true);
         setStatus("Running Python...");
       } else if (data.status === "tool_call") {
+        setIsLoading(true);
         const label = toolLabels[data.tool] || data.tool;
         setStatus(`${label}...`);
       } else if (data.status === "tool_result") {
@@ -466,7 +510,7 @@ export default function ChatPage() {
                           {msg.attachments.map((f, j) => (
                             <div key={j} className="attachment-item">
                               {isImageFile(f.name) ? (
-                                <img src={`/sandbox/${f.path}`} alt={f.name} className="attachment-image-preview" />
+                                <img src={sandboxUrl(f.path)} alt={f.name} className="attachment-image-preview" />
                               ) : (
                                 <div className="attachment-icon">{getFileIcon(f.name)}</div>
                               )}
@@ -510,7 +554,7 @@ export default function ChatPage() {
               {attachedFiles.map((f, i) => (
                 <div key={i} className="attachment-preview-item">
                   {isImageFile(f.name) ? (
-                    <img src={`/sandbox/${f.path}`} alt={f.name} className="attachment-thumb" />
+                    <img src={sandboxUrl(f.path)} alt={f.name} className="attachment-thumb" />
                   ) : (
                     <div className="attachment-preview-icon">{getFileIcon(f.name)}</div>
                   )}

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getSettings, saveSettings } from "../services/data";
+import { getSettings, saveSettings, getFileTokens, saveFileTokens, generateToken } from "../services/data";
 import { connectServer, disconnectServer, getMcpStatus, initMcpServers } from "../services/mcp";
 
 export const settingsRouter = Router();
@@ -60,6 +60,43 @@ settingsRouter.post("/test-connection", async (req, res) => {
   } catch (err: any) {
     res.json({ success: false, message: err.message });
   }
+});
+
+// --- File Access Tokens ---
+
+settingsRouter.get("/file-tokens", (_req, res) => {
+  const tokens = getFileTokens();
+  res.json(tokens);
+});
+
+settingsRouter.post("/file-tokens", (req, res) => {
+  const { name } = req.body;
+  const tokens = getFileTokens();
+  const newToken = {
+    id: Date.now().toString(36),
+    name: name || `Token ${tokens.length + 1}`,
+    token: generateToken(),
+    createdAt: new Date().toISOString(),
+  };
+  tokens.push(newToken);
+  saveFileTokens(tokens);
+  res.json(newToken);
+});
+
+settingsRouter.delete("/file-tokens/:id", (req, res) => {
+  let tokens = getFileTokens();
+  tokens = tokens.filter((t) => t.id !== req.params.id);
+  saveFileTokens(tokens);
+  res.json({ success: true });
+});
+
+settingsRouter.post("/file-tokens/:id/regenerate", (req, res) => {
+  const tokens = getFileTokens();
+  const token = tokens.find((t) => t.id === req.params.id);
+  if (!token) return res.status(404).json({ error: "Token not found" });
+  token.token = generateToken();
+  saveFileTokens(tokens);
+  res.json(token);
 });
 
 // --- MCP Server Management ---

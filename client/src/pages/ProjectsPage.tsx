@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api } from "../utils/api";
+import { api, sandboxUrl } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import { Icon } from "../components/Layout";
 import ReactComponentRenderer from "../components/ReactComponentRenderer";
@@ -12,8 +12,6 @@ interface Project {
   name: string;
   description: string;
   workingFolder: string;
-  folderLocation: "sandbox" | "external";  // inside sandbox or external local path
-  folderAccess: "readonly" | "readwrite" | "full";
   memory: string;
   skills: string[];
   createdAt: string;
@@ -32,11 +30,6 @@ interface FileEntry {
   name: string;
   isDirectory: boolean;
   size: number;
-  path: string;
-}
-
-interface BrowseFolder {
-  name: string;
   path: string;
 }
 
@@ -110,7 +103,7 @@ function OutputCanvas({ files }: { files: string[] }) {
           {images.map((f) => (
             <div key={f} className="canvas-image-wrap">
               <img
-                src={`/sandbox/${f}?t=${Date.now()}`}
+                src={sandboxUrl(f, true)}
                 alt={f}
                 className={`canvas-image ${expanded === f ? "expanded" : ""}`}
                 onClick={() => setExpanded(expanded === f ? null : f)}
@@ -135,7 +128,7 @@ function OutputCanvas({ files }: { files: string[] }) {
             </a>
           </div>
           <div className="canvas-react-body">
-            <ReactComponentRenderer src={`/sandbox/${f}?t=${Date.now()}`} />
+            <ReactComponentRenderer src={sandboxUrl(f, true)} />
           </div>
         </div>
       ))}
@@ -145,7 +138,7 @@ function OutputCanvas({ files }: { files: string[] }) {
           <div className="canvas-html-header">
             <span>{f.split("/").pop()}</span>
             <div style={{ display: "flex", gap: 6 }}>
-              <a href={`/sandbox/${f}`} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open in new tab">
+              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open in new tab">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </a>
               <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
@@ -153,7 +146,7 @@ function OutputCanvas({ files }: { files: string[] }) {
               </a>
             </div>
           </div>
-          <iframe src={`/sandbox/${f}?t=${Date.now()}`} className="canvas-html-iframe" title={f} />
+          <iframe src={sandboxUrl(f, true)} className="canvas-html-iframe" title={f} />
         </div>
       ))}
 
@@ -163,7 +156,7 @@ function OutputCanvas({ files }: { files: string[] }) {
             <div className="canvas-doc-icon pdf">PDF</div>
             <span>{f.split("/").pop()}</span>
             <div style={{ display: "flex", gap: 6 }}>
-              <a href={`/sandbox/${f}`} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
+              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </a>
               <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
@@ -200,66 +193,6 @@ function OutputCanvas({ files }: { files: string[] }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-/* ─── Folder Picker Modal ─── */
-function FolderPicker({ value, onChange, onClose }: { value: string; onChange: (v: string) => void; onClose: () => void }) {
-  const [browsePath, setBrowsePath] = useState(value || "/root");
-  const [folders, setFolders] = useState<BrowseFolder[]>([]);
-  const [parent, setParent] = useState<string>("/");
-  const [manualPath, setManualPath] = useState(value || "");
-
-  useEffect(() => {
-    api.browseFolders(browsePath).then((data: any) => {
-      setFolders(data.folders || []);
-      setParent(data.parent || "/");
-      setManualPath(data.current || browsePath);
-    });
-  }, [browsePath]);
-
-  return (
-    <div className="folder-picker-overlay" onClick={onClose}>
-      <div className="folder-picker" onClick={(e) => e.stopPropagation()}>
-        <div className="folder-picker-header">
-          <h3>Select Working Folder</h3>
-          <button className="btn-icon btn-ghost" onClick={onClose}><Icon name="close" /></button>
-        </div>
-        <div className="folder-picker-path-row">
-          <input
-            value={manualPath}
-            onChange={(e) => setManualPath(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") setBrowsePath(manualPath); }}
-            placeholder="/path/to/folder"
-          />
-          <button className="btn btn-ghost btn-sm" onClick={() => setBrowsePath(manualPath)}>Go</button>
-        </div>
-        <div className="folder-picker-breadcrumb">
-          <button className="btn btn-ghost btn-sm" onClick={() => setBrowsePath(parent)} disabled={browsePath === "/"}>
-            &larr; Up
-          </button>
-          <span className="hint">{browsePath}</span>
-        </div>
-        <div className="folder-picker-list">
-          {folders.map((f) => (
-            <div key={f.path} className="folder-picker-item" onDoubleClick={() => setBrowsePath(f.path)} onClick={() => setManualPath(f.path)}>
-              <span className="file-icon">📁</span>
-              <span className="file-name">{f.name}</span>
-            </div>
-          ))}
-          {folders.length === 0 && <div className="projects-empty">No subfolders</div>}
-        </div>
-        <div className="folder-picker-footer">
-          <span className="hint">Double-click to enter folder, single-click to select</span>
-          <div className="folder-picker-actions">
-            <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
-            <button className="btn btn-primary btn-sm" onClick={() => { onChange(manualPath); onClose(); }}>
-              Select: {manualPath.split("/").pop() || manualPath}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -304,6 +237,45 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     }
   }, [activeSession]);
 
+  const toolLabels: Record<string, string> = {
+    web_search: "Searching the web", fetch_url: "Fetching URL", run_python: "Running Python",
+    run_react: "Running React", run_shell: "Running command", read_file: "Reading file",
+    write_file: "Writing file", list_files: "Listing files", list_skills: "Listing skills",
+    load_skill: "Loading skill", clawhub_search: "Searching ClawHub", clawhub_install: "Installing skill",
+  };
+
+  // Restore in-progress state on mount, reconnect, or session switch
+  useEffect(() => {
+    if (!activeSession) return;
+    let cancelled = false;
+
+    const checkActiveTasks = () => {
+      api.getActiveTasks().then((tasks: any[]) => {
+        if (cancelled) return;
+        const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
+        if (activeTask) {
+          setIsLoading(true);
+          if (activeTask.status.startsWith("Running:")) {
+            const tool = activeTask.status.replace("Running: ", "");
+            const label = toolLabels[tool] || tool;
+            setStatus(`${label}...`);
+          } else if (activeTask.status.includes("done, thinking")) {
+            setStatus(activeTask.status);
+          } else {
+            setStatus("Thinking...");
+          }
+        }
+      }).catch(() => {});
+    };
+
+    checkActiveTasks();
+    const interval = setInterval(() => {
+      if (!cancelled) checkActiveTasks();
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeSession, connected]);
+
   useEffect(() => {
     const unsub1 = onChunk((data) => {
       if (data.sessionId === activeSession) {
@@ -312,21 +284,19 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     });
     const unsub2 = onResponse((data) => {
       if (data.sessionId === activeSession) {
-        setMessages((prev) => [...prev, { role: "assistant", content: data.content, timestamp: new Date().toISOString(), files: data.files }]);
+        api.getSession(activeSession).then((session: any) => {
+          setMessages(session.messages || []);
+        });
         setStreaming("");
         setIsLoading(false);
         setStatus("");
       }
     });
     const unsub3 = onStatus((data: any) => {
-      const toolLabels: Record<string, string> = {
-        web_search: "Searching the web", fetch_url: "Fetching URL", run_python: "Running Python",
-        run_react: "Running React", run_shell: "Running command", read_file: "Reading file",
-        write_file: "Writing file", list_files: "Listing files", list_skills: "Listing skills",
-        load_skill: "Loading skill", clawhub_search: "Searching ClawHub", clawhub_install: "Installing skill",
-      };
-      if (data.status === "thinking") setStatus("Thinking...");
-      else if (data.status === "tool_call") setStatus(`${toolLabels[data.tool] || data.tool}...`);
+      if (data.sessionId && data.sessionId !== activeSession) return;
+
+      if (data.status === "thinking") { setIsLoading(true); setStatus("Thinking..."); }
+      else if (data.status === "tool_call") { setIsLoading(true); setStatus(`${toolLabels[data.tool] || data.tool}...`); }
       else if (data.status === "tool_result") setStatus(`${toolLabels[data.tool] || data.tool} done, thinking...`);
       else setStatus("");
     });
@@ -529,10 +499,7 @@ export default function ProjectsPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [newFolder, setNewFolder] = useState("");
-  const [newFolderLocation, setNewFolderLocation] = useState<"sandbox" | "external">("sandbox");
-  const [newFolderAccess, setNewFolderAccess] = useState<"readonly" | "readwrite" | "full">("readwrite");
   const [sandboxDir, setSandboxDir] = useState("");
-  const [showFolderPicker, setShowFolderPicker] = useState<"create" | "edit" | null>(null);
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryDirty, setMemoryDirty] = useState(false);
   const [memorySaving, setMemorySaving] = useState(false);
@@ -544,10 +511,6 @@ export default function ProjectsPage() {
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editFolder, setEditFolder] = useState("");
-  const [editFolderLocation, setEditFolderLocation] = useState<"sandbox" | "external">("sandbox");
-  const [editFolderAccess, setEditFolderAccess] = useState<"readonly" | "readwrite" | "full">("readwrite");
-  const [dockerInfo, setDockerInfo] = useState<any>(null);
-  const [showDocker, setShowDocker] = useState(false);
   const [mobileSidebar, setMobileSidebar] = useState(false);
 
   useEffect(() => {
@@ -581,18 +544,15 @@ export default function ProjectsPage() {
 
   const createProject = async () => {
     if (!newName.trim()) return;
-    const loc = newFolderLocation;
     const project = await api.createProject({
       name: newName.trim(),
       description: newDesc.trim(),
       workingFolder: newFolder.trim(),
-      folderLocation: loc,
-      folderAccess: loc === "sandbox" ? "full" : newFolderAccess,
     });
     setProjects((prev) => [...prev, project]);
     setActiveProject(project);
     setCreating(false);
-    setNewName(""); setNewDesc(""); setNewFolder(""); setNewFolderLocation("sandbox"); setNewFolderAccess("readwrite");
+    setNewName(""); setNewDesc(""); setNewFolder("");
   };
 
   const deleteProject = async (id: string, e: React.MouseEvent) => {
@@ -626,13 +586,10 @@ export default function ProjectsPage() {
 
   const saveEdit = async () => {
     if (!activeProject) return;
-    const loc = editFolderLocation;
     const project = await api.updateProject(activeProject.id, {
       name: editName.trim() || activeProject.name,
       description: editDesc.trim(),
       workingFolder: editFolder.trim(),
-      folderLocation: loc,
-      folderAccess: loc === "sandbox" ? "full" : editFolderAccess,
     });
     setActiveProject(project);
     setProjects((prev) => prev.map((p) => p.id === project.id ? project : p));
@@ -644,15 +601,7 @@ export default function ProjectsPage() {
     setEditName(activeProject.name);
     setEditDesc(activeProject.description);
     setEditFolder(activeProject.workingFolder);
-    setEditFolderLocation(activeProject.folderLocation || "sandbox");
-    setEditFolderAccess(activeProject.folderAccess || "readwrite");
     setEditing(true);
-  };
-
-  const loadDockerInfo = async () => {
-    const data = await api.getDockerMounts();
-    setDockerInfo(data);
-    setShowDocker(true);
   };
 
   const navigateFile = (entry: FileEntry) => {
@@ -683,18 +632,6 @@ export default function ProjectsPage() {
 
   return (
     <div className="projects-page">
-      {/* Folder Picker Modal */}
-      {showFolderPicker && (
-        <FolderPicker
-          value={showFolderPicker === "create" ? newFolder : editFolder}
-          onChange={(v) => {
-            if (showFolderPicker === "create") setNewFolder(v);
-            else setEditFolder(v);
-          }}
-          onClose={() => setShowFolderPicker(null)}
-        />
-      )}
-
       <div className={`projects-sidebar-backdrop ${mobileSidebar ? "visible" : ""}`} onClick={() => setMobileSidebar(false)} />
       <div className={`projects-sidebar ${mobileSidebar ? "mobile-open" : ""}`}>
         <button className="btn btn-primary new-project-btn" onClick={() => setCreating(true)}>
@@ -715,60 +652,14 @@ export default function ProjectsPage() {
               value={newDesc}
               onChange={(e) => setNewDesc(e.target.value)}
             />
-            <div className="folder-location-toggle">
-              <button className={`location-btn ${newFolderLocation === "sandbox" ? "active" : ""}`} onClick={() => { setNewFolderLocation("sandbox"); setNewFolder(""); }}>
-                In Sandbox
-              </button>
-              <button className={`location-btn ${newFolderLocation === "external" ? "active" : ""}`} onClick={() => { setNewFolderLocation("external"); setNewFolder(""); }}>
-                External Folder
-              </button>
+            <div>
+              <input
+                placeholder="Folder name (optional, e.g. my-project)"
+                value={newFolder}
+                onChange={(e) => setNewFolder(e.target.value)}
+              />
+              {sandboxDir && <span className="hint" style={{ fontSize: 10 }}>Path: {sandboxDir}/{newFolder || "..."}</span>}
             </div>
-            {newFolderLocation === "sandbox" ? (
-              <div>
-                <input
-                  placeholder="Folder name (optional, e.g. my-project)"
-                  value={newFolder}
-                  onChange={(e) => setNewFolder(e.target.value)}
-                />
-                {sandboxDir && <span className="hint" style={{ fontSize: 10 }}>Path: {sandboxDir}/{newFolder || "..."} — Full access</span>}
-              </div>
-            ) : (
-              <>
-                <div className="folder-input-row">
-                  <input
-                    placeholder="External folder path (e.g. /home/user/project)"
-                    value={newFolder}
-                    onChange={(e) => setNewFolder(e.target.value)}
-                    style={{ flex: 1 }}
-                  />
-                  <button className="btn btn-ghost btn-sm" onClick={() => setShowFolderPicker("create")} title="Browse">
-                    <Icon name="folder" />
-                  </button>
-                </div>
-                {newFolder && (
-                  <div className="folder-access-row">
-                    <label className="hint" style={{ fontSize: 11, marginBottom: 4 }}>Agent Access Level</label>
-                    <div className="access-options">
-                      {(["readonly", "readwrite", "full"] as const).map((level) => (
-                        <button
-                          key={level}
-                          className={`access-btn ${newFolderAccess === level ? "active" : ""}`}
-                          onClick={() => setNewFolderAccess(level)}
-                        >
-                          <span className="access-icon">{level === "readonly" ? "👁" : level === "readwrite" ? "📝" : "⚡"}</span>
-                          <span className="access-label">{level === "readonly" ? "Read Only" : level === "readwrite" ? "Read & Write" : "Full Access"}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <span className="hint" style={{ fontSize: 10, marginTop: 2 }}>
-                      {newFolderAccess === "readonly" ? "Agent can only read files. Docker: read-only mount" :
-                       newFolderAccess === "readwrite" ? "Agent can read and write files. Docker: read-write mount" :
-                       "Agent can read, write, and execute commands. Docker: read-write mount"}
-                    </span>
-                  </div>
-                )}
-              </>
-            )}
             <div className="project-create-actions">
               <button className="btn btn-primary btn-sm" onClick={createProject} disabled={!newName.trim()}>Create</button>
               <button className="btn btn-ghost btn-sm" onClick={() => setCreating(false)}>Cancel</button>
@@ -835,53 +726,9 @@ export default function ProjectsPage() {
                 </div>
                 <div className="form-group">
                   <label>Working Folder</label>
-                  <div className="folder-location-toggle">
-                    <button className={`location-btn ${editFolderLocation === "sandbox" ? "active" : ""}`} type="button" onClick={() => { setEditFolderLocation("sandbox"); setEditFolder(""); }}>
-                      In Sandbox
-                    </button>
-                    <button className={`location-btn ${editFolderLocation === "external" ? "active" : ""}`} type="button" onClick={() => { setEditFolderLocation("external"); setEditFolder(""); }}>
-                      External Folder
-                    </button>
-                  </div>
-                  {editFolderLocation === "sandbox" ? (
-                    <>
-                      <input value={editFolder} onChange={(e) => setEditFolder(e.target.value)} placeholder="Folder name (e.g. my-project)" />
-                      {sandboxDir && <span className="hint" style={{ fontSize: 10 }}>Path: {sandboxDir}/{editFolder || "..."} — Full access</span>}
-                    </>
-                  ) : (
-                    <>
-                      <div className="folder-input-row">
-                        <input value={editFolder} onChange={(e) => setEditFolder(e.target.value)} placeholder="/path/to/external/folder" style={{ flex: 1 }} />
-                        <button className="btn btn-ghost btn-sm" type="button" onClick={() => setShowFolderPicker("edit")} title="Browse">
-                          <Icon name="folder" />
-                        </button>
-                      </div>
-                    </>
-                  )}
+                  <input value={editFolder} onChange={(e) => setEditFolder(e.target.value)} placeholder="Folder name (e.g. my-project)" />
+                  {sandboxDir && <span className="hint" style={{ fontSize: 10 }}>Path: {sandboxDir}/{editFolder || "..."}</span>}
                 </div>
-                {editFolderLocation === "external" && editFolder && (
-                  <div className="form-group">
-                    <label>Agent Access Level</label>
-                    <div className="access-options">
-                      {(["readonly", "readwrite", "full"] as const).map((level) => (
-                        <button
-                          key={level}
-                          className={`access-btn ${editFolderAccess === level ? "active" : ""}`}
-                          onClick={() => setEditFolderAccess(level)}
-                          type="button"
-                        >
-                          <span className="access-icon">{level === "readonly" ? "👁" : level === "readwrite" ? "📝" : "⚡"}</span>
-                          <span className="access-label">{level === "readonly" ? "Read Only" : level === "readwrite" ? "Read & Write" : "Full Access"}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <span className="hint">
-                      {editFolderAccess === "readonly" ? "Agent can only read files. Docker: read-only mount (ro)" :
-                       editFolderAccess === "readwrite" ? "Agent can read and write files. Docker: read-write mount (rw)" :
-                       "Agent can read, write, and execute commands. Docker: read-write mount (rw)"}
-                    </span>
-                  </div>
-                )}
                 <div className="form-actions">
                   <button className="btn btn-primary btn-sm" onClick={saveEdit}>Save</button>
                   <button className="btn btn-ghost btn-sm" onClick={() => setEditing(false)}>Cancel</button>
@@ -912,19 +759,6 @@ export default function ProjectsPage() {
                         <span>{activeProject.workingFolder || "Not set"}</span>
                       </div>
                     </div>
-                    {activeProject.workingFolder && (
-                      <div className="overview-card">
-                        <div className="overview-card-icon" style={{ fontSize: 20 }}>
-                          {(activeProject.folderLocation || "sandbox") === "sandbox" ? "📦" :
-                           activeProject.folderAccess === "readonly" ? "👁" : activeProject.folderAccess === "full" ? "⚡" : "📝"}
-                        </div>
-                        <div className="overview-card-info">
-                          <strong>{(activeProject.folderLocation || "sandbox") === "sandbox" ? "Sandbox" : "External"}</strong>
-                          <span>{(activeProject.folderLocation || "sandbox") === "sandbox" ? "Full access" :
-                            activeProject.folderAccess === "readonly" ? "Read Only" : activeProject.folderAccess === "full" ? "Full Access" : "Read & Write"}</span>
-                        </div>
-                      </div>
-                    )}
                     <div className="overview-card" onClick={() => setTab("memory")}>
                       <div className="overview-card-icon"><Icon name="chat" /></div>
                       <div className="overview-card-info">
@@ -944,54 +778,6 @@ export default function ProjectsPage() {
                     <span>Created: {new Date(activeProject.createdAt).toLocaleDateString()}</span>
                     <span>Updated: {new Date(activeProject.updatedAt).toLocaleDateString()}</span>
                   </div>
-                  <div style={{ marginTop: 16 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={loadDockerInfo}>
-                      Docker Volume Mounts
-                    </button>
-                  </div>
-
-                  {showDocker && dockerInfo && (
-                    <div className="folder-picker-overlay" onClick={() => setShowDocker(false)}>
-                      <div className="folder-picker" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 700 }}>
-                        <div className="folder-picker-header">
-                          <h3>Docker Volume Mounts</h3>
-                          <button className="btn-icon btn-ghost" onClick={() => setShowDocker(false)}><Icon name="close" /></button>
-                        </div>
-                        <div style={{ padding: 16 }}>
-                          <p className="hint" style={{ marginBottom: 12 }}>
-                            Use these volume mounts to give Docker access to your project working folders.
-                          </p>
-                          {dockerInfo.mounts?.length > 0 ? (
-                            <>
-                              <div style={{ marginBottom: 16 }}>
-                                <strong style={{ fontSize: 13 }}>Project Mounts</strong>
-                                <div style={{ marginTop: 8 }}>
-                                  {dockerInfo.mounts.map((m: any) => (
-                                    <div key={m.projectId} style={{ padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 12 }}>
-                                      <div><strong>{m.projectName}</strong> — <span style={{ color: m.access === "readonly" ? "#ea8600" : m.access === "full" ? "#34a853" : "var(--accent)" }}>
-                                        {m.access === "readonly" ? "Read Only" : m.access === "full" ? "Full Access" : "Read & Write"}
-                                      </span></div>
-                                      <div style={{ opacity: 0.7, fontFamily: "monospace", marginTop: 2 }}>{m.hostPath} → {m.containerPath}</div>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                              <div style={{ marginBottom: 12 }}>
-                                <strong style={{ fontSize: 13 }}>Docker Run Command</strong>
-                                <pre style={{ background: "var(--bg-secondary)", padding: 12, borderRadius: 6, fontSize: 11, overflow: "auto", whiteSpace: "pre-wrap", marginTop: 6 }}>{dockerInfo.dockerRun}</pre>
-                              </div>
-                              <div>
-                                <strong style={{ fontSize: 13 }}>Docker Compose Volumes</strong>
-                                <pre style={{ background: "var(--bg-secondary)", padding: 12, borderRadius: 6, fontSize: 11, overflow: "auto", whiteSpace: "pre-wrap", marginTop: 6 }}>{"    volumes:\n" + dockerInfo.composeVolumes}</pre>
-                              </div>
-                            </>
-                          ) : (
-                            <p>No project working folders configured. Set a working folder in your projects to generate Docker mounts.</p>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
 

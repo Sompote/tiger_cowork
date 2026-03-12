@@ -2,11 +2,16 @@ import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { getTasks, saveTasks } from "../services/data";
 import { scheduleTask, stopTask } from "../services/scheduler";
+import { getActiveTasks } from "../services/socket";
 
 export const tasksRouter = Router();
 
 tasksRouter.get("/", (_req, res) => {
   res.json(getTasks());
+});
+
+tasksRouter.get("/active", (_req, res) => {
+  res.json(getActiveTasks());
 });
 
 tasksRouter.post("/", (req, res) => {
