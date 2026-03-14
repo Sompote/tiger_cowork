@@ -15,6 +15,7 @@ import { pythonRouter } from "./routes/python";
 import { toolsRouter } from "./routes/tools";
 import { clawhubRouter } from "./routes/clawhub";
 import { projectsRouter } from "./routes/projects";
+import { agentsRouter } from "./routes/agents";
 import { setupSocket } from "./services/socket";
 import { initMcpServers } from "./services/mcp";
 import { getFileTokens, saveFileTokens, generateToken, isValidFileToken } from "./services/data";
@@ -34,7 +35,7 @@ const SANDBOX_DIR = process.env.SANDBOX_DIR || path.resolve(".");
 const DATA_DIR = path.resolve("data");
 
 // Ensure directories exist
-[SANDBOX_DIR, DATA_DIR, path.resolve("skills"), path.join(SANDBOX_DIR, "output_file")].forEach((dir) => {
+[SANDBOX_DIR, DATA_DIR, path.resolve("skills"), path.join(SANDBOX_DIR, "output_file"), path.join(DATA_DIR, "agents")].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -105,6 +106,7 @@ app.use("/api/python", pythonRouter);
 app.use("/api/tools", toolsRouter);
 app.use("/api/clawhub", clawhubRouter);
 app.use("/api/projects", projectsRouter);
+app.use("/api/agents", agentsRouter);
 
 // Serve sandbox files for preview — protected by file token or access token
 app.use("/sandbox", (req, res, next) => {

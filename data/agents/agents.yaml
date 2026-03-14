@@ -1,0 +1,157 @@
+system:
+  name: Multi-Agent System
+  orchestration_mode: hierarchical
+  communication_protocol: structured_handoff
+  context_passing: full_chain
+agents:
+  - id: agent_1
+    name: Project manager
+    role: orchestrator
+    model: claude-sonnet-4-6
+    persona: 'You are a specialized agent based on: Project manager for civil engineering desing'
+    responsibilities:
+      - Analyze and process assigned tasks
+      - Report findings to the orchestrator
+      - Collaborate with peer agents when needed
+  - id: agent_2
+    name: design
+    role: worker
+    model: claude-sonnet-4-6
+    persona: 'You are a specialized agent based on: Design engineer, structural engineer'
+    responsibilities:
+      - Analyze and process assigned tasks
+      - Report findings to the orchestrator
+      - Collaborate with peer agents when needed
+  - id: agent_3
+    name: checker
+    role: checker
+    model: claude-sonnet-4-6
+    persona: 'You are a specialized agent based on: Design engineer, structural engineer'
+    responsibilities:
+      - 'You are a specialized agent based on: Design engineer, structural engineer'
+  - id: agent_4
+    name: Design 2
+    role: worker
+    model: claude-sonnet-4-6
+    persona: 'You are a specialized agent based on: Engineer checker'
+    responsibilities:
+      - Analyze and process assigned tasks
+      - Report findings to the orchestrator
+      - Collaborate with peer agents when needed
+  - id: agent_5
+    name: report engineer
+    role: reporter
+    model: claude-sonnet-4-6
+    persona: 'You are a specialized agent based on: agetn that expert in make a report for engineer'
+    responsibilities:
+      - Analyze and process assigned tasks
+      - Report findings to the orchestrator
+      - Collaborate with peer agents when needed
+workflow:
+  sequence:
+    - step: 1
+      agent: agent_1
+      action: Analyze and process assigned tasks
+      outputs_to:
+        - agent_2
+        - agent_4
+      communication:
+        enabled: true
+        protocols:
+          - tcp
+        participants:
+          - agent_1
+          - agent_2
+          - agent_4
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - agent_1
+          - agent_2
+          - agent_4
+        permitted_topics: []
+    - step: 2
+      agent: agent_2
+      action: Analyze and process assigned tasks
+      outputs_to:
+        - agent_3
+        - agent_4
+      communication:
+        enabled: true
+        protocols:
+          - tcp
+          - bus
+        participants:
+          - agent_2
+          - agent_3
+          - agent_4
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - agent_2
+          - agent_3
+          - agent_4
+        permitted_topics: []
+    - step: 3
+      agent: agent_3
+      action: 'You are a specialized agent based on: Design engineer, structural engineer'
+      outputs_to:
+        - agent_4
+        - agent_5
+      communication:
+        enabled: true
+        protocols:
+          - tcp
+        participants:
+          - agent_3
+          - agent_4
+          - agent_5
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - agent_3
+          - agent_4
+          - agent_5
+        permitted_topics: []
+    - step: 4
+      agent: agent_4
+      action: Analyze and process assigned tasks
+    - step: 5
+      agent: agent_5
+      action: Analyze and process assigned tasks
+connections:
+  - from: agent_1
+    to: agent_2
+    label: Analyze and process assigned t
+    protocol: tcp
+  - from: agent_1
+    to: agent_4
+    label: Analyze and process assigned t
+    protocol: tcp
+  - from: agent_2
+    to: agent_3
+    label: Analyze and process assigned t
+    protocol: tcp
+  - from: agent_2
+    to: agent_4
+    label: Analyze and process assigned t
+    protocol: bus
+  - from: agent_3
+    to: agent_4
+    label: You are a specialized agent ba
+    protocol: tcp
+  - from: agent_3
+    to: agent_5
+    label: connection
+    protocol: tcp
+communication:
+  format: structured_json_in_yaml_envelope
+  context_inheritance:
+    mode: cumulative
+    max_history_tokens: 8000

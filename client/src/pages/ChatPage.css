@@ -336,6 +336,24 @@
   50% { opacity: 0.5; }
 }
 
+/* ─── Sub-agent Progress in Chat ─── */
+.message-content blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 4px 12px;
+  margin: 4px 0;
+  background: var(--accent-light);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.message-content blockquote code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
 /* ─── Output Canvas (charts, reports, files) ─── */
 
 .output-canvas {
@@ -1169,4 +1187,52 @@
   .attachment-item {
     max-width: 100%;
   }
+}
+
+/* ─── Swarm Mode Tag ─── */
+
+.swarm-tag {
+  display: inline-block;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #000;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  margin: 8px 0;
+  animation: swarmPulse 2s ease-in-out infinite;
+}
+
+@keyframes swarmPulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(245, 158, 11, 0.4); }
+  50% { box-shadow: 0 0 16px rgba(245, 158, 11, 0.7); }
+}
+
+/* ─── Protocol Tags ─── */
+
+.proto-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.proto-tcp {
+  background: #4285f4;
+  color: #fff;
+}
+
+.proto-bus {
+  background: #34a853;
+  color: #fff;
+}
+
+.proto-queue {
+  background: #ea8600;
+  color: #fff;
 }

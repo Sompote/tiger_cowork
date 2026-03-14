@@ -1,5 +1,6 @@
 import { ReactNode, useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { api } from "../utils/api";
 import "./Layout.css";
 
 const NAV_ITEMS = [
@@ -45,8 +46,16 @@ function useIsMobile() {
 export default function Layout({ children }: { children: ReactNode }) {
   const isMobile = useIsMobile();
   const [sidebarOpen, setSidebarOpen] = useState(!isMobile);
+  const [swarmEnabled, setSwarmEnabled] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Check if sub-agent (swarm) mode is enabled
+  useEffect(() => {
+    api.getSettings().then((s: any) => {
+      setSwarmEnabled(!!s.subAgentEnabled);
+    }).catch(() => {});
+  }, [location.pathname]);
 
   // Close sidebar on mobile when route changes
   useEffect(() => {
@@ -67,6 +76,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         <div className="header-logo">
           <span className="logo-text">Tiger Cowork</span>
           <span className="logo-badge">AI</span>
+          {swarmEnabled && <span className="logo-swarm-tag">Swarm</span>}
         </div>
         <div className="header-spacer" />
       </header>

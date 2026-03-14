@@ -178,13 +178,9 @@ export async function callTigerBotWithTools(
       }
     }
 
-    // Execute each tool call
+    // Parse all tool calls first
+    const parsedToolCalls: Array<{ tc: any; fnName: string; fnArgs: any }> = [];
     for (const tc of toolCalls) {
-      // Check abort before each tool call
-      if (signal?.aborted) {
-        return { content: earlyContent || "Task was cancelled.", toolResults };
-      }
-
       const fnName = tc.function?.name || "";
       let fnArgs: any = {};
       const rawArgs = tc.function?.arguments || "{}";
@@ -215,7 +211,6 @@ export async function callTigerBotWithTools(
                 }
               }
               if (valueEnd > valueStart) {
-                // Unescape JSON string escapes (\n, \t, \", \\)
                 const codeValue = rawArgs.slice(valueStart, valueEnd)
                   .replace(/\\n/g, "\n")
                   .replace(/\\t/g, "\t")
@@ -234,8 +229,17 @@ export async function callTigerBotWithTools(
           }
         }
       }
+      parsedToolCalls.push({ tc, fnName, fnArgs });
+    }
 
-      // Track skill usage — if a skill is loaded, allow more tool calls
+    // Separate spawn_subagent calls (can run in parallel) from other tool calls (run sequentially)
+    const subagentCalls = parsedToolCalls.filter(p => p.fnName === "spawn_subagent");
+    const otherCalls = parsedToolCalls.filter(p => p.fnName !== "spawn_subagent");
+
+    // Helper to execute a single tool call and record result
+    const executeTool = async (parsed: { tc: any; fnName: string; fnArgs: any }) => {
+      const { tc, fnName, fnArgs } = parsed;
+
       if (fnName === "load_skill") usesSkill = true;
 
       console.log(`[Tool ${fnName}] args:`, Object.keys(fnArgs), fnArgs.code ? `code(${fnArgs.code.length})` : fnArgs.command || fnArgs.cmd || fnArgs.query || fnArgs.skill || fnArgs.path || "");
@@ -249,7 +253,6 @@ export async function callTigerBotWithTools(
         result = { ok: false, error: err.message };
       }
 
-      // Track consecutive errors — if tool keeps failing, stop
       if (result?.ok === false || result?.exitCode === 1) {
         consecutiveErrors++;
         console.log(`[Tool ${fnName}] Failed (${consecutiveErrors} consecutive errors):`, result?.error || result?.stderr || "");
@@ -261,33 +264,51 @@ export async function callTigerBotWithTools(
       toolResults.push({ tool: fnName, result });
       totalToolCalls++;
 
-      // Truncate large tool results to prevent context overflow
       let resultStr = JSON.stringify(result);
       const baseMaxLen = settings.agentToolResultMaxLen || 6000;
       const maxLen = fnName === "load_skill" ? Math.min(3000, baseMaxLen) : baseMaxLen;
       if (resultStr.length > maxLen) {
         resultStr = resultStr.slice(0, maxLen) + "\n...(truncated)";
       }
-      allMessages.push({
-        role: "tool",
-        content: resultStr,
-        tool_call_id: tc.id,
-      });
+      return { tc, resultStr };
+    };
 
-      // Check abort after tool completes
+    // Execute non-subagent tools sequentially first
+    for (const parsed of otherCalls) {
       if (signal?.aborted) {
         return { content: earlyContent || "Task was cancelled.", toolResults };
       }
+      const { tc, resultStr } = await executeTool(parsed);
+      allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
 
-      // Stop if too many consecutive errors (tool/command not available)
+      if (signal?.aborted) {
+        return { content: earlyContent || "Task was cancelled.", toolResults };
+      }
       const maxConsecutiveErrors = settings.agentMaxConsecutiveErrors || 3;
       if (consecutiveErrors >= maxConsecutiveErrors) {
         console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors. Breaking.`);
         break;
       }
-
-      // Hard stop at max tool calls
       if (totalToolCalls >= maxToolCalls) break;
+    }
+
+    // Execute spawn_subagent calls IN PARALLEL for speed
+    if (subagentCalls.length > 0 && totalToolCalls < maxToolCalls) {
+      if (signal?.aborted) {
+        return { content: earlyContent || "Task was cancelled.", toolResults };
+      }
+
+      console.log(`[ToolLoop] Running ${subagentCalls.length} sub-agent(s) in PARALLEL...`);
+
+      const subagentPromises = subagentCalls.map(parsed => executeTool(parsed));
+      const subagentResults = await Promise.all(subagentPromises);
+
+      // Append all sub-agent results to messages in order
+      for (const { tc, resultStr } of subagentResults) {
+        allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
+      }
+
+      console.log(`[ToolLoop] All ${subagentCalls.length} sub-agent(s) completed in parallel.`);
     }
 
     if (totalToolCalls >= maxToolCalls || consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3)) break;

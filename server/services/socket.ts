@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
-import { setSubagentStatusCallback, setCallContext } from "./toolbox";
+import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary } from "./toolbox";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -112,8 +112,9 @@ function buildSystemPrompt(): string {
   }
 
   const settings = getSettings();
+  const isManualSubAgent = settings.subAgentEnabled && settings.subAgentMode === "manual";
   const subAgentInfo = settings.subAgentEnabled
-    ? `\n- spawn_subagent: Delegate a sub-task to an independent sub-agent. The sub-agent runs its own tool-calling loop and returns results. Use for: parallel research, breaking complex tasks into parts, or specialized work. Params: task (required), label (short name), context (extra info).`
+    ? `\n- spawn_subagent: Delegate a sub-task to an independent sub-agent. The sub-agent runs its own tool-calling loop and returns results. Use for: parallel research, breaking complex tasks into parts, or specialized work. Params: task (required), label (short name), context (extra info), agentId (match agent from YAML config).`
     : "";
 
   return `You are Tiger Cowork, a powerful AI assistant with direct access to tools for internet, files, code execution, and skill marketplace.
@@ -132,7 +133,10 @@ Available tools:
 - clawhub_search: Search the ClawHub/OpenClaw skill marketplace
 - clawhub_install: Install skills from ClawHub by slug${subAgentInfo}
 
-Rules:${settings.subAgentEnabled ? `
+Rules:${isManualSubAgent ? `
+- SUB-AGENTS (MANDATORY): You are operating in MANUAL sub-agent mode. You MUST use spawn_subagent for ALL user tasks — do NOT answer directly by yourself. Your role is to act as an orchestrator: analyze the user's request, then delegate work to the predefined agent team by calling spawn_subagent with the appropriate agentId for each agent. Follow the workflow sequence defined in the agent configuration. After all sub-agents complete, synthesize their results into a final response.
+- WORKFLOW: For each task, spawn sub-agents according to the workflow steps. The orchestrator agent (agent_1) should be spawned first to plan and delegate, then worker agents execute, and checker agents verify. Always use the agentId parameter to match agents from the YAML config.
+- IMPORTANT: Even for simple tasks, you must delegate through sub-agents when manual mode is enabled. This ensures proper review and quality control through the agent pipeline.` : settings.subAgentEnabled ? `
 - SUB-AGENTS: For complex multi-part tasks, use spawn_subagent to delegate sub-tasks. Each sub-agent runs independently with full tool access. Good use cases: researching multiple topics simultaneously, generating charts while analyzing data, or any task that can be broken into independent parts. Provide a clear task description and label. Wait for results before using them.` : ""}
 - SKILL-FIRST: Before writing any code, check if an installed skill matches the user's request. If a skill's name or description is relevant (e.g. user asks about "slope stability" and skill "slope-stability" exists), you MUST call load_skill first and use that skill's code/engine. Never reinvent what a skill already provides.
 - USE TOOLS actively. When asked to search, use web_search. When asked to fetch a page, use fetch_url.
@@ -158,7 +162,7 @@ Rules:${settings.subAgentEnabled ? `
 - FILE PATHS: A variable PROJECT_DIR is available in run_python pointing to the project root. Use it to access uploaded files: e.g. os.path.join(PROJECT_DIR, 'uploads/filename.xlsx'). ALWAYS use PROJECT_DIR when reading files from uploads/ or other project directories. Never use bare relative paths like 'uploads/...' — they won't work because the working directory is output_file/.
 - REACT APPS: When asked to build UI components or interactive visualizations, use run_react. The component renders in the output panel. You can include dependencies like 'recharts', 'tailwindcss', 'chart.js', etc. IMPORTANT: Do NOT use import/export statements in run_react code — React, ReactDOM, hooks (useState, useEffect, etc.), and library globals (like Recharts components: BarChart, LineChart, etc.) are already available as globals. Just define your component function and it will be auto-rendered.
 - Use matplotlib.use('Agg') is already set automatically. Just import matplotlib.pyplot and save figures.
-- MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}`;
+- MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}${getManualAgentConfigSummary() || ""}`;
 }
 
 // Store io reference for broadcasting status to all connected clients
@@ -172,8 +176,42 @@ function broadcastStatus(data: Record<string, any>) {
 export function setupSocket(io: Server): void {
   ioRef = io;
 
-  // Wire up sub-agent status broadcasting
-  setSubagentStatusCallback((data) => broadcastStatus(data));
+  // Track whether swarm tag was already shown per session
+  const swarmTagShown = new Set<string>();
+
+  // Wire up sub-agent status broadcasting — emit both status AND chat chunks for live progress
+  setSubagentStatusCallback((data) => {
+    broadcastStatus(data);
+    // Stream sub-agent progress as chat chunks so user sees real-time updates in the chat
+    if (data.sessionId && ioRef) {
+      let progressText = "";
+
+      // Show swarm mode tag on first sub-agent spawn in this session
+      if (data.status === "subagent_spawn" && !swarmTagShown.has(data.sessionId)) {
+        swarmTagShown.add(data.sessionId);
+        progressText += `\n<div class="swarm-tag">🐝 SWARM MODE ACTIVE</div>\n\n`;
+      }
+
+      if (data.status === "subagent_spawn") {
+        progressText += `> **🔄 Sub-agent "${data.label}"** spawned (depth ${data.depth}) — _${(data.task || "").slice(0, 120)}_\n`;
+      } else if (data.status === "subagent_tool") {
+        // Tag protocol tool usage
+        if (data.tool?.startsWith("proto_")) {
+          const protoName = data.tool.replace("proto_", "").split("_")[0].toUpperCase();
+          progressText = `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> **${data.label}** → \`${data.tool}\`\n`;
+        } else {
+          progressText = `> **⚙️ ${data.label}** → \`${data.tool}\`\n`;
+        }
+      } else if (data.status === "subagent_done") {
+        progressText = `> **✅ Sub-agent "${data.label}"** completed\n`;
+      } else if (data.status === "subagent_error") {
+        progressText = `> **❌ Sub-agent "${data.label}"** failed: ${data.error}\n`;
+      }
+      if (progressText) {
+        ioRef.emit("chat:chunk", { sessionId: data.sessionId, content: progressText });
+      }
+    }
+  });
 
   io.on("connection", (socket: Socket) => {
     console.log("Client connected:", socket.id);
@@ -298,6 +336,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       }
 
       broadcastStatus({ sessionId, status: "thinking" });
+      swarmTagShown.delete(sessionId); // Reset swarm tag for new turn
       const toolsUsed: string[] = [];
       const outputFiles: string[] = [];
 
@@ -323,10 +362,18 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         const result = await callTigerBotWithTools(
           chatMessages,
           buildSystemPrompt(),
-          // onToolCall — show status only (no chunks)
+          // onToolCall — show status + protocol tags
           (name, args) => {
             toolsUsed.push(name);
             broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            // Tag protocol tool usage in chat
+            if (name.startsWith("proto_") && ioRef) {
+              const protoName = name.replace("proto_", "").split("_")[0].toUpperCase();
+              ioRef.emit("chat:chunk", {
+                sessionId,
+                content: `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> \`${name}\` — ${args.topic || args.peer || args.to || ""}\n`,
+              });
+            }
             // Update active task
             activeTask.status = `Running: ${name}`;
             activeTask.toolCalls.push(name);
@@ -344,7 +391,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           abortController.signal
         );
 
-        // Stream the final AI response
+        // Clear streaming progress and show final AI response
+        socket.emit("chat:chunk", { sessionId, content: "", clear: true });
         if (result.content) {
           socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
         }
@@ -560,6 +608,14 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           projectPrompt,
           (name, args) => {
             broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            // Tag protocol tool usage in chat
+            if (name.startsWith("proto_") && ioRef) {
+              const protoName = name.replace("proto_", "").split("_")[0].toUpperCase();
+              ioRef.emit("chat:chunk", {
+                sessionId,
+                content: `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> \`${name}\` — ${args.topic || args.peer || args.to || ""}\n`,
+              });
+            }
             activeTask.status = `Running: ${name}`;
             activeTask.toolCalls.push(name);
             activeTask.lastUpdate = new Date().toISOString();
@@ -573,6 +629,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           abortController.signal
         );
 
+        // Clear streaming progress and show final AI response
+        socket.emit("chat:chunk", { sessionId, content: "", clear: true });
         if (result.content) {
           socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
         }

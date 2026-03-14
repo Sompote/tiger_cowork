@@ -1,10 +1,10 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.2.0
+# Tiger Cowork v0.2.1
 
 > **⚠️ WARNING: This application executes AI-generated code, shell commands, and third-party skills on your machine. Please run it inside a sandboxed environment (e.g. Docker) to protect your host system. See [Security Notice](#security-notice) below.**
 
-A self-hosted AI-powered workspace that combines chat, project management, file management, code execution, scheduled tasks, and a skill marketplace — all in one web interface. Compatible with any **OpenAI-compatible API** (OpenRouter, TigerBot, Ollama, etc.) with tool-calling capabilities.
+A self-hosted AI-powered workspace that combines chat, project management, file management, code execution, scheduled tasks, a visual multi-agent system editor, and a skill marketplace — all in one web interface. Compatible with any **OpenAI-compatible API** (OpenRouter, TigerBot, Ollama, etc.) with tool-calling capabilities.
 
 ## Screenshots
 
@@ -15,6 +15,10 @@ A self-hosted AI-powered workspace that combines chat, project management, file 
 ![Tiger Cowork — Skills management page](picture/screen_shot2.png)
 
 *Skills management page showing installed skills from multiple sources — built-in, OpenClaw marketplace, and ClawHub community skills. Each skill can be enabled/disabled or uninstalled individually.*
+
+![Tiger Cowork — Agent System Editor](picture/agent.png)
+
+*Agent System Editor with visual canvas for designing multi-agent systems. Drag-and-drop agent nodes, shift-drag to connect them with configurable protocols (TCP, Bus, Queue), and edit agent definitions with AI-assisted setup. Exports to YAML for the sub-agent system.*
 
 ## Architecture
 
@@ -180,7 +184,13 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Multi-file operations: delegate file processing to sub-agents in parallel
 - Complex analysis: break a report into sections, each handled by a dedicated sub-agent
 
-## What's New in v0.2.0
+## What's New in v0.2.1
+
+- **Agent System Editor** — A new visual editor for designing multi-agent systems. Build agent teams on a drag-and-drop canvas, define roles (orchestrator, worker, checker, reporter, researcher), set models, personas, and responsibilities. Connect agents with configurable communication protocols (TCP, Bus, Queue) and export the entire system as YAML. Includes AI-assisted agent setup — describe what you need and the editor generates the definition.
+- **Agent YAML management** — New backend API for listing, creating, parsing, and generating agent configuration files stored in `data/agents/`.
+- **Protocol status endpoint** — New `/api/agents/protocols/status` endpoint for monitoring inter-agent communication protocols.
+
+### Previous: v0.2.0
 
 - **Sub-Agent System** — The main agent can now spawn independent sub-agents to handle specific sub-tasks. Each sub-agent gets its own tool loop and can use all available tools. Supports configurable depth limits, concurrency, timeout, and optional model override. Enable in Settings > Agent Parameters > Sub-Agent.
 - **New sub-agent settings** — Five new parameters: `subAgentEnabled` (on/off), `subAgentModel` (optional model override), `subAgentMaxDepth` (1–5, default 2), `subAgentMaxConcurrent` (1–10, default 3), `subAgentTimeout` (30–600s, default 120s).
@@ -209,6 +219,7 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Configurable tool loop limits: max tool rounds (default 8), max tool calls (default 12), consecutive error threshold, and result truncation length — all adjustable in Settings > Agent Parameters
 - **Sub-Agent Spawning** — Delegate sub-tasks to independent child agents with their own tool loops. Configurable: depth limits, concurrency, timeout, and model override
 - **Reflection Loop** — Optional self-evaluation after tool loops. The agent scores its own work against the user's objective and retries if the score is below the threshold. Configurable: enable/disable, score threshold (0.0–1.0), max retries
+- **Agent System Editor** — Visual drag-and-drop editor for designing multi-agent systems. Define agent roles, models, personas, and responsibilities. Connect agents with communication protocols (TCP, Bus, Queue). AI-assisted agent setup and YAML export
 - Real-time streaming of responses and tool call progress via Socket.IO
 - Automatic output file generation for analysis/chart requests
 - File attachments with image vision support
@@ -227,6 +238,19 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - **Project chat** — Each project has its own chat interface with a session sidebar. Chat sessions are automatically prefixed with the project name and inherit the project's memory, working folder, and selected skills as context
 - **Output panel** — Generated files (React components, charts, HTML reports, PDFs, Word documents) render in a collapsible right-side panel within the project chat, just like the main chat
 - **Overview dashboard** — Quick glance at working folder, location type, access level, memory size, and selected skill count
+
+### Agent System Editor
+- Visual drag-and-drop canvas for designing multi-agent systems
+- **Agent nodes** — Create agents with configurable roles (orchestrator, worker, checker, reporter, researcher), LLM models (Claude, GPT), personas, and responsibility lists
+- **Connection drawing** — Shift+drag from one agent to another to create connections with communication protocols:
+  - **TCP** — Bidirectional async socket communication
+  - **Bus** — Event bus broadcast
+  - **Queue** — Message queue handoff
+- **AI-assisted setup** — Describe the agent you need in natural language, and the editor generates the role, persona, model, and responsibilities automatically
+- **Orchestration modes** — Choose from Hierarchical, Flat, Mesh, or Pipeline topologies
+- **YAML export** — The editor generates a complete YAML configuration including system metadata, agent definitions, workflow sequences, connection topology, and communication settings
+- **Save & load** — Save agent configurations as `.yaml` files in `data/agents/`, load existing configs back into the editor
+- **Preview** — Preview the generated YAML before saving, with copy-to-clipboard support
 
 ### Output Panel
 - Collapsible right-side panel that renders all generated files from chat
@@ -611,6 +635,7 @@ tiger_cowork/
 │   │   ├── settings.ts             # App settings API
 │   │   ├── python.ts               # Python code execution endpoint
 │   │   ├── tools.ts                # Web search, URL fetch, MCP proxy
+│   │   ├── agents.ts               # Agent YAML config CRUD, parse, generate, protocol status
 │   │   └── clawhub.ts              # ClawHub skill marketplace
 │   └── services/
 │       ├── tigerbot.ts             # LLM API client (chat, streaming, tool loop, reflection eval)
@@ -621,7 +646,8 @@ tiger_cowork/
 │       ├── data.ts                 # JSON file-based data persistence
 │       ├── python.ts               # Python subprocess runner
 │       ├── sandbox.ts              # Sandbox file operations
-│       └── clawhub.ts              # ClawHub marketplace service
+│       ├── clawhub.ts              # ClawHub marketplace service
+│       └── protocols.ts            # Inter-agent communication protocol status
 ├── client/
 │   ├── src/
 │   │   ├── App.tsx                 # React Router setup
@@ -630,6 +656,8 @@ tiger_cowork/
 │   │   │   ├── ChatPage.tsx        # Main chat interface with output panel
 │   │   │   └── ProjectsPage.tsx    # Project management with chat, memory, skills, files
 │   │   ├── components/
+│   │   │   ├── AgentEditor.tsx     # Visual multi-agent system editor (canvas, nodes, connections)
+│   │   │   ├── AgentEditor.css     # Agent editor styles
 │   │   │   ├── AuthGate.tsx        # Access token login gate
 │   │   │   ├── Layout.tsx          # App layout with sidebar navigation
 │   │   │   └── ReactComponentRenderer.tsx  # Native React component renderer
@@ -642,7 +670,8 @@ tiger_cowork/
 │   ├── chat_history.json           # Chat sessions and messages
 │   ├── projects.json               # Project definitions and memory
 │   ├── tasks.json                  # Scheduled task definitions
-│   └── skills.json                 # Installed skills registry
+│   ├── skills.json                 # Installed skills registry
+│   └── agents/                     # Agent system YAML configurations
 ├── output_file/                    # Generated output files (charts, reports)
 ├── skills/                         # Installed ClawHub skills
 ├── package.json
@@ -707,6 +736,13 @@ tiger_cowork/
 | GET    | `/api/clawhub/skills`              | List installed ClawHub skills |
 | GET    | `/api/clawhub/search?q=`           | Search ClawHub marketplace    |
 | POST   | `/api/clawhub/install`             | Install a ClawHub skill       |
+| GET    | `/api/agents`                      | List all agent YAML configs   |
+| GET    | `/api/agents/:filename`            | Get a specific agent config   |
+| POST   | `/api/agents`                      | Save agent config (create/update) |
+| DELETE | `/api/agents/:filename`            | Delete an agent config        |
+| POST   | `/api/agents/parse`                | Parse YAML content            |
+| POST   | `/api/agents/generate`             | Generate YAML from editor data |
+| GET    | `/api/agents/protocols/status`     | Get protocol status           |
 
 ## Socket.IO Events
 
@@ -723,6 +759,15 @@ tiger_cowork/
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.2.1 (2026-03-14)
+- Add **Agent System Editor** — visual drag-and-drop canvas for designing multi-agent systems with role-based agent nodes, connection drawing, and communication protocol configuration (TCP, Bus, Queue)
+- AI-assisted agent setup: describe an agent in natural language to auto-generate role, persona, model, and responsibilities
+- Support for four orchestration modes: Hierarchical, Flat, Mesh, Pipeline
+- YAML export with full system metadata, agent definitions, workflow sequences, and connection topology
+- New backend routes: agent config CRUD (`/api/agents`), YAML parse/generate, protocol status
+- New `AgentEditor` component (`client/src/components/AgentEditor.tsx`) with canvas, SVG connection layer, and right-side definition panel
+- New `protocols.ts` service for inter-agent communication protocol monitoring
 
 ### v0.2.0 (2026-03-12)
 - Add **Sub-Agent System** — main agent can spawn independent sub-agents to handle sub-tasks with their own tool loops, depth control, concurrency limits, and timeout enforcement

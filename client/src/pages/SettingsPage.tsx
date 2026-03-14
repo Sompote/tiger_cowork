@@ -1,6 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { api } from "../utils/api";
 import "./PageStyles.css";
+
+const AgentEditor = lazy(() => import("../components/AgentEditor"));
 
 interface McpStatus {
   name: string;
@@ -28,11 +30,15 @@ export default function SettingsPage() {
   const [newTokenName, setNewTokenName] = useState("");
   const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
   const [showTokenId, setShowTokenId] = useState<string | null>(null);
+  const [showAgentEditor, setShowAgentEditor] = useState(false);
+  const [agentConfigs, setAgentConfigs] = useState<any[]>([]);
+  const [agentEditorInitYaml, setAgentEditorInitYaml] = useState<string | undefined>();
 
   useEffect(() => {
     api.getSettings().then(setSettings);
     api.mcpStatus().then(setMcpStatuses).catch(() => {});
     api.getFileTokens().then(setFileTokens).catch(() => {});
+    api.getAgentConfigs().then(setAgentConfigs).catch(() => {});
   }, []);
 
   const save = async () => {
@@ -285,26 +291,128 @@ export default function SettingsPage() {
           </div>
           {settings.subAgentEnabled && (
             <>
+              {/* Sub-Agent Mode Selection */}
               <div className="form-group">
-                <label>Sub-Agent Model (optional)</label>
-                <input value={settings.subAgentModel || ""} onChange={(e) => setSettings({ ...settings, subAgentModel: e.target.value })} placeholder="Leave empty to use main model" />
-                <p className="hint">Override the LLM model for sub-agents (e.g. use a smaller/cheaper model)</p>
+                <label>Sub-Agent Mode</label>
+                <select
+                  value={settings.subAgentMode || "auto"}
+                  onChange={(e) => setSettings({ ...settings, subAgentMode: e.target.value })}
+                >
+                  <option value="auto">Auto (AI decides)</option>
+                  <option value="manual">Manual (YAML config file)</option>
+                </select>
+                <p className="hint">
+                  {settings.subAgentMode === "manual"
+                    ? "Agents are defined by a YAML configuration file you provide"
+                    : "The AI automatically spawns and manages sub-agents as needed"}
+                </p>
               </div>
-              <div className="form-group">
-                <label>Max Depth</label>
-                <input type="number" value={settings.subAgentMaxDepth ?? 2} onChange={(e) => setSettings({ ...settings, subAgentMaxDepth: Math.min(5, Math.max(1, parseInt(e.target.value) || 2)) })} min={1} max={5} />
-                <p className="hint">How many levels deep sub-agents can spawn other sub-agents (default: 2, max: 5)</p>
-              </div>
-              <div className="form-group">
-                <label>Max Concurrent Sub-Agents</label>
-                <input type="number" value={settings.subAgentMaxConcurrent ?? 3} onChange={(e) => setSettings({ ...settings, subAgentMaxConcurrent: Math.min(10, Math.max(1, parseInt(e.target.value) || 3)) })} min={1} max={10} />
-                <p className="hint">Maximum sub-agents running at the same time (default: 3)</p>
-              </div>
-              <div className="form-group">
-                <label>Timeout (seconds)</label>
-                <input type="number" value={settings.subAgentTimeout ?? 120} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(600, Math.max(30, parseInt(e.target.value) || 120)) })} min={30} max={600} step={10} />
-                <p className="hint">Max time per sub-agent before timeout (default: 120s, max: 600s)</p>
-              </div>
+
+              {settings.subAgentMode === "manual" ? (
+                <>
+                  {/* Manual YAML Config */}
+                  <div className="form-group">
+                    <label>Agent Configuration File</label>
+                    <select
+                      value={settings.subAgentConfigFile || ""}
+                      onChange={(e) => setSettings({ ...settings, subAgentConfigFile: e.target.value })}
+                    >
+                      <option value="">Select a config file...</option>
+                      {agentConfigs.map((cfg: any) => (
+                        <option key={cfg.filename} value={cfg.filename}>
+                          {cfg.name} ({cfg.filename}) — {cfg.agentCount} agents
+                        </option>
+                      ))}
+                    </select>
+                    <p className="hint">
+                      Select a YAML file that defines your agent team. Create one below or place .yaml files in data/agents/
+                    </p>
+                  </div>
+
+                  {/* Saved configs list */}
+                  {agentConfigs.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <label style={{ fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 6, display: "block" }}>
+                        Saved Configurations
+                      </label>
+                      {agentConfigs.map((cfg: any) => (
+                        <div key={cfg.filename} style={{
+                          display: "flex", alignItems: "center", gap: 8,
+                          padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 13
+                        }}>
+                          <span style={{ flex: 1 }}>
+                            <strong>{cfg.name}</strong>
+                            <span style={{ opacity: 0.5, marginLeft: 6, fontSize: 11 }}>{cfg.filename}</span>
+                          </span>
+                          <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{cfg.agentCount} agents</span>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={async () => {
+                              const data = await api.getAgentConfig(cfg.filename);
+                              if (data.content) {
+                                setAgentEditorInitYaml(data.content);
+                                setShowAgentEditor(true);
+                              }
+                            }}
+                          >Edit</button>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            onClick={async () => {
+                              if (confirm(`Delete ${cfg.filename}?`)) {
+                                await api.deleteAgentConfig(cfg.filename);
+                                setAgentConfigs(agentConfigs.filter((c: any) => c.filename !== cfg.filename));
+                                if (settings.subAgentConfigFile === cfg.filename) {
+                                  setSettings({ ...settings, subAgentConfigFile: "" });
+                                }
+                              }
+                            }}
+                          >Delete</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Create Agent Config */}
+                  <div className="form-actions" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => { setAgentEditorInitYaml(undefined); setShowAgentEditor(true); }}
+                      style={{ display: "flex", alignItems: "center", gap: 6 }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                      </svg>
+                      Swarm Agent Creator
+                    </button>
+                    <p className="hint" style={{ width: "100%", margin: 0 }}>
+                      Open the graphical editor to visually design your agent team with drag-and-drop, connection lines, and communication protocols.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="form-group">
+                    <label>Sub-Agent Model (optional)</label>
+                    <input value={settings.subAgentModel || ""} onChange={(e) => setSettings({ ...settings, subAgentModel: e.target.value })} placeholder="Leave empty to use main model" />
+                    <p className="hint">Override the LLM model for sub-agents (e.g. use a smaller/cheaper model)</p>
+                  </div>
+                  <div className="form-group">
+                    <label>Max Depth</label>
+                    <input type="number" value={settings.subAgentMaxDepth ?? 2} onChange={(e) => setSettings({ ...settings, subAgentMaxDepth: Math.min(5, Math.max(1, parseInt(e.target.value) || 2)) })} min={1} max={5} />
+                    <p className="hint">How many levels deep sub-agents can spawn other sub-agents (default: 2, max: 5)</p>
+                  </div>
+                  <div className="form-group">
+                    <label>Max Concurrent Sub-Agents</label>
+                    <input type="number" value={settings.subAgentMaxConcurrent ?? 3} onChange={(e) => setSettings({ ...settings, subAgentMaxConcurrent: Math.min(10, Math.max(1, parseInt(e.target.value) || 3)) })} min={1} max={10} />
+                    <p className="hint">Maximum sub-agents running at the same time (default: 3)</p>
+                  </div>
+                  <div className="form-group">
+                    <label>Timeout (seconds)</label>
+                    <input type="number" value={settings.subAgentTimeout ?? 120} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(600, Math.max(30, parseInt(e.target.value) || 120)) })} min={30} max={600} step={10} />
+                    <p className="hint">Max time per sub-agent before timeout (default: 120s, max: 600s)</p>
+                  </div>
+                </>
+              )}
             </>
           )}
         </section>
@@ -490,6 +598,25 @@ export default function SettingsPage() {
           </div>
         </section>
       </div>
+
+      {/* Agent Editor Modal */}
+      {showAgentEditor && (
+        <Suspense fallback={<div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>Loading editor...</div>}>
+          <AgentEditor
+            onClose={() => { setShowAgentEditor(false); setAgentEditorInitYaml(undefined); }}
+            onSave={async (savedFilename) => {
+              setShowAgentEditor(false);
+              setAgentEditorInitYaml(undefined);
+              // Refresh agent configs list
+              const configs = await api.getAgentConfigs();
+              setAgentConfigs(configs);
+              // Auto-select the saved file
+              setSettings({ ...settings, subAgentConfigFile: savedFilename });
+            }}
+            initialYaml={agentEditorInitYaml}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

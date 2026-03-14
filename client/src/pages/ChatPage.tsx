@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { api, sandboxUrl } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import { Icon } from "../components/Layout";
@@ -293,9 +294,13 @@ export default function ChatPage() {
   }, [activeSession, connected]);
 
   useEffect(() => {
-    const unsub1 = onChunk((data) => {
+    const unsub1 = onChunk((data: any) => {
       if (data.sessionId === activeSession) {
-        setStreaming((prev) => prev + data.content);
+        if (data.clear) {
+          setStreaming("");
+        } else {
+          setStreaming((prev) => prev + data.content);
+        }
       }
     });
     const unsub2 = onResponse((data) => {
@@ -539,7 +544,7 @@ export default function ChatPage() {
                 <div className="message-avatar">{msg.role === "user" ? "U" : "C"}</div>
                 <div className="message-content">
                   {msg.role === "assistant" ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown>
                   ) : (
                     <>
                       {msg.attachments && msg.attachments.length > 0 && (
@@ -575,7 +580,7 @@ export default function ChatPage() {
               <div className="message assistant">
                 <div className="message-avatar">C</div>
                 <div className="message-content">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{streaming}</ReactMarkdown>
                 </div>
               </div>
             )}

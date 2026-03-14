@@ -2,9 +2,16 @@ import fs from "fs";
 import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import yaml from "js-yaml";
 import { runPython } from "./python";
 import { getSettings } from "./data";
 import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
+import {
+  tcpOpen, tcpSend, tcpRead, tcpClose,
+  busPublish, busSubscribe, busHistory, busGet,
+  queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
+  getProtocolStatus, cleanupSessionProtocols,
+} from "./protocols";
 
 
 const execAsync = promisify(exec);
@@ -200,11 +207,123 @@ const spawnSubagentTool = {
         task: { type: "string", description: "Clear description of the sub-task for the sub-agent to complete" },
         label: { type: "string", description: "Short label for this sub-agent (e.g. 'research-api', 'generate-chart')" },
         context: { type: "string", description: "Optional additional context or data the sub-agent needs" },
+        agentId: { type: "string", description: "Optional agent ID from manual YAML config to use specific agent definition" },
       },
       required: ["task"],
     },
   },
 };
+
+// ─── Protocol Tools (TCP / Bus / Queue) ───
+
+const protocolTools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_tcp_send",
+      description: "Send a message to another agent via TCP point-to-point channel. Opens a channel automatically if needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Target agent ID" },
+          topic: { type: "string", description: "Message topic" },
+          payload: { type: "string", description: "Message content (JSON string or plain text)" },
+        },
+        required: ["to", "topic", "payload"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_tcp_read",
+      description: "Read all messages from a TCP channel with another agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          peer: { type: "string", description: "The other agent's ID" },
+        },
+        required: ["peer"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_bus_publish",
+      description: "Publish a message to the shared event bus. All subscribed agents on the same session can see it.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "Topic to publish to (e.g. 'clash_flag', 'parameter_share')" },
+          payload: { type: "string", description: "Message content" },
+        },
+        required: ["topic", "payload"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_bus_history",
+      description: "Read the message history from the event bus, optionally filtered by topic.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "Optional topic filter" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_queue_send",
+      description: "Enqueue a message to another agent's queue (FIFO). The receiving agent can dequeue it later.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Target agent ID" },
+          topic: { type: "string", description: "Message topic" },
+          payload: { type: "string", description: "Message content" },
+        },
+        required: ["to", "topic", "payload"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_queue_receive",
+      description: "Dequeue (consume) the next message from your queue, optionally filtered by sender.",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "Sender agent ID to read from" },
+          topic: { type: "string", description: "Optional topic filter" },
+        },
+        required: ["from"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "proto_queue_peek",
+      description: "Peek at messages in your queue without consuming them.",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "Sender agent ID" },
+          topic: { type: "string", description: "Optional topic filter" },
+          count: { type: "number", description: "Number of messages to peek (default 5)" },
+        },
+        required: ["from"],
+      },
+    },
+  },
+];
 
 // OpenRouter Web Search tool (conditionally included)
 const openRouterSearchTool = {
@@ -232,7 +351,43 @@ export function getTools(opts?: { excludeSubagent?: boolean }) {
   if (settings.subAgentEnabled && !opts?.excludeSubagent) {
     tools.push(spawnSubagentTool);
   }
+  if (settings.subAgentEnabled) {
+    tools.push(...protocolTools);
+  }
   return [...tools, ...getMcpTools()];
+}
+
+// Get manual agent config summary for system prompt injection
+export function getManualAgentConfigSummary(): string | null {
+  const settings = getSettings();
+  if (settings.subAgentMode !== "manual" || !settings.subAgentConfigFile) return null;
+  const config = loadAgentConfig(settings.subAgentConfigFile);
+  if (!config) return null;
+  let summary = `\n\nMANUAL AGENT TEAM CONFIGURATION (${config.system?.name || "Unnamed"}):\n`;
+  summary += `Orchestration mode: ${config.system?.orchestration_mode || "hierarchical"}\n`;
+  summary += `Available agents:\n`;
+  for (const a of config.agents || []) {
+    summary += `  - ${a.id} ("${a.name}"): role=${a.role}, persona=${a.persona || "N/A"}\n`;
+    if (a.responsibilities && a.responsibilities.length > 0) {
+      summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
+    }
+  }
+
+  // Include workflow sequence so the LLM knows the exact delegation order
+  if (config.workflow?.sequence && config.workflow.sequence.length > 0) {
+    summary += `\nWORKFLOW SEQUENCE (you MUST follow this order):\n`;
+    for (const step of config.workflow.sequence) {
+      const agent = config.agents?.find((a: AgentConfig) => a.id === step.agent);
+      const agentName = agent ? `${agent.name} (${agent.role})` : step.agent;
+      const outputsTo = step.outputs_to ? ` → outputs to: ${step.outputs_to.join(", ")}` : "";
+      summary += `  Step ${step.step}: ${step.agent} [${agentName}] — ${step.action}${outputsTo}\n`;
+    }
+  }
+
+  summary += `\nINSTRUCTIONS: You MUST spawn sub-agents using the agentId parameter to match agents from this config.\n`;
+  summary += `For each user task, follow the workflow sequence: spawn agents in order, pass context between them, and synthesize the final result.\n`;
+  summary += `Example: spawn_subagent({task: "...", label: "Project manager", agentId: "agent_1", context: "..."})\n`;
+  return summary;
 }
 
 // Get tools for sub-agents (no spawn_subagent to prevent infinite recursion at max depth)
@@ -766,6 +921,54 @@ async function openRouterWebSearch(args: { query: string }): Promise<any> {
   }
 }
 
+// --- Manual agent config loading ---
+
+interface AgentConfig {
+  id: string;
+  name: string;
+  role: string;
+  model: string;
+  persona: string;
+  responsibilities: string[];
+  constraints?: string[];
+  tools_allowed?: string[];
+}
+
+interface AgentSystemConfig {
+  system: { name: string; orchestration_mode: string };
+  agents: AgentConfig[];
+  workflow?: any;
+  communication?: any;
+}
+
+export function loadAgentConfig(filename: string): AgentSystemConfig | null {
+  const agentsDir = path.resolve("data/agents");
+  const fp = path.join(agentsDir, filename);
+  if (!fs.existsSync(fp)) return null;
+  try {
+    const content = fs.readFileSync(fp, "utf8");
+    return yaml.load(content) as AgentSystemConfig;
+  } catch (err) {
+    console.error(`[AgentConfig] Failed to parse ${filename}:`, err);
+    return null;
+  }
+}
+
+function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemConfig): string {
+  let prompt = `You are "${agentDef.name}" (ID: ${agentDef.id}), a ${agentDef.role} in the "${systemConfig.system.name}" system.\n\n`;
+  if (agentDef.persona) {
+    prompt += `PERSONA:\n${agentDef.persona}\n\n`;
+  }
+  if (agentDef.responsibilities && agentDef.responsibilities.length > 0) {
+    prompt += `RESPONSIBILITIES:\n${agentDef.responsibilities.map(r => `- ${r}`).join("\n")}\n\n`;
+  }
+  if (agentDef.constraints && agentDef.constraints.length > 0) {
+    prompt += `CONSTRAINTS:\n${agentDef.constraints.map(c => `- ${c}`).join("\n")}\n\n`;
+  }
+  prompt += `RULES:\n- Focus on your designated role and responsibilities\n- Be concise and efficient\n- Provide structured output suitable for downstream agents\n- Flag any issues or ambiguities clearly\n`;
+  return prompt;
+}
+
 // --- Sub-agent spawning ---
 
 // Active sub-agent tracking
@@ -806,7 +1009,7 @@ async function getSubagentCaller() {
 }
 
 export async function spawnSubagent(
-  args: { task: string; label?: string; context?: string },
+  args: { task: string; label?: string; context?: string; agentId?: string },
   parentSessionId?: string,
   currentDepth: number = 0,
   signal?: AbortSignal,
@@ -828,7 +1031,8 @@ export async function spawnSubagent(
     return { ok: false, error: `Too many concurrent sub-agents (${runningCount}/${maxConcurrent}). Wait for one to finish.` };
   }
 
-  const subagentId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const agentId = args.agentId || `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const subagentId = agentId;
   const label = args.label || "subagent";
   const timeout = (settings.subAgentTimeout || 120) * 1000; // default 120s
 
@@ -857,9 +1061,25 @@ export async function spawnSubagent(
 
   console.log(`[SubAgent:${label}] Spawned at depth ${currentDepth + 1}. Task: ${args.task.slice(0, 200)}`);
 
-  // Build sub-agent system prompt
-  const subModel = settings.subAgentModel || undefined; // use default model if not set
-  const subPrompt = `You are a focused sub-agent. You have been spawned by a parent agent to complete a specific task.
+  // Build sub-agent system prompt — check for manual YAML config
+  let subPrompt: string;
+  const subModel = settings.subAgentModel || undefined;
+
+  if (settings.subAgentMode === "manual" && settings.subAgentConfigFile) {
+    // Load agent definition from YAML config
+    const systemConfig = loadAgentConfig(settings.subAgentConfigFile);
+    const agentDef = systemConfig?.agents?.find((a: AgentConfig) =>
+      a.id === args.agentId || a.id === label || a.name === label
+    );
+
+    if (agentDef && systemConfig) {
+      subPrompt = getManualAgentPrompt(agentDef, systemConfig);
+      subPrompt += `\nYOUR TASK:\n${args.task}\n`;
+      if (args.context) subPrompt += `\nADDITIONAL CONTEXT:\n${args.context}\n`;
+      subPrompt += `\nYou are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
+    } else {
+      // Fallback to auto mode if agent not found in config
+      subPrompt = `You are a focused sub-agent. You have been spawned by a parent agent to complete a specific task.
 
 YOUR TASK:
 ${args.task}
@@ -876,6 +1096,39 @@ RULES:
 - When done, provide a clear summary of what you accomplished
 
 You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
+    }
+  } else {
+    subPrompt = `You are a focused sub-agent. You have been spawned by a parent agent to complete a specific task.
+
+YOUR TASK:
+${args.task}
+
+${args.context ? `ADDITIONAL CONTEXT:\n${args.context}\n` : ""}
+
+RULES:
+- Focus ONLY on completing the assigned task
+- Be concise and efficient — minimize unnecessary tool calls
+- Return your findings/results clearly so the parent agent can use them
+- You have full access to tools (web search, file read/write, Python, shell, etc.)
+- Do NOT ask follow-up questions — work with what you have
+- If the task is ambiguous, make reasonable assumptions and proceed
+- When done, provide a clear summary of what you accomplished
+
+You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
+  }
+
+  // Append protocol instructions
+  subPrompt += `\n
+COMMUNICATION PROTOCOLS:
+You have access to inter-agent communication tools. Your agent ID is "${agentId}".
+- TCP (proto_tcp_send / proto_tcp_read): Point-to-point messaging with a specific agent
+- Bus (proto_bus_publish / proto_bus_history): Broadcast messages to all agents on a topic
+- Queue (proto_queue_send / proto_queue_receive / proto_queue_peek): FIFO message queue to another agent
+Use these to coordinate with peer agents when your task requires collaboration.`;
+
+  // Set agent context so protocol tools know who we are
+  const prevAgentId = _currentAgentId;
+  setCallContext(parentSessionId, currentDepth + 1, agentId);
 
   try {
     const callAgent = await getSubagentCaller();
@@ -922,6 +1175,8 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     );
 
     clearTimeout(timeoutId);
+    // Restore parent agent context
+    setCallContext(parentSessionId, currentDepth, prevAgentId);
 
     run.status = "completed";
     run.completedAt = new Date().toISOString();
@@ -951,6 +1206,8 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       outputFiles: result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []) || [],
     };
   } catch (err: any) {
+    // Restore parent agent context
+    setCallContext(parentSessionId, currentDepth, prevAgentId);
     run.status = "error";
     run.completedAt = new Date().toISOString();
 
@@ -980,13 +1237,15 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
 
 // --- Dispatcher ---
 
-// Track parent session ID and depth for sub-agent context
+// Track parent session ID, depth, and agent ID for sub-agent context
 let _currentParentSessionId: string | undefined;
 let _currentSubagentDepth: number = 0;
+let _currentAgentId: string = "main";
 
-export function setCallContext(sessionId?: string, depth?: number) {
+export function setCallContext(sessionId?: string, depth?: number, agentId?: string) {
   _currentParentSessionId = sessionId;
   _currentSubagentDepth = depth || 0;
+  _currentAgentId = agentId || "main";
 }
 
 export async function callTool(name: string, args: any): Promise<any> {
@@ -1005,6 +1264,45 @@ export async function callTool(name: string, args: any): Promise<any> {
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
     case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth);
+
+    // ─── Protocol Tools ───
+    case "proto_tcp_send": {
+      const sessionId = _currentParentSessionId || "default";
+      const from = _currentAgentId;
+      await tcpOpen(from, args.to);
+      const sent = await tcpSend(from, args.to, args.topic, args.payload);
+      return { ok: sent, protocol: "tcp", from, to: args.to, topic: args.topic };
+    }
+    case "proto_tcp_read": {
+      const from = _currentAgentId;
+      const messages = tcpRead(from, args.peer);
+      return { ok: true, protocol: "tcp", peer: args.peer, messages, count: messages.length };
+    }
+    case "proto_bus_publish": {
+      const sessionId = _currentParentSessionId || "default";
+      busPublish(sessionId, _currentAgentId, args.topic, args.payload);
+      return { ok: true, protocol: "bus", from: _currentAgentId, topic: args.topic };
+    }
+    case "proto_bus_history": {
+      const sessionId = _currentParentSessionId || "default";
+      const messages = busHistory(sessionId, args.topic);
+      return { ok: true, protocol: "bus", topic: args.topic || "all", messages, count: messages.length };
+    }
+    case "proto_queue_send": {
+      const depth = queueEnqueue(_currentAgentId, args.to, args.topic, args.payload);
+      return { ok: true, protocol: "queue", from: _currentAgentId, to: args.to, topic: args.topic, queueDepth: depth };
+    }
+    case "proto_queue_receive": {
+      const msg = queueDequeue(args.from, _currentAgentId, args.topic);
+      return msg
+        ? { ok: true, protocol: "queue", message: msg }
+        : { ok: true, protocol: "queue", message: null, note: "Queue empty" };
+    }
+    case "proto_queue_peek": {
+      const messages = queuePeek(args.from, _currentAgentId, args.topic, args.count || 5);
+      return { ok: true, protocol: "queue", messages, count: messages.length };
+    }
+
     default:
       // Route MCP tools to MCP client
       if (isMcpTool(name)) return callMcpTool(name, args);

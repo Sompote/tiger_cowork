@@ -41,6 +41,23 @@
   letter-spacing: 0.5px;
 }
 
+.logo-swarm-tag {
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #000;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  animation: swarmGlow 2s ease-in-out infinite;
+}
+
+@keyframes swarmGlow {
+  0%, 100% { box-shadow: 0 0 4px rgba(245, 158, 11, 0.3); }
+  50% { box-shadow: 0 0 12px rgba(245, 158, 11, 0.6); }
+}
+
 .header-spacer {
   flex: 1;
 }

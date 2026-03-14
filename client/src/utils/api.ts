@@ -149,4 +149,12 @@ export const api = {
   mcpConnect: (name: string, url: string) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url }) }),
   mcpDisconnect: (name: string) => request("/settings/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }),
   mcpReconnectAll: () => request("/settings/mcp/reconnect-all", { method: "POST" }),
+
+  // Agent configs
+  getAgentConfigs: () => request("/agents"),
+  getAgentConfig: (filename: string) => request(`/agents/${encodeURIComponent(filename)}`),
+  saveAgentConfig: (filename: string, content: string) => request("/agents", { method: "POST", body: JSON.stringify({ filename, content }) }),
+  deleteAgentConfig: (filename: string) => request(`/agents/${encodeURIComponent(filename)}`, { method: "DELETE" }),
+  parseAgentYaml: (content: string) => request("/agents/parse", { method: "POST", body: JSON.stringify({ content }) }),
+  generateAgentYaml: (data: any) => request("/agents/generate", { method: "POST", body: JSON.stringify(data) }),
 };

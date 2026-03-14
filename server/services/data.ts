@@ -62,10 +62,12 @@ export interface Settings {
   webSearchEngine?: string;
   pythonPath?: string;
   subAgentEnabled?: boolean;
+  subAgentMode?: string; // "auto" | "manual"
   subAgentModel?: string;
   subAgentMaxDepth?: number;
   subAgentMaxConcurrent?: number;
   subAgentTimeout?: number;
+  subAgentConfigFile?: string;
   [key: string]: any;
 }
 
