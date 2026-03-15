@@ -58,6 +58,23 @@
   50% { box-shadow: 0 0 12px rgba(245, 158, 11, 0.6); }
 }
 
+.logo-realtime-tag {
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  animation: realtimeGlow 2s ease-in-out infinite;
+}
+
+@keyframes realtimeGlow {
+  0%, 100% { box-shadow: 0 0 4px rgba(16, 185, 129, 0.3); }
+  50% { box-shadow: 0 0 12px rgba(16, 185, 129, 0.6); }
+}
+
 .header-spacer {
   flex: 1;
 }

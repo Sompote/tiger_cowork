@@ -269,6 +269,56 @@ export function queueClear(from: string, to: string, topic?: string): void {
   queues.delete(key);
 }
 
+// ─── Bus Helpers ───
+
+/**
+ * Wait for the next message on a bus topic. Returns a Promise that resolves
+ * when a message arrives, or rejects on timeout / abort.
+ */
+export function busWaitForMessage(
+  sessionId: string,
+  topic: string,
+  timeoutMs: number = 120000,
+  signal?: AbortSignal,
+): Promise<ProtocolMessage> {
+  return new Promise((resolve, reject) => {
+    const bus = busGet(sessionId);
+    let settled = false;
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      unsub();
+      if (timer) clearTimeout(timer);
+    };
+
+    const unsub = bus.subscribe(topic, (msg) => {
+      cleanup();
+      resolve(msg);
+    });
+
+    // timeoutMs <= 0 means wait indefinitely (only abort signal can cancel)
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          cleanup();
+          reject(new Error(`busWaitForMessage timeout (${timeoutMs}ms) on topic "${topic}"`));
+        }, timeoutMs)
+      : null;
+
+    if (signal) {
+      if (signal.aborted) {
+        cleanup();
+        reject(new Error("aborted"));
+        return;
+      }
+      signal.addEventListener("abort", () => {
+        cleanup();
+        reject(new Error("aborted"));
+      }, { once: true });
+    }
+  });
+}
+
 // ─── Cleanup ───
 // Call this when a session ends to free all protocol resources
 

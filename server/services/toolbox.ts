@@ -8,7 +8,7 @@ import { getSettings } from "./data";
 import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
 import {
   tcpOpen, tcpSend, tcpRead, tcpClose,
-  busPublish, busSubscribe, busHistory, busGet,
+  busPublish, busSubscribe, busHistory, busGet, busWaitForMessage,
   queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
   getProtocolStatus, cleanupSessionProtocols,
 } from "./protocols";
@@ -385,7 +385,12 @@ export function getTools(opts?: { excludeSubagent?: boolean }) {
     tools.push(openRouterSearchTool);
   }
   if (settings.subAgentEnabled && !opts?.excludeSubagent) {
-    tools.push(spawnSubagentTool);
+    if (settings.subAgentMode === "realtime") {
+      // Realtime mode: use send_task/wait_result instead of spawn_subagent
+      tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    } else {
+      tools.push(spawnSubagentTool);
+    }
   }
   if (settings.subAgentEnabled) {
     tools.push(...protocolTools);
@@ -396,6 +401,8 @@ export function getTools(opts?: { excludeSubagent?: boolean }) {
 // Get manual agent config summary for system prompt injection
 export function getManualAgentConfigSummary(): string | null {
   const settings = getSettings();
+  // Realtime mode has its own summary
+  if (settings.subAgentMode === "realtime") return getRealtimeAgentConfigSummary();
   if (settings.subAgentMode !== "manual" || !settings.subAgentConfigFile) return null;
   const config = loadAgentConfig(settings.subAgentConfigFile);
   if (!config) return null;
@@ -430,7 +437,8 @@ export function getManualAgentConfigSummary(): string | null {
 export function getToolsForSubagent(
   currentDepth: number,
   agentDef?: AgentConfig | null,
-  connections?: any[]
+  connections?: any[],
+  systemConfig?: AgentSystemConfig | null
 ): any[] {
   const settings = getSettings();
   const maxDepth = settings.subAgentMaxDepth || 2;
@@ -439,8 +447,19 @@ export function getToolsForSubagent(
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     tools.push(openRouterSearchTool);
   }
-  if (settings.subAgentEnabled && currentDepth < maxDepth) {
-    tools.push(spawnSubagentTool);
+  const isManual = settings.subAgentMode === "manual";
+  if (settings.subAgentEnabled) {
+    if (isManual) {
+      // Manual mode: no depth limit — YAML structure is the boundary.
+      // Agent gets spawn tool only if it has downstream agents (outputs_to) in the workflow.
+      const hasDownstream = agentDef && systemConfig?.workflow?.sequence?.some(
+        (step: any) => step.agent === agentDef.id && step.outputs_to?.length > 0
+      );
+      if (hasDownstream) tools.push(spawnSubagentTool);
+    } else {
+      // Auto mode: depth limit applies
+      if (currentDepth < maxDepth) tools.push(spawnSubagentTool);
+    }
   }
   if (settings.subAgentEnabled) {
     // Only give protocol tools the agent is configured to use
@@ -1021,7 +1040,23 @@ function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemCo
   if (agentDef.constraints && agentDef.constraints.length > 0) {
     prompt += `CONSTRAINTS:\n${agentDef.constraints.map(c => `- ${c}`).join("\n")}\n\n`;
   }
-  prompt += `RULES:\n- Focus on your designated role and responsibilities\n- Be concise and efficient\n- Provide structured output suitable for downstream agents\n- Flag any issues or ambiguities clearly\n`;
+  // Determine downstream agents this agent can spawn (from workflow outputs_to + connections)
+  const workflowStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === agentDef.id);
+  const outputsTo: string[] = workflowStep?.outputs_to || [];
+  const connTargets = (systemConfig.connections || [])
+    .filter((c: any) => c.from === agentDef.id)
+    .map((c: any) => c.to);
+  const downstream = [...new Set([...outputsTo, ...connTargets])];
+
+  if (downstream.length > 0) {
+    const downstreamInfo = downstream.map(id => {
+      const a = systemConfig.agents?.find((ag: AgentConfig) => ag.id === id);
+      return a ? `  - ${a.id} ("${a.name}", role: ${a.role})` : `  - ${id}`;
+    }).join("\n");
+    prompt += `RULES:\n- Focus on your designated role and responsibilities\n- Be concise and efficient\n- Provide structured output suitable for downstream agents\n- Flag any issues or ambiguities clearly\n- You can ONLY spawn the following downstream agents (use agentId):\n${downstreamInfo}\n- Do NOT spawn agents outside this list.\n`;
+  } else {
+    prompt += `RULES:\n- Focus on your designated role and responsibilities\n- Be concise and efficient\n- Provide structured output suitable for downstream agents\n- Flag any issues or ambiguities clearly\n- You are a leaf agent — complete your assigned task directly. You cannot spawn sub-agents.\n`;
+  }
   return prompt;
 }
 
@@ -1076,8 +1111,48 @@ export async function spawnSubagent(
   }
 
   const maxDepth = settings.subAgentMaxDepth || 2;
-  if (currentDepth >= maxDepth) {
-    return { ok: false, error: `Sub-agent depth limit reached (max ${maxDepth}). Cannot spawn deeper.` };
+
+  // In manual mode: no depth limit — YAML structure is the boundary.
+  // Validate that the calling agent is allowed to spawn the target agent
+  // based on workflow outputs_to or connections.
+  if (settings.subAgentMode === "manual" && settings.subAgentConfigFile) {
+    const systemConfig = loadAgentConfig(settings.subAgentConfigFile);
+    if (systemConfig) {
+      const callerId = _currentAgentId;
+      const targetId = args.agentId;
+
+      if (!targetId) {
+        return { ok: false, error: "In manual mode, agentId is required. You must spawn a specific agent defined in the architecture." };
+      }
+
+      // Check target agent exists in YAML
+      const targetExists = systemConfig.agents?.some((a: AgentConfig) => a.id === targetId);
+      if (!targetExists) {
+        const available = systemConfig.agents?.map((a: AgentConfig) => a.id).join(", ") || "none";
+        return { ok: false, error: `Agent "${targetId}" not found in architecture. Available agents: ${available}` };
+      }
+
+      // Validate caller is allowed to spawn target (via workflow outputs_to or connections)
+      if (callerId !== "main") {
+        const callerStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
+        const allowedTargets: string[] = callerStep?.outputs_to || [];
+
+        // Also check connections
+        const connTargets = (systemConfig.connections || [])
+          .filter((c: any) => c.from === callerId)
+          .map((c: any) => c.to);
+        const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+
+        if (!allAllowed.includes(targetId)) {
+          return { ok: false, error: `Agent "${callerId}" is not allowed to spawn "${targetId}". Allowed targets: ${allAllowed.join(", ") || "none"}` };
+        }
+      }
+    }
+  } else {
+    // Auto mode: enforce depth limit
+    if (currentDepth >= maxDepth) {
+      return { ok: false, error: `Sub-agent depth limit reached (max ${maxDepth}). Cannot spawn deeper.` };
+    }
   }
 
   // Check concurrent limit
@@ -1122,6 +1197,7 @@ export async function spawnSubagent(
   const subModel = settings.subAgentModel || undefined;
   let resolvedAgentDef: AgentConfig | null = null;
   let resolvedConnections: any[] | undefined;
+  let resolvedSystemConfig: AgentSystemConfig | null = null;
 
   if (settings.subAgentMode === "manual" && settings.subAgentConfigFile) {
     // Load agent definition from YAML config
@@ -1130,6 +1206,7 @@ export async function spawnSubagent(
       a.id === args.agentId || a.id === label || a.name === label
     );
     resolvedConnections = systemConfig?.connections;
+    resolvedSystemConfig = systemConfig;
 
     if (agentDef && systemConfig) {
       resolvedAgentDef = agentDef;
@@ -1218,7 +1295,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       : timeoutController.signal;
 
     // Build filtered tool set for this sub-agent
-    const subagentTools = getToolsForSubagent(currentDepth + 1, resolvedAgentDef, resolvedConnections);
+    const subagentTools = getToolsForSubagent(currentDepth + 1, resolvedAgentDef, resolvedConnections, resolvedSystemConfig);
 
     const result = await callAgent(
       [{ role: "user" as const, content: args.task }],
@@ -1314,6 +1391,535 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
   }
 }
 
+// ─── Realtime Agent System ───
+// All agents from YAML boot at session start, stay alive, communicate via bus.
+
+// --- Tool definitions for realtime mode ---
+
+const sendTaskTool = {
+  type: "function" as const,
+  function: {
+    name: "send_task",
+    description: "Send a task to an agent in the realtime session. The agent is already alive and will process the task immediately. You can send tasks to multiple agents in one response for parallel execution.",
+    parameters: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Target agent ID (e.g. 'agent_2')" },
+        task: { type: "string", description: "Task description for the agent" },
+        context: { type: "string", description: "Additional context or data" },
+        wait: { type: "boolean", description: "If true, block until the agent finishes and return the result inline (default: false)" },
+      },
+      required: ["to", "task"],
+    },
+  },
+};
+
+const waitResultTool = {
+  type: "function" as const,
+  function: {
+    name: "wait_result",
+    description: "Wait for a result from an agent that was previously given a task via send_task. Blocks until the agent publishes its result.",
+    parameters: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Agent ID to wait for result from" },
+        timeout: { type: "number", description: "Max seconds to wait (default: uses session timeout)" },
+      },
+      required: ["from"],
+    },
+  },
+};
+
+const checkAgentsTool = {
+  type: "function" as const,
+  function: {
+    name: "check_agents",
+    description: "Check the status of all agents in the realtime session. Shows which agents are idle, working, or completed.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+};
+
+// --- Realtime Session tracking ---
+
+interface RealtimeAgentHandle {
+  agentDef: AgentConfig;
+  promise: Promise<void>;
+  status: "idle" | "working" | "completed" | "error";
+  lastTask?: string;
+  lastResult?: string;
+}
+
+interface RealtimeSession {
+  sessionId: string;
+  agents: Map<string, RealtimeAgentHandle>;
+  abortController: AbortController;
+  systemConfig: AgentSystemConfig;
+}
+
+const realtimeSessions = new Map<string, RealtimeSession>();
+
+export function getRealtimeSession(sessionId: string): RealtimeSession | undefined {
+  return realtimeSessions.get(sessionId);
+}
+
+// --- Boot all agents ---
+
+export async function startRealtimeSession(
+  sessionId: string,
+  configFile: string,
+  signal?: AbortSignal,
+): Promise<RealtimeSession | null> {
+  const settings = getSettings();
+  const systemConfig = loadAgentConfig(configFile);
+  if (!systemConfig) {
+    console.error("[Realtime] Failed to load agent config:", configFile);
+    return null;
+  }
+
+  // If session already exists, return it
+  if (realtimeSessions.has(sessionId)) {
+    return realtimeSessions.get(sessionId)!;
+  }
+
+  const abortController = new AbortController();
+  // Link parent signal
+  if (signal) {
+    signal.addEventListener("abort", () => abortController.abort(), { once: true });
+  }
+
+  const session: RealtimeSession = {
+    sessionId,
+    agents: new Map(),
+    abortController,
+    systemConfig,
+  };
+
+  console.log(`[Realtime] Starting session ${sessionId} with ${systemConfig.agents.length} agents`);
+
+  // Boot each agent concurrently
+  for (const agentDef of systemConfig.agents) {
+    const handle: RealtimeAgentHandle = {
+      agentDef,
+      status: "idle",
+      promise: Promise.resolve(),
+    };
+
+    // Start the agent loop
+    handle.promise = realtimeAgentLoop(
+      agentDef,
+      sessionId,
+      systemConfig,
+      abortController.signal,
+      handle,
+    );
+
+    session.agents.set(agentDef.id, handle);
+
+    // Broadcast agent ready
+    if (subagentStatusCallback) {
+      subagentStatusCallback({
+        sessionId,
+        status: "realtime_agent_ready",
+        agentId: agentDef.id,
+        label: agentDef.name,
+        role: agentDef.role,
+      });
+    }
+  }
+
+  realtimeSessions.set(sessionId, session);
+  console.log(`[Realtime] All ${systemConfig.agents.length} agents alive and listening`);
+  return session;
+}
+
+// --- Shutdown ---
+
+export function shutdownRealtimeSession(sessionId: string): void {
+  const session = realtimeSessions.get(sessionId);
+  if (!session) return;
+
+  console.log(`[Realtime] Shutting down session ${sessionId}`);
+  session.abortController.abort();
+  realtimeSessions.delete(sessionId);
+  cleanupSessionProtocols(sessionId);
+}
+
+// --- Agent event loop ---
+
+async function realtimeAgentLoop(
+  agentDef: AgentConfig,
+  sessionId: string,
+  systemConfig: AgentSystemConfig,
+  signal: AbortSignal,
+  handle: RealtimeAgentHandle,
+): Promise<void> {
+  const agentId = agentDef.id;
+  const settings = getSettings();
+
+  // Build system prompt from YAML
+  let systemPrompt = getManualAgentPrompt(agentDef, systemConfig);
+  systemPrompt += `\nYou are agent "${agentDef.name}" (ID: ${agentId}) in a REALTIME multi-agent session.`;
+  systemPrompt += `\nYou receive tasks automatically. Complete each task using your tools — your result is sent back automatically when you finish.`;
+  systemPrompt += `\nIMPORTANT: Do NOT use proto_tcp_send or proto_bus_publish to assign tasks to other agents. If you need to delegate, use send_task (if available). Protocol tools are only for exchanging data/status, NOT for task assignment.`;
+  systemPrompt += `\nYour agent ID is "${agentId}".`;
+
+  // Protocol instructions
+  const agentProtoTools = getProtocolToolsForAgent(agentDef, systemConfig.connections);
+  const protoNames = agentProtoTools.map((t: any) => t.function.name);
+  if (protoNames.length > 0) {
+    const protoLines: string[] = [];
+    if (protoNames.some((n: string) => n.startsWith("proto_tcp"))) {
+      protoLines.push("- TCP (proto_tcp_send / proto_tcp_read): Point-to-point messaging with a specific agent");
+    }
+    if (protoNames.some((n: string) => n.startsWith("proto_bus"))) {
+      protoLines.push("- Bus (proto_bus_publish / proto_bus_history): Broadcast on the shared bus");
+    }
+    if (protoNames.some((n: string) => n.startsWith("proto_queue"))) {
+      protoLines.push("- Queue (proto_queue_send / proto_queue_receive): FIFO messaging");
+    }
+    systemPrompt += `\n\nCOMMUNICATION PROTOCOLS:\n${protoLines.join("\n")}`;
+  }
+
+  // Build tool set: builtin tools + protocol tools
+  const agentTools: any[] = [...builtinTools];
+  if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
+    agentTools.push(openRouterSearchTool);
+  }
+  // If this agent has downstream connections, give it send_task + wait_result
+  // so it can delegate work to connected agents
+  const workflowStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === agentId);
+  const outputsTo: string[] = workflowStep?.outputs_to || [];
+  const connTargets = (systemConfig.connections || [])
+    .filter((c: any) => c.from === agentId)
+    .map((c: any) => c.to);
+  const downstream = [...new Set([...outputsTo, ...connTargets])];
+  if (downstream.length > 0) {
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    systemPrompt += `\n\nDELEGATION: You can delegate tasks to downstream agents using send_task and wait_result.`;
+    systemPrompt += `\nYour downstream agents: ${downstream.join(", ")}`;
+    systemPrompt += `\nUse send_task({to: "agent_id", task: "..."}) then wait_result({from: "agent_id"}) to collect results.`;
+    systemPrompt += `\nSend tasks to MULTIPLE agents in a SINGLE response for parallel execution. Do NOT use proto_tcp_send or proto_bus_publish to assign tasks — use send_task instead.`;
+  }
+  agentTools.push(...agentProtoTools);
+  const finalTools = [...agentTools, ...getMcpTools()];
+
+  console.log(`[Realtime:${agentDef.name}] Agent loop started, waiting for tasks...`);
+
+  // Event loop: wait for task → execute → publish result → repeat
+  while (!signal.aborted) {
+    try {
+      handle.status = "idle";
+
+      // Wait for a task message on bus topic "task:{agentId}"
+      const msg = await busWaitForMessage(sessionId, `task:${agentId}`, 0, signal);
+
+      handle.status = "working";
+      const taskText = msg.payload?.task || "(no task)";
+      handle.lastTask = taskText;
+
+      console.log(`[Realtime:${agentDef.name}] Received task: ${taskText.slice(0, 200)}`);
+
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId,
+          status: "realtime_agent_working",
+          agentId,
+          label: agentDef.name,
+          task: taskText.slice(0, 200),
+        });
+      }
+
+      // Set call context so protocol tools know who we are
+      const prevAgentId = _currentAgentId;
+      setCallContext(sessionId, 0, agentId);
+
+      // Get the tool-calling function
+      const callAgent = await getSubagentCaller();
+
+      // Run LLM tool loop for this task
+      const taskPrompt = `${systemPrompt}\n\nYOUR TASK:\n${msg.payload.task}${msg.payload.context ? `\n\nADDITIONAL CONTEXT:\n${msg.payload.context}` : ""}`;
+
+      const result = await callAgent(
+        [{ role: "user" as const, content: msg.payload.task }],
+        taskPrompt,
+        (name: string, toolArgs: any) => {
+          console.log(`[Realtime:${agentDef.name}] Tool: ${name}`);
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId,
+              status: "realtime_agent_tool",
+              agentId,
+              label: agentDef.name,
+              tool: name,
+            });
+          }
+        },
+        (name: string, toolResult: any) => {
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId,
+              status: "realtime_agent_tool_done",
+              agentId,
+              label: agentDef.name,
+              tool: name,
+            });
+          }
+        },
+        signal,
+        finalTools,
+      );
+
+      // Restore context
+      setCallContext(sessionId, 0, prevAgentId);
+
+      const resultContent = result.content || "(no result)";
+      handle.lastResult = resultContent.slice(0, 5000);
+      handle.status = "idle";
+
+      console.log(`[Realtime:${agentDef.name}] Task completed. Result: ${resultContent.slice(0, 200)}`);
+
+      // Publish result to bus
+      busPublish(sessionId, agentId, `result:${agentId}`, {
+        result: resultContent,
+        outputFiles: result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []),
+      });
+
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId,
+          status: "realtime_agent_done",
+          agentId,
+          label: agentDef.name,
+        });
+      }
+
+    } catch (err: any) {
+      if (err.message === "aborted" || signal.aborted) {
+        console.log(`[Realtime:${agentDef.name}] Agent loop ended (shutdown)`);
+        break;
+      }
+      console.error(`[Realtime:${agentDef.name}] Error:`, err.message);
+      handle.status = "error";
+      // Keep the agent alive — publish error and continue
+      busPublish(sessionId, agentId, `error:${agentId}`, { error: err.message });
+    }
+  }
+
+  handle.status = "completed";
+  console.log(`[Realtime:${agentDef.name}] Agent exited`);
+}
+
+// --- Realtime tool implementations ---
+
+async function realtimeSendTask(args: { to: string; task: string; context?: string; wait?: boolean }): Promise<any> {
+  const sessionId = _currentParentSessionId || "default";
+  const session = realtimeSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, error: "No realtime session active." };
+  }
+
+  const targetAgent = session.agents.get(args.to);
+  if (!targetAgent) {
+    const available = Array.from(session.agents.keys()).join(", ");
+    return { ok: false, error: `Agent "${args.to}" not found. Available: ${available}` };
+  }
+
+  // Validate caller is allowed to send to target
+  const callerId = _currentAgentId;
+  if (callerId === "main") {
+    // Main LLM must respect hierarchy — if there's an orchestrator, only send to it
+    const orchestrator = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "orchestrator");
+    if (orchestrator && args.to !== orchestrator.id) {
+      return { ok: false, error: `You must send tasks to the orchestrator agent "${orchestrator.id}" ("${orchestrator.name}") only. The orchestrator will delegate to other agents.` };
+    }
+  } else {
+    // Sub-agents: validate via workflow outputs_to / connections
+    const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
+    const allowedTargets: string[] = callerStep?.outputs_to || [];
+    const connTargets = (session.systemConfig.connections || [])
+      .filter((c: any) => c.from === callerId)
+      .map((c: any) => c.to);
+    const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+
+    if (allAllowed.length > 0 && !allAllowed.includes(args.to)) {
+      return { ok: false, error: `Agent "${callerId}" is not connected to "${args.to}". Allowed targets: ${allAllowed.join(", ")}` };
+    }
+  }
+
+  // Publish task to the agent's bus topic
+  busPublish(sessionId, _currentAgentId, `task:${args.to}`, {
+    task: args.task,
+    context: args.context,
+    from: _currentAgentId,
+  });
+
+  console.log(`[Realtime] ${_currentAgentId} → send_task → ${args.to}: ${args.task.slice(0, 100)}`);
+
+  // If wait=true, block until the agent publishes its result
+  if (args.wait) {
+    try {
+      const settings = getSettings();
+      const timeout = (args as any).timeout || (settings.subAgentTimeout || 120);
+      const resultMsg = await busWaitForMessage(sessionId, `result:${args.to}`, timeout * 1000);
+      return {
+        ok: true,
+        agentId: args.to,
+        agentName: targetAgent.agentDef.name,
+        result: resultMsg.payload?.result || "(no result)",
+        outputFiles: resultMsg.payload?.outputFiles || [],
+      };
+    } catch (err: any) {
+      return { ok: false, error: `Timeout waiting for ${args.to}: ${err.message}` };
+    }
+  }
+
+  return {
+    ok: true,
+    agentId: args.to,
+    agentName: targetAgent.agentDef.name,
+    sent: true,
+    note: `Task sent to ${targetAgent.agentDef.name}. Use wait_result({from: "${args.to}"}) to collect the result.`,
+  };
+}
+
+async function realtimeWaitResult(args: { from: string; timeout?: number }): Promise<any> {
+  const sessionId = _currentParentSessionId || "default";
+  const session = realtimeSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, error: "No realtime session active." };
+  }
+
+  const targetAgent = session.agents.get(args.from);
+  if (!targetAgent) {
+    return { ok: false, error: `Agent "${args.from}" not found in session.` };
+  }
+
+  // If agent already has a result cached and is idle, return it immediately
+  if (targetAgent.status === "idle" && targetAgent.lastResult) {
+    const result = targetAgent.lastResult;
+    targetAgent.lastResult = undefined; // consume it
+    return {
+      ok: true,
+      agentId: args.from,
+      agentName: targetAgent.agentDef.name,
+      result,
+    };
+  }
+
+  // Otherwise wait for the bus message
+  try {
+    const settings = getSettings();
+    const timeout = (args.timeout || settings.subAgentTimeout || 120) * 1000;
+    const resultMsg = await busWaitForMessage(sessionId, `result:${args.from}`, timeout);
+    return {
+      ok: true,
+      agentId: args.from,
+      agentName: targetAgent.agentDef.name,
+      result: resultMsg.payload?.result || "(no result)",
+      outputFiles: resultMsg.payload?.outputFiles || [],
+    };
+  } catch (err: any) {
+    return { ok: false, error: `Timeout waiting for result from ${args.from}: ${err.message}` };
+  }
+}
+
+function realtimeCheckAgents(): any {
+  const sessionId = _currentParentSessionId || "default";
+  const session = realtimeSessions.get(sessionId);
+  if (!session) {
+    return { ok: false, error: "No realtime session active." };
+  }
+
+  const agents = Array.from(session.agents.entries()).map(([id, handle]) => ({
+    id,
+    name: handle.agentDef.name,
+    role: handle.agentDef.role,
+    status: handle.status,
+    lastTask: handle.lastTask?.slice(0, 100),
+  }));
+
+  return { ok: true, agents, total: agents.length };
+}
+
+// --- Get tools for realtime orchestrator ---
+
+export function getToolsForRealtimeOrchestrator(): any[] {
+  const settings = getSettings();
+  const tools: any[] = [...builtinTools];
+  if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
+    tools.push(openRouterSearchTool);
+  }
+  // Realtime tools instead of spawn_subagent
+  tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+  // Protocol tools for direct orchestrator communication
+  tools.push(...protocolTools);
+  return [...tools, ...getMcpTools()];
+}
+
+// --- Config summary for realtime mode ---
+
+export function getRealtimeAgentConfigSummary(): string | null {
+  const settings = getSettings();
+  if (settings.subAgentMode !== "realtime" || !settings.subAgentConfigFile) return null;
+  const config = loadAgentConfig(settings.subAgentConfigFile);
+  if (!config) return null;
+
+  // Find the orchestrator agent (role === "orchestrator")
+  const orchestrator = config.agents?.find((a: AgentConfig) => a.role === "orchestrator");
+
+  let summary = `\n\nREALTIME AGENT SESSION (${config.system?.name || "Unnamed"}):\n`;
+  summary += `All agents are ALREADY ALIVE and listening for tasks.\n\n`;
+
+  if (orchestrator) {
+    summary += `ORCHESTRATOR AGENT: ${orchestrator.id} ("${orchestrator.name}")\n`;
+    summary += `You MUST send ALL tasks to the orchestrator agent ONLY. The orchestrator will coordinate and delegate to the team.\n`;
+    summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n\n`;
+  }
+
+  summary += `Agent team:\n`;
+  for (const a of config.agents || []) {
+    summary += `  - ${a.id} ("${a.name}"): role=${a.role}, persona=${a.persona || "N/A"}\n`;
+    if (a.responsibilities && a.responsibilities.length > 0) {
+      summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
+    }
+  }
+
+  if (config.workflow?.sequence && config.workflow.sequence.length > 0) {
+    summary += `\nWORKFLOW SEQUENCE:\n`;
+    for (const step of config.workflow.sequence) {
+      const agent = config.agents?.find((a: AgentConfig) => a.id === step.agent);
+      const agentName = agent ? `${agent.name} (${agent.role})` : step.agent;
+      const outputsTo = step.outputs_to ? ` → outputs to: ${step.outputs_to.join(", ")}` : "";
+      summary += `  Step ${step.step}: ${step.agent} [${agentName}] — ${step.action}${outputsTo}\n`;
+    }
+  }
+
+  if (config.connections && config.connections.length > 0) {
+    summary += `\nCONNECTIONS:\n`;
+    for (const c of config.connections) {
+      summary += `  ${c.from} → ${c.to} (${c.protocol})\n`;
+    }
+  }
+
+  summary += `\nINSTRUCTIONS:\n`;
+  if (orchestrator) {
+    summary += `- Send the FULL task to the orchestrator: send_task({to: "${orchestrator.id}", task: "..."})\n`;
+    summary += `- Then wait for the orchestrator's result: wait_result({from: "${orchestrator.id}"})\n`;
+    summary += `- The orchestrator will manage all sub-delegation to worker/checker agents internally\n`;
+    summary += `- Do NOT send tasks to other agents directly — respect the hierarchy\n`;
+  } else {
+    summary += `- Use send_task({to: "agent_id", task: "..."}) to assign work to agents\n`;
+    summary += `- Use wait_result({from: "agent_id"}) to collect the result\n`;
+    summary += `- Send tasks to MULTIPLE agents in a single response for parallel execution\n`;
+  }
+  summary += `- Use check_agents() to see agent statuses\n`;
+  return summary;
+}
+
 // --- Dispatcher ---
 
 // Track parent session ID, depth, and agent ID for sub-agent context
@@ -1343,6 +1949,11 @@ export async function callTool(name: string, args: any): Promise<any> {
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
     case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth);
+
+    // ─── Realtime Agent Tools ───
+    case "send_task": return realtimeSendTask(args);
+    case "wait_result": return realtimeWaitResult(args);
+    case "check_agents": return realtimeCheckAgents();
 
     // ─── Protocol Tools ───
     case "proto_tcp_send": {

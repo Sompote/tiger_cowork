@@ -237,10 +237,9 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.3);
 }
 
-/* Connection port */
+/* Connection ports */
 .agent-node-port {
   position: absolute;
-  right: -8px;
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
@@ -252,6 +251,15 @@
   z-index: 4;
 }
 
+.agent-node-port-out {
+  right: -8px;
+}
+
+.agent-node-port-in {
+  left: -8px;
+  cursor: default;
+}
+
 .port-dot {
   width: 10px;
   height: 10px;
@@ -261,9 +269,20 @@
   transition: all 0.15s;
 }
 
-.agent-node-port:hover .port-dot {
+.port-dot-in {
+  width: 8px;
+  height: 8px;
+  border: 2px solid #34a853;
+}
+
+.agent-node-port-out:hover .port-dot {
   background: #4285f4;
   transform: scale(1.3);
+}
+
+.agent-node-port-in:hover .port-dot-in {
+  background: #34a853;
+  transform: scale(1.2);
 }
 
 /* ─── Agent Definition Panel ─── */

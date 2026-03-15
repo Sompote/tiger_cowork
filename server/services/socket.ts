@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
-import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary } from "./toolbox";
+import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator } from "./toolbox";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -113,8 +113,11 @@ function buildSystemPrompt(): string {
 
   const settings = getSettings();
   const isManualSubAgent = settings.subAgentEnabled && settings.subAgentMode === "manual";
+  const isRealtimeAgent = settings.subAgentEnabled && settings.subAgentMode === "realtime";
   const subAgentInfo = settings.subAgentEnabled
-    ? `\n- spawn_subagent: Delegate a sub-task to an independent sub-agent. The sub-agent runs its own tool-calling loop and returns results. Use for: parallel research, breaking complex tasks into parts, or specialized work. Params: task (required), label (short name), context (extra info), agentId (match agent from YAML config).`
+    ? isRealtimeAgent
+      ? `\n- send_task: Send a task to an agent in the realtime session (all agents are already alive). Params: to (agent ID), task (description), context (optional), wait (optional, block for result).\n- wait_result: Wait for a result from an agent. Params: from (agent ID), timeout (optional seconds).\n- check_agents: Check status of all agents in the realtime session.`
+      : `\n- spawn_subagent: Delegate a sub-task to an independent sub-agent. The sub-agent runs its own tool-calling loop and returns results. Use for: parallel research, breaking complex tasks into parts, or specialized work. Params: task (required), label (short name), context (extra info), agentId (match agent from YAML config).`
     : "";
 
   return `You are Tiger Cowork, a powerful AI assistant with direct access to tools for internet, files, code execution, and skill marketplace.
@@ -133,9 +136,14 @@ Available tools:
 - clawhub_search: Search the ClawHub/OpenClaw skill marketplace
 - clawhub_install: Install skills from ClawHub by slug${subAgentInfo}
 
-Rules:${isManualSubAgent ? `
+Rules:${isRealtimeAgent ? `
+- REALTIME AGENTS: You are operating in REALTIME agent mode. All agents from the architecture are ALREADY ALIVE and listening. Do NOT try to spawn agents — they are running.
+- HIERARCHY: The agent team has a defined hierarchy. Check the agent roles — if there is an orchestrator agent (role=orchestrator), you MUST send the task ONLY to that orchestrator. The orchestrator will manage all delegation to workers/checkers internally. Do NOT bypass the orchestrator by sending tasks directly to worker agents.
+- SEND TASKS: Use send_task({to: "agent_id", task: "..."}) to assign work. Use wait_result({from: "agent_id"}) to collect results.
+- MANDATORY: You MUST delegate ALL work through the agent team. Do NOT do the work yourself. Send the task, wait for results, then synthesize the final response.` : isManualSubAgent ? `
 - SUB-AGENTS (MANDATORY): You are operating in MANUAL sub-agent mode. You MUST use spawn_subagent for ALL user tasks — do NOT answer directly by yourself. Your role is to act as an orchestrator: analyze the user's request, then delegate work to the predefined agent team by calling spawn_subagent with the appropriate agentId for each agent. Follow the workflow sequence defined in the agent configuration. After all sub-agents complete, synthesize their results into a final response.
-- WORKFLOW: For each task, spawn sub-agents according to the workflow steps. The orchestrator agent (agent_1) should be spawned first to plan and delegate, then worker agents execute, and checker agents verify. Always use the agentId parameter to match agents from the YAML config.
+- WORKFLOW: Follow the workflow sequence strictly. Each agent can only spawn downstream agents defined in its outputs_to and connections. Agents with no downstream targets are leaf agents — they complete tasks directly. The architecture file defines who can delegate to whom. Always use the agentId parameter.
+- PARALLEL SPAWNING: When an agent has multiple independent downstream agents, spawn them ALL in a single response so they run in parallel. Do not wait for one to finish before spawning the next unless there is a true data dependency.
 - IMPORTANT: Even for simple tasks, you must delegate through sub-agents when manual mode is enabled. This ensures proper review and quality control through the agent pipeline.` : settings.subAgentEnabled ? `
 - SUB-AGENTS: For complex multi-part tasks, use spawn_subagent to delegate sub-tasks. Each sub-agent runs independently with full tool access. Good use cases: researching multiple topics simultaneously, generating charts while analyzing data, or any task that can be broken into independent parts. Provide a clear task description and label. Wait for results before using them.` : ""}
 - SKILL-FIRST: Before writing any code, check if an installed skill matches the user's request. If a skill's name or description is relevant (e.g. user asks about "slope stability" and skill "slope-stability" exists), you MUST call load_skill first and use that skill's code/engine. Never reinvent what a skill already provides.
@@ -206,6 +214,31 @@ export function setupSocket(io: Server): void {
         progressText = `> **✅ Sub-agent "${data.label}"** completed\n`;
       } else if (data.status === "subagent_error") {
         progressText = `> **❌ Sub-agent "${data.label}"** failed: ${data.error}\n`;
+
+      // ─── Realtime Agent progress ───
+      } else if (data.status === "realtime_agent_ready") {
+        if (!swarmTagShown.has(data.sessionId)) {
+          swarmTagShown.add(data.sessionId);
+          progressText += `\n<div class="swarm-tag">⚡ REALTIME AGENT MODE</div>\n\n`;
+        }
+        progressText += `> **🟢 ${data.label}** (${data.role}) is ready\n`;
+      } else if (data.status === "realtime_agent_working") {
+        progressText = `> **🔄 ${data.label}** working — _${(data.task || "").slice(0, 120)}_\n`;
+      } else if (data.status === "realtime_agent_tool") {
+        if (data.tool?.startsWith("proto_")) {
+          const protoName = data.tool.replace("proto_", "").split("_")[0].toUpperCase();
+          progressText = `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> **${data.label}** → \`${data.tool}\`\n`;
+        } else if (data.tool === "send_task") {
+          progressText = `> **📤 ${data.label}** delegating task\n`;
+        } else if (data.tool === "wait_result") {
+          progressText = `> **⏳ ${data.label}** waiting for result\n`;
+        } else {
+          progressText = `> **⚙️ ${data.label}** → \`${data.tool}\`\n`;
+        }
+      } else if (data.status === "realtime_agent_tool_done") {
+        // silent — avoid flooding
+      } else if (data.status === "realtime_agent_done") {
+        progressText = `> **✅ ${data.label}** task completed\n`;
       }
       if (progressText) {
         ioRef.emit("chat:chunk", { sessionId: data.sessionId, content: progressText });
@@ -359,6 +392,22 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         // Set call context for sub-agent spawning
         setCallContext(sessionId, 0);
 
+        // Boot realtime agents if in realtime mode
+        const rtSettings = getSettings();
+        let realtimeTools: any[] | undefined;
+        if (rtSettings.subAgentEnabled && rtSettings.subAgentMode === "realtime" && rtSettings.subAgentConfigFile) {
+          const rtSession = await startRealtimeSession(sessionId, rtSettings.subAgentConfigFile, abortController.signal);
+          if (rtSession) {
+            realtimeTools = getToolsForRealtimeOrchestrator();
+            // Notify client that realtime agents are alive
+            const agentNames = Array.from(rtSession.agents.values()).map(h => `${h.agentDef.name} (${h.agentDef.id})`);
+            socket.emit("chat:chunk", {
+              sessionId,
+              content: `> **Realtime Agents Active:** ${agentNames.join(", ")}\n\n`,
+            });
+          }
+        }
+
         const result = await callTigerBotWithTools(
           chatMessages,
           buildSystemPrompt(),
@@ -374,21 +423,44 @@ img.save('${tmpOut}', 'JPEG', quality=80)
                 content: `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> \`${name}\` — ${args.topic || args.peer || args.to || ""}\n`,
               });
             }
-            // Update active task
-            activeTask.status = `Running: ${name}`;
+            // Tag realtime agent tools in chat
+            if ((name === "send_task" || name === "wait_result") && ioRef) {
+              const targetId = args.to || args.from || "";
+              ioRef.emit("chat:chunk", {
+                sessionId,
+                content: `> <span class="proto-tag proto-bus">AGENT</span> \`${name}\` → ${targetId}\n`,
+              });
+            }
+            // Update active task with descriptive status for orchestrator tools
+            if (name === "send_task") {
+              activeTask.status = `Running: send_task — delegating to ${args.to || "agent"}`;
+            } else if (name === "wait_result") {
+              activeTask.status = `Running: wait_result — waiting for ${args.from || "agent"}`;
+            } else if (name === "check_agents") {
+              activeTask.status = `Running: check_agents`;
+            } else {
+              activeTask.status = `Running: ${name}`;
+            }
             activeTask.toolCalls.push(name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           // onToolResult — collect output files, show status only
           (name, toolResult) => {
             broadcastStatus({ sessionId, status: "tool_result", tool: name });
-            activeTask.status = `${name} done, thinking...`;
+            if (name === "wait_result") {
+              activeTask.status = "Agent result received, thinking...";
+            } else if (name === "send_task") {
+              activeTask.status = "Task delegated, orchestrating...";
+            } else {
+              activeTask.status = `${name} done, thinking...`;
+            }
             activeTask.lastUpdate = new Date().toISOString();
             if (toolResult?.outputFiles) {
               outputFiles.push(...toolResult.outputFiles);
             }
           },
-          abortController.signal
+          abortController.signal,
+          realtimeTools,
         );
 
         // Clear streaming progress and show final AI response
@@ -450,6 +522,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        // Shutdown realtime session when task completes
+        shutdownRealtimeSession(sessionId);
         activeTasks.delete(taskId);
         taskAbortControllers.delete(taskId);
       }
@@ -603,6 +677,21 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         // Set call context for sub-agent spawning
         setCallContext(sessionId, 0);
 
+        // Boot realtime agents if in realtime mode
+        const rtSettings = getSettings();
+        let realtimeTools: any[] | undefined;
+        if (rtSettings.subAgentEnabled && rtSettings.subAgentMode === "realtime" && rtSettings.subAgentConfigFile) {
+          const rtSession = await startRealtimeSession(sessionId, rtSettings.subAgentConfigFile, abortController.signal);
+          if (rtSession) {
+            realtimeTools = getToolsForRealtimeOrchestrator();
+            const agentNames = Array.from(rtSession.agents.values()).map(h => `${h.agentDef.name} (${h.agentDef.id})`);
+            socket.emit("chat:chunk", {
+              sessionId,
+              content: `> **Realtime Agents Active:** ${agentNames.join(", ")}\n\n`,
+            });
+          }
+        }
+
         const result = await callTigerBotWithTools(
           chatMessages,
           projectPrompt,
@@ -616,17 +705,41 @@ img.save('${tmpOut}', 'JPEG', quality=80)
                 content: `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> \`${name}\` — ${args.topic || args.peer || args.to || ""}\n`,
               });
             }
-            activeTask.status = `Running: ${name}`;
+            // Tag realtime agent tools in chat
+            if ((name === "send_task" || name === "wait_result") && ioRef) {
+              const targetId = args.to || args.from || "";
+              ioRef.emit("chat:chunk", {
+                sessionId,
+                content: `> <span class="proto-tag proto-bus">AGENT</span> \`${name}\` → ${targetId}\n`,
+              });
+            }
+            // Descriptive active task status for orchestrator tools
+            if (name === "send_task") {
+              activeTask.status = `Running: send_task — delegating to ${args.to || "agent"}`;
+            } else if (name === "wait_result") {
+              activeTask.status = `Running: wait_result — waiting for ${args.from || "agent"}`;
+            } else if (name === "check_agents") {
+              activeTask.status = `Running: check_agents`;
+            } else {
+              activeTask.status = `Running: ${name}`;
+            }
             activeTask.toolCalls.push(name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           (name, toolResult) => {
             broadcastStatus({ sessionId, status: "tool_result", tool: name });
-            activeTask.status = `${name} done, thinking...`;
+            if (name === "wait_result") {
+              activeTask.status = "Agent result received, thinking...";
+            } else if (name === "send_task") {
+              activeTask.status = "Task delegated, orchestrating...";
+            } else {
+              activeTask.status = `${name} done, thinking...`;
+            }
             activeTask.lastUpdate = new Date().toISOString();
             if (toolResult?.outputFiles) outputFiles.push(...toolResult.outputFiles);
           },
-          abortController.signal
+          abortController.signal,
+          realtimeTools,
         );
 
         // Clear streaming progress and show final AI response
@@ -683,6 +796,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        shutdownRealtimeSession(sessionId);
         activeTasks.delete(taskId);
         taskAbortControllers.delete(taskId);
       }

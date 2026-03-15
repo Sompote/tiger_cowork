@@ -243,6 +243,8 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     run_react: "Running React", run_shell: "Running command", read_file: "Reading file",
     write_file: "Writing file", list_files: "Listing files", list_skills: "Listing skills",
     load_skill: "Loading skill", clawhub_search: "Searching ClawHub", clawhub_install: "Installing skill",
+    spawn_subagent: "Spawning sub-agent", send_task: "Delegating task",
+    wait_result: "Waiting for agent", check_agents: "Checking agents",
   };
 
   // Restore in-progress state on mount, reconnect, or session switch
@@ -258,10 +260,18 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
         if (activeTask) {
           setIsLoading(true);
           if (activeTask.status.startsWith("Running:")) {
-            const tool = activeTask.status.replace("Running: ", "");
-            const label = toolLabels[tool] || tool;
-            setStatus(`${label}...`);
-          } else if (activeTask.status.includes("done, thinking")) {
+            const rawTool = activeTask.status.replace("Running: ", "");
+            const tool = rawTool.split(" — ")[0];
+            const detail = rawTool.includes(" — ") ? rawTool.split(" — ")[1] : "";
+            if (tool === "wait_result" && detail) {
+              setStatus(`Waiting for ${detail}...`);
+            } else if (tool === "send_task" && detail) {
+              setStatus(`${detail}...`);
+            } else {
+              const label = toolLabels[tool] || tool;
+              setStatus(`${label}...`);
+            }
+          } else if (activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
             setStatus(activeTask.status);
           } else {
             setStatus("Thinking...");
@@ -314,8 +324,27 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       if (data.sessionId && data.sessionId !== activeSession) return;
 
       if (data.status === "thinking") { setIsLoading(true); setStatus("Thinking..."); }
-      else if (data.status === "tool_call") { setIsLoading(true); setStatus(`${toolLabels[data.tool] || data.tool}...`); }
-      else if (data.status === "tool_result") setStatus(`${toolLabels[data.tool] || data.tool} done, thinking...`);
+      else if (data.status === "tool_call") {
+        setIsLoading(true);
+        if (data.tool === "send_task" && data.args) {
+          const target = data.args.to || "agent";
+          const taskPreview = data.args.task ? ` — ${data.args.task.slice(0, 60)}` : "";
+          setStatus(`Delegating to ${target}${taskPreview}...`);
+        } else if (data.tool === "wait_result" && data.args) {
+          setStatus(`Waiting for ${data.args.from || "agent"} to finish...`);
+        } else {
+          setStatus(`${toolLabels[data.tool] || data.tool}...`);
+        }
+      }
+      else if (data.status === "tool_result") {
+        if (data.tool === "wait_result") setStatus("Agent result received, thinking...");
+        else if (data.tool === "send_task") setStatus("Task delegated, orchestrating...");
+        else setStatus(`${toolLabels[data.tool] || data.tool} done, thinking...`);
+      }
+      else if (data.status === "subagent_spawn") { setIsLoading(true); setStatus(`Sub-agent "${data.label}" spawned...`); }
+      else if (data.status === "subagent_tool") { setIsLoading(true); setStatus(`Sub-agent "${data.label}": ${toolLabels[data.tool] || data.tool}...`); }
+      else if (data.status === "subagent_done") setStatus(`Sub-agent "${data.label}" completed`);
+      else if (data.status === "subagent_error") setStatus(`Sub-agent "${data.label}" failed: ${data.error}`);
       else setStatus("");
     });
     return () => { unsub1(); unsub2(); unsub3(); };

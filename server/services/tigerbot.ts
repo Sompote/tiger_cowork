@@ -233,9 +233,10 @@ export async function callTigerBotWithTools(
       parsedToolCalls.push({ tc, fnName, fnArgs });
     }
 
-    // Separate spawn_subagent calls (can run in parallel) from other tool calls (run sequentially)
-    const subagentCalls = parsedToolCalls.filter(p => p.fnName === "spawn_subagent");
-    const otherCalls = parsedToolCalls.filter(p => p.fnName !== "spawn_subagent");
+    // Separate parallelizable calls (spawn_subagent, send_task) from sequential ones
+    const parallelToolNames = new Set(["spawn_subagent", "send_task"]);
+    const subagentCalls = parsedToolCalls.filter(p => parallelToolNames.has(p.fnName));
+    const otherCalls = parsedToolCalls.filter(p => !parallelToolNames.has(p.fnName));
 
     // Helper to execute a single tool call and record result
     const executeTool = async (parsed: { tc: any; fnName: string; fnArgs: any }) => {

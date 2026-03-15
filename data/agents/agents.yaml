@@ -16,7 +16,7 @@ agents:
     bus:
       enabled: true
   - id: agent_2
-    name: design
+    name: structure engineer
     role: worker
     model: claude-sonnet-4-6
     persona: 'You are a specialized agent based on: Design engineer, structural engineer'
@@ -30,20 +30,24 @@ agents:
     name: checker
     role: checker
     model: claude-sonnet-4-6
-    persona: 'You are a specialized agent based on: Design engineer, structural engineer'
+    persona: 'You are a specialized agent based on: Senior engineer, careful, and experienced.'
     responsibilities:
-      - 'You are a specialized agent based on: Design engineer, structural engineer'
+      - >-
+        You are a specialized agent based on: checking the calculation every step. Chek conformation with the design
+        code.
     bus:
       enabled: true
   - id: agent_4
-    name: Design 2
+    name: geotechnical engineer
     role: worker
     model: claude-sonnet-4-6
     persona: You are a geotechnical engineer. Expert in underground investigations and foundation.
     responsibilities:
       - Analyze and process assigned tasks
       - Report findings to the orchestrator
-      - Collaborate with peer agents when needed Design calculations must be using code.
+      - >-
+        Collaborate with peer agents when needed. Subsurface evaluation and soil profile evaluation. Design calculations
+        must be using code.
     bus:
       enabled: true
   - id: agent_5
@@ -54,7 +58,9 @@ agents:
     responsibilities:
       - Analyze and process assigned tasks
       - Report findings to the orchestrator
-      - Collaborate with peer agents when needed The report includes detail calculations and summary
+      - >-
+        Collaborate with peer agents when needed.  The report includes all detailed calculations, every calculation is
+        needed,  and summary.
     bus:
       enabled: true
 workflow:
@@ -114,7 +120,9 @@ workflow:
         permitted_topics: []
     - step: 3
       agent: agent_3
-      action: 'You are a specialized agent based on: Design engineer, structural engineer'
+      action: >-
+        You are a specialized agent based on: checking the calculation every step. Chek conformation with the design
+        code.
       outputs_to:
         - agent_4
         - agent_5

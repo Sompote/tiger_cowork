@@ -548,18 +548,6 @@ export default function AgentEditor({
     const agent = state.agents.find((a) => a.id === agentId);
     if (!agent) return;
 
-    if (e.shiftKey) {
-      // Shift+click starts connection drawing
-      const rect = canvasRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setConnecting({
-        fromId: agentId,
-        mouseX: e.clientX - rect.left,
-        mouseY: e.clientY - rect.top,
-      });
-      return;
-    }
-
     setDragging({
       id: agentId,
       offsetX: e.clientX - agent.x,
@@ -568,6 +556,19 @@ export default function AgentEditor({
     setSelectedAgent(agentId);
     setSelectedConn(null);
   }, [state.agents]);
+
+  // Port click starts connection drawing (no shift needed)
+  const handlePortMouseDown = useCallback((e: React.MouseEvent, agentId: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setConnecting({
+      fromId: agentId,
+      mouseX: e.clientX - rect.left,
+      mouseY: e.clientY - rect.top,
+    });
+  }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (dragging) {
@@ -779,6 +780,19 @@ export default function AgentEditor({
     return { x: agent.x + 90, y: agent.y + 40 };
   };
 
+  // Port positions: output = right edge, input = left edge
+  const getOutputPort = (id: string) => {
+    const agent = state.agents.find((a) => a.id === id);
+    if (!agent) return { x: 0, y: 0 };
+    return { x: agent.x + 180, y: agent.y + 40 };
+  };
+
+  const getInputPort = (id: string) => {
+    const agent = state.agents.find((a) => a.id === id);
+    if (!agent) return { x: 0, y: 0 };
+    return { x: agent.x, y: agent.y + 40 };
+  };
+
   const selectedAgentData = state.agents.find((a) => a.id === selectedAgent);
   const selectedConnData = state.connections.find((c) => c.id === selectedConn);
 
@@ -914,16 +928,16 @@ export default function AgentEditor({
               {state.agents.length === 0 && (
                 <div className="editor-empty-hint">
                   Click <strong>"+ Add Agent"</strong> to start building your agent system.<br />
-                  Drag agents to position them. <strong>Shift+drag</strong> to another agent to connect.<br />
-                  Click a line to select and edit it.
+                  Drag agents to position them. Click a <strong>port dot</strong> and drag to another agent to connect.<br />
+                  Click a connection line to edit or remove it.
                 </div>
               )}
 
               {/* SVG layer for connections */}
               <svg className="editor-svg-layer">
                 {state.connections.map((conn) => {
-                  const from = getNodeCenter(conn.from);
-                  const to = getNodeCenter(conn.to);
+                  const from = getOutputPort(conn.from);
+                  const to = getInputPort(conn.to);
                   const isSelected = selectedConn === conn.id;
                   const protocolColor =
                     conn.protocol === "tcp" ? "#4285f4" :
@@ -991,8 +1005,8 @@ export default function AgentEditor({
                 {/* Drawing line while connecting */}
                 {connecting && (
                   <line
-                    x1={getNodeCenter(connecting.fromId).x}
-                    y1={getNodeCenter(connecting.fromId).y}
+                    x1={getOutputPort(connecting.fromId).x}
+                    y1={getOutputPort(connecting.fromId).y}
                     x2={connecting.mouseX}
                     y2={connecting.mouseY}
                     stroke="#4285f4"
@@ -1038,7 +1052,14 @@ export default function AgentEditor({
                         BUS
                       </div>
                     )}
-                    <div className="agent-node-port" title="Shift+drag to connect">
+                    <div className="agent-node-port agent-node-port-in" title="Input port">
+                      <div className="port-dot port-dot-in" />
+                    </div>
+                    <div
+                      className="agent-node-port agent-node-port-out"
+                      title="Drag to connect"
+                      onMouseDown={(e) => handlePortMouseDown(e, agent.id)}
+                    >
                       <div className="port-dot" />
                     </div>
                   </div>

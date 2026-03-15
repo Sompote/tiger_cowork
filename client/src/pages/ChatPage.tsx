@@ -255,6 +255,9 @@ export default function ChatPage() {
     clawhub_search: "Searching ClawHub",
     clawhub_install: "Installing skill",
     spawn_subagent: "Spawning sub-agent",
+    send_task: "Delegating task",
+    wait_result: "Waiting for agent",
+    check_agents: "Checking agents",
   };
 
   // Restore in-progress state on mount, reconnect, or session switch
@@ -271,10 +274,18 @@ export default function ChatPage() {
         if (activeTask) {
           setIsLoading(true);
           if (activeTask.status.startsWith("Running:")) {
-            const tool = activeTask.status.replace("Running: ", "");
-            const label = toolLabels[tool] || tool;
-            setStatus(`${label}...`);
-          } else if (activeTask.status.includes("done, thinking")) {
+            const rawTool = activeTask.status.replace("Running: ", "");
+            const tool = rawTool.split(" — ")[0]; // extract tool name before description
+            const detail = rawTool.includes(" — ") ? rawTool.split(" — ")[1] : "";
+            if (tool === "wait_result" && detail) {
+              setStatus(`Waiting for ${detail}...`);
+            } else if (tool === "send_task" && detail) {
+              setStatus(`${detail}...`);
+            } else {
+              const label = toolLabels[tool] || tool;
+              setStatus(`${label}...`);
+            }
+          } else if (activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
             setStatus(activeTask.status);
           } else {
             setStatus("Thinking...");
@@ -345,10 +356,24 @@ export default function ChatPage() {
       } else if (data.status === "tool_call") {
         setIsLoading(true);
         const label = toolLabels[data.tool] || data.tool;
-        setStatus(`${label}...`);
+        if (data.tool === "send_task" && data.args) {
+          const target = data.args.to || "agent";
+          const taskPreview = data.args.task ? ` — ${data.args.task.slice(0, 60)}` : "";
+          setStatus(`Delegating to ${target}${taskPreview}...`);
+        } else if (data.tool === "wait_result" && data.args) {
+          setStatus(`Waiting for ${data.args.from || "agent"} to finish...`);
+        } else {
+          setStatus(`${label}...`);
+        }
       } else if (data.status === "tool_result") {
         const label = toolLabels[data.tool] || data.tool;
-        setStatus(`${label} done, thinking...`);
+        if (data.tool === "wait_result") {
+          setStatus("Agent result received, thinking...");
+        } else if (data.tool === "send_task") {
+          setStatus("Task delegated, orchestrating...");
+        } else {
+          setStatus(`${label} done, thinking...`);
+        }
       } else if (data.status === "subagent_spawn") {
         setIsLoading(true);
         setStatus(`Sub-agent "${data.label}" spawned...`);

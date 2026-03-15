@@ -1,10 +1,10 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.2.1
+# Tiger Cowork v0.2.2
 
 > **⚠️ WARNING: This application executes AI-generated code, shell commands, and third-party skills on your machine. Please run it inside a sandboxed environment (e.g. Docker) to protect your host system. See [Security Notice](#security-notice) below.**
 
-A self-hosted AI-powered workspace that combines chat, project management, file management, code execution, scheduled tasks, a visual multi-agent system editor, and a skill marketplace — all in one web interface. Compatible with any **OpenAI-compatible API** (OpenRouter, TigerBot, Ollama, etc.) with tool-calling capabilities.
+A self-hosted AI-powered workspace that combines chat, project management, file management, code execution, scheduled tasks, a visual multi-agent system editor with realtime agent orchestration, and a skill marketplace — all in one web interface. Compatible with any **OpenAI-compatible API** (OpenRouter, TigerBot, Ollama, etc.) with tool-calling capabilities.
 
 ## Screenshots
 
@@ -18,7 +18,7 @@ A self-hosted AI-powered workspace that combines chat, project management, file 
 
 ![Tiger Cowork — Agent System Editor](picture/agent.png)
 
-*Agent System Editor with visual canvas for designing multi-agent systems. Drag-and-drop agent nodes, shift-drag to connect them with configurable protocols (TCP, Bus, Queue), and edit agent definitions with AI-assisted setup. Exports to YAML for the sub-agent system.*
+*Agent System Editor with visual canvas for designing multi-agent systems. Drag-and-drop agent nodes, connect via input/output ports with configurable protocols (TCP, Bus, Queue), toggle bus per agent, and edit definitions with AI-assisted setup. Upload, load, and manage YAML files directly. Exports to YAML for the sub-agent system.*
 
 ## Architecture
 
@@ -118,7 +118,15 @@ Tool Loop Completes
 
 The Sub-Agent system allows the main agent to delegate specific sub-tasks to independent child agents. Each sub-agent runs its own tool loop, has access to the same tools, and returns results back to the parent agent. This enables parallel task decomposition and hierarchical problem solving.
 
-**How it works:**
+Three operating modes are available:
+
+| Mode | How it works |
+|---|---|
+| **Auto** | AI decides when to spawn sub-agents on the fly. Best for ad-hoc tasks. |
+| **Spawn Agent** | Agents are defined in a YAML config. The AI spawns them on demand following the workflow sequence. Each agent only gets the tools and downstream targets defined in the config. |
+| **Realtime Agent** | All agents from the YAML config boot at session start and stay alive. Tasks are sent via `send_task` / `wait_result` for true parallel execution. Agents communicate through the message bus and protocol tools. |
+
+**How it works (Auto / Spawn Agent mode):**
 
 ```
 Parent Agent (processing user request)
@@ -158,13 +166,54 @@ Parent Agent (processing user request)
 └─────────────────────────────┘
 ```
 
+**How it works (Realtime Agent mode):**
+
+```
+User sends a message
+       │
+       ▼
+┌──────────────────────────────┐
+│ All agents boot from YAML     │
+│ config and enter idle state   │
+│ (shown in chat: "🟢 ready")   │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ Orchestrator (the LLM) uses   │
+│ send_task({to, task}) to      │
+│ assign work to agents         │
+│                               │
+│ Multiple send_task calls in   │
+│ one response = parallel exec  │
+└──────────────┬───────────────┘
+               │
+     ┌─────────┼─────────┐
+     ▼         ▼         ▼
+  Agent A   Agent B   Agent C
+  (working)  (working)  (working)
+     │         │         │
+     └─────────┼─────────┘
+               ▼
+┌──────────────────────────────┐
+│ wait_result({from}) collects  │
+│ results from each agent       │
+│                               │
+│ check_agents shows status of  │
+│ all agents in the session     │
+└──────────────┬───────────────┘
+               ▼
+     Final synthesized response
+```
+
 **Key features:**
 
-- **Depth control** — Sub-agents can spawn their own sub-agents up to a configurable max depth (default 2). At max depth, the `spawn_subagent` tool is removed from the available tools to prevent infinite recursion.
+- **Three modes** — Auto (AI decides), Spawn Agent (YAML-defined, on-demand), Realtime Agent (YAML-defined, always-on)
+- **Depth control** — In Auto mode, sub-agents can spawn their own sub-agents up to a configurable max depth (default 2). In Spawn Agent mode, the YAML workflow structure is the boundary — agents can only spawn downstream targets defined in `outputs_to` and connections.
+- **Protocol-aware tooling** — Each agent only receives the protocol tools it's configured to use: bus tools if `bus.enabled`, TCP/queue tools only for connected protocols.
 - **Concurrency limit** — Controls how many sub-agents can run simultaneously (default 3).
 - **Timeout** — Each sub-agent has a configurable timeout (default 120 seconds) enforced via AbortController.
 - **Model override** — Sub-agents can use a different model than the parent (e.g. a faster/cheaper model for simple sub-tasks).
-- **Real-time status** — All sub-agent events (spawn, tool execution, completion, errors) are broadcast via Socket.IO and displayed in the chat UI.
+- **Real-time status** — All agent events (spawn, tool execution, delegation, completion, errors) are broadcast via Socket.IO with protocol-tagged status messages in the chat UI.
 - **Auto-cleanup** — Completed sub-agents are automatically removed from the tracking map after 60 seconds (30 seconds on error).
 
 **Settings for Sub-Agent System:**
@@ -172,8 +221,10 @@ Parent Agent (processing user request)
 | Setting | Default | Description |
 |---|---|---|
 | `subAgentEnabled` | `false` | Enable/disable sub-agent spawning |
+| `subAgentMode` | `auto` | Operating mode: `auto`, `manual` (Spawn Agent), or `realtime` |
+| `subAgentConfigFile` | *(empty)* | YAML config file for Spawn Agent / Realtime modes |
 | `subAgentModel` | *(empty)* | Model override for sub-agents (uses main model if empty) |
-| `subAgentMaxDepth` | `2` | Maximum nesting depth (1–5) |
+| `subAgentMaxDepth` | `2` | Maximum nesting depth (1–5, Auto mode only) |
 | `subAgentMaxConcurrent` | `3` | Maximum simultaneous sub-agents (1–10) |
 | `subAgentTimeout` | `120` | Timeout per sub-agent in seconds (30–600) |
 
@@ -183,8 +234,22 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Research tasks: spawn one sub-agent to search the web while another analyzes local files
 - Multi-file operations: delegate file processing to sub-agents in parallel
 - Complex analysis: break a report into sections, each handled by a dedicated sub-agent
+- Realtime orchestration: boot an entire agent team (orchestrator + workers + checker) and send tasks for true parallel execution with inter-agent communication via bus
 
-## What's New in v0.2.1
+## What's New in v0.2.2
+
+- **Realtime Agent Mode** — New sub-agent operating mode where all agents from a YAML config boot at session start and stay alive. Tasks are sent via `send_task` / `wait_result` tools for true parallel execution. Agents communicate through the message bus and protocol tools. The orchestrator delegates to the agent team hierarchy automatically.
+- **New orchestrator tools** — `send_task` (assign work to a running agent), `wait_result` (block until agent finishes), `check_agents` (view status of all agents in the session).
+- **Bus toggle per agent** — Individual agents can be connected/disconnected from the shared message bus in the Agent Editor. Configure bus topics per agent for targeted pub/sub communication.
+- **Protocol-aware tool filtering** — Sub-agents now only receive the protocol tools they're configured to use (bus tools only if `bus.enabled`, TCP/queue tools only for connected protocols), reducing noise and preventing misuse.
+- **Agent Editor file manager** — Upload, load, and delete YAML architecture files directly within the Agent Editor. A collapsible file manager panel shows all existing configs with agent count and metadata.
+- **YAML upload in Settings** — Upload YAML agent config files directly from the Settings page alongside the existing Swarm Agent Creator.
+- **Port-based connection drawing** — Agent nodes now have distinct input (left) and output (right) port dots. Drag from an output port to an input port to create connections — no more shift+drag required.
+- **Free-text model input** — Model selection changed from a hardcoded dropdown to a free-text input, supporting any model name from any provider.
+- **Spawn Agent mode renamed** — "Manual" mode renamed to "Spawn Agent" in the Settings UI for clarity. Agents in this mode now respect workflow boundaries — they can only spawn downstream targets defined in `outputs_to` and connections.
+- **Improved realtime status UI** — Chat shows detailed realtime agent lifecycle events: ready, working, delegating, waiting, tool calls with protocol tags, and completion status.
+
+### Previous: v0.2.1
 
 - **Agent System Editor** — A new visual editor for designing multi-agent systems. Build agent teams on a drag-and-drop canvas, define roles (orchestrator, worker, checker, reporter, researcher), set models, personas, and responsibilities. Connect agents with configurable communication protocols (TCP, Bus, Queue) and export the entire system as YAML. Includes AI-assisted agent setup — describe what you need and the editor generates the definition.
 - **Agent YAML management** — New backend API for listing, creating, parsing, and generating agent configuration files stored in `data/agents/`.
@@ -215,11 +280,11 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 
 ### AI Chat with Tool Calling
 - Conversational AI assistant with automatic tool use
-- 13 built-in tools: web search, URL fetch, Python execution, React rendering, shell commands, file read/write/list, skill management, ClawHub marketplace, and sub-agent spawning
+- 16 built-in tools: web search, URL fetch, Python execution, React rendering, shell commands, file read/write/list, skill management, ClawHub marketplace, sub-agent spawning, and realtime agent orchestration (send_task, wait_result, check_agents)
 - Configurable tool loop limits: max tool rounds (default 8), max tool calls (default 12), consecutive error threshold, and result truncation length — all adjustable in Settings > Agent Parameters
-- **Sub-Agent Spawning** — Delegate sub-tasks to independent child agents with their own tool loops. Configurable: depth limits, concurrency, timeout, and model override
+- **Sub-Agent Spawning** — Delegate sub-tasks to independent child agents with their own tool loops. Three modes: Auto (AI decides), Spawn Agent (YAML-defined), Realtime Agent (always-on). Configurable: depth limits, concurrency, timeout, and model override
 - **Reflection Loop** — Optional self-evaluation after tool loops. The agent scores its own work against the user's objective and retries if the score is below the threshold. Configurable: enable/disable, score threshold (0.0–1.0), max retries
-- **Agent System Editor** — Visual drag-and-drop editor for designing multi-agent systems. Define agent roles, models, personas, and responsibilities. Connect agents with communication protocols (TCP, Bus, Queue). AI-assisted agent setup and YAML export
+- **Agent System Editor** — Visual drag-and-drop editor for designing multi-agent systems. Define agent roles, models, personas, and responsibilities. Connect agents via port-based drawing with communication protocols (TCP, Bus, Queue). Per-agent bus toggle with topic configuration. Built-in file manager for YAML upload/load/delete. AI-assisted agent setup and YAML export
 - Real-time streaming of responses and tool call progress via Socket.IO
 - Automatic output file generation for analysis/chart requests
 - File attachments with image vision support
@@ -241,15 +306,18 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 
 ### Agent System Editor
 - Visual drag-and-drop canvas for designing multi-agent systems
-- **Agent nodes** — Create agents with configurable roles (orchestrator, worker, checker, reporter, researcher), LLM models (Claude, GPT), personas, and responsibility lists
-- **Connection drawing** — Shift+drag from one agent to another to create connections with communication protocols:
+- **Agent nodes** — Create agents with configurable roles (orchestrator, worker, checker, reporter, researcher), any LLM model (free-text input), personas, and responsibility lists
+- **Connection drawing** — Drag from an output port (right side) to an input port (left side) to create connections with communication protocols:
   - **TCP** — Bidirectional async socket communication
-  - **Bus** — Event bus broadcast
+  - **Bus** — Event bus broadcast (toggle per agent with configurable topics)
   - **Queue** — Message queue handoff
+- **Bus toggle** — Enable/disable the shared message bus per agent. Configure bus topics for targeted pub/sub communication
 - **AI-assisted setup** — Describe the agent you need in natural language, and the editor generates the role, persona, model, and responsibilities automatically
 - **Orchestration modes** — Choose from Hierarchical, Flat, Mesh, or Pipeline topologies
-- **YAML export** — The editor generates a complete YAML configuration including system metadata, agent definitions, workflow sequences, connection topology, and communication settings
+- **YAML export** — The editor generates a complete YAML configuration including system metadata, agent definitions, bus settings, workflow sequences, connection topology, and communication settings
+- **File manager** — Upload, load, and delete YAML architecture files directly within the editor. Shows existing configs with agent count and metadata
 - **Save & load** — Save agent configurations as `.yaml` files in `data/agents/`, load existing configs back into the editor
+- **YAML upload** — Upload existing `.yaml` / `.yml` files from your local machine into the editor or from the Settings page
 - **Preview** — Preview the generated YAML before saving, with copy-to-clipboard support
 
 ### Output Panel
@@ -695,7 +763,10 @@ tiger_cowork/
 | `load_skill`     | Load a skill's SKILL.md instructions                     |
 | `clawhub_search` | Search the ClawHub skill marketplace                     |
 | `clawhub_install`| Install a skill from ClawHub by slug                     |
-| `spawn_subagent` | Spawn an independent sub-agent for a specific sub-task   |
+| `spawn_subagent` | Spawn an independent sub-agent for a specific sub-task (Auto / Spawn Agent modes) |
+| `send_task`      | Send a task to a running agent in a realtime session (Realtime mode) |
+| `wait_result`    | Wait for a result from an agent that was given a task (Realtime mode) |
+| `check_agents`   | Check status of all agents in the realtime session (Realtime mode) |
 
 ## API Endpoints
 
@@ -754,11 +825,26 @@ tiger_cowork/
 | `chat:status`       | Server → Client  | Status update (thinking, tool call)  |
 | `chat:response`     | Server → Client  | Final complete response with files   |
 | `chat:subagent`     | Server → Client  | Sub-agent status (spawn, tool, done, error) |
+| `chat:chunk` (realtime) | Server → Client | Realtime agent lifecycle (ready, working, tool, delegating, done) |
 | `python:run`        | Client → Server  | Execute Python code                  |
 | `python:status`     | Server → Client  | Python execution status              |
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.2.2 (2026-03-15)
+- Add **Realtime Agent Mode** — all agents boot at session start and stay alive for true parallel execution via `send_task` / `wait_result` / `check_agents` tools
+- New orchestrator tools: `send_task` (assign work), `wait_result` (collect results), `check_agents` (view session status)
+- Add **bus toggle per agent** in Agent Editor — enable/disable shared message bus with configurable topics per agent
+- Add **protocol-aware tool filtering** — sub-agents only receive protocol tools matching their config (bus, TCP, queue)
+- Add **Agent Editor file manager** — upload, load, and delete YAML architecture files directly within the editor
+- Add **YAML upload** in Settings page alongside Swarm Agent Creator
+- Change connection drawing to **port-based** — drag from output port (right) to input port (left) instead of shift+drag
+- Change model selection to **free-text input** — supports any model name from any provider
+- Rename "Manual" sub-agent mode to **"Spawn Agent"** for clarity; agents now respect workflow boundaries (only spawn downstream targets from `outputs_to` and connections)
+- Add `busWaitForMessage` helper for async message waiting with timeout/abort support in protocols service
+- Improve chat UI status messages with realtime agent lifecycle events (ready, working, delegating, waiting, protocol-tagged tool calls)
+- Add upload error feedback UI for YAML file validation failures
 
 ### v0.2.1 (2026-03-14)
 - Add **Agent System Editor** — visual drag-and-drop canvas for designing multi-agent systems with role-based agent nodes, connection drawing, and communication protocol configuration (TCP, Bus, Queue)

@@ -326,16 +326,19 @@ export default function SettingsPage() {
                   onChange={(e) => setSettings({ ...settings, subAgentMode: e.target.value })}
                 >
                   <option value="auto">Auto (AI decides)</option>
-                  <option value="manual">Manual (YAML config file)</option>
+                  <option value="manual">Spawn Agent (YAML config file)</option>
+                  <option value="realtime">Realtime Agent (YAML config file)</option>
                 </select>
                 <p className="hint">
-                  {settings.subAgentMode === "manual"
+                  {settings.subAgentMode === "realtime"
+                    ? "All agents boot at session start and stay alive — tasks are sent via bus for true parallel execution"
+                    : settings.subAgentMode === "manual"
                     ? "Agents are defined by a YAML configuration file you provide"
                     : "The AI automatically spawns and manages sub-agents as needed"}
                 </p>
               </div>
 
-              {settings.subAgentMode === "manual" ? (
+              {(settings.subAgentMode === "manual" || settings.subAgentMode === "realtime") ? (
                 <>
                   {/* Manual YAML Config */}
                   <div className="form-group">
