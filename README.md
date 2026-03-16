@@ -16,16 +16,36 @@ The installer will automatically:
 - Build and start the app
 - Open your browser at `http://localhost:3001`
 
+### One-Click Install for Windows
+
+1. **Download** [`TigerCoworkInstaller.zip`](https://github.com/Sompote/tiger_cowork/releases/latest) (zip file)
+2. **Unzip** and **double-click** `TigerCoworkInstaller.bat`
+3. **Choose** a folder to install — that's it!
+
+The installer will automatically:
+- Install Docker Desktop and Git if you don't have them
+- Download Tiger Cowork
+- Build and start the app
+- Open your browser at `http://localhost:3001`
+
 ### After Installation
 
-- **To start the app** — go to your install folder and double-click `TigerCowork.app`
-- **To stop the app** — open Docker Desktop → Containers → click stop on `tiger-cowork`
-- **To set an access token** — edit the `.env` file in your install folder and set `ACCESS_TOKEN=your-token`
+| | Mac | Windows |
+|---|---|---|
+| **Start** | Double-click `TigerCowork.app` in install folder | Double-click `TigerCoworkStart.bat` in install folder |
+| **Stop** | Docker Desktop → Containers → Stop | Double-click `TigerCoworkStop.bat` or Docker Desktop |
+| **Set token** | Edit `.env` → `ACCESS_TOKEN=your-token` | Edit `.env` → `ACCESS_TOKEN=your-token` |
 
 ### Alternative: Install via Terminal
 
+**Mac/Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | iex
 ```
 
 ---
