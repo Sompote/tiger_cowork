@@ -37,7 +37,7 @@ export function killActiveTask(taskId: string): boolean {
   return false;
 }
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(filterSkillIds?: string[]): string {
   // Gather installed clawhub skills
   const clawhubDir = path.resolve("Tiger_bot/skills");
   let clawhubSkills: string[] = [];
@@ -81,14 +81,32 @@ function buildSystemPrompt(): string {
     }
   } catch {}
 
+  // Filter clawhub and custom skills by enabled status in skills.json
+  let allSkillRecords: { id: string; name: string; enabled: boolean; source: string }[] = [];
+  try {
+    allSkillRecords = getSkills();
+  } catch {}
+  const disabledSkillNames = new Set(allSkillRecords.filter((s) => !s.enabled).map((s) => s.name));
+  clawhubSkills = clawhubSkills.filter((name) => !disabledSkillNames.has(name));
+  customSkills = customSkills.filter((cs) => !disabledSkillNames.has(cs.name));
+
   // Also include enabled skills from skills.json that aren't already listed
   let registeredSkills: string[] = [];
-  try {
+  registeredSkills = allSkillRecords
+    .filter((s) => s.enabled && !clawhubSkills.includes(s.name) && !customSkills.some((cs) => cs.name === s.name))
+    .map((s) => `${s.name} (${s.source})`);
+
+  // If project has specific skill selections, filter to only those
+  if (filterSkillIds && filterSkillIds.length > 0) {
+    clawhubSkills = clawhubSkills.filter((name) => filterSkillIds.includes(name));
+    customSkills = customSkills.filter((cs) => filterSkillIds.includes(cs.name));
     const allSkills = getSkills();
-    registeredSkills = allSkills
-      .filter((s) => s.enabled && !clawhubSkills.includes(s.name) && !customSkills.some((cs) => cs.name === s.name))
-      .map((s) => `${s.name} (${s.source})`);
-  } catch {}
+    const selectedSkillNames = allSkills.filter((s) => filterSkillIds.includes(s.id)).map((s) => s.name);
+    registeredSkills = registeredSkills.filter((rs) => {
+      const name = rs.split(" (")[0];
+      return selectedSkillNames.includes(name) || filterSkillIds.includes(name);
+    });
+  }
 
   let skillsList = "";
   if (clawhubSkills.length > 0 || customSkills.length > 0 || registeredSkills.length > 0) {
@@ -546,8 +564,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         ? (path.isAbsolute(project.workingFolder) ? project.workingFolder : path.join(sandboxDir_proj, project.workingFolder))
         : "";
 
-      // Build project-aware system prompt
-      let projectPrompt = buildSystemPrompt();
+      // Build project-aware system prompt (filter skills to only project-selected ones)
+      let projectPrompt = buildSystemPrompt(project.skills && project.skills.length > 0 ? project.skills : undefined);
 
       // Read project memory fresh from {workingFolder}/memory.md every time
       let projectMemory = "";
@@ -581,12 +599,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         projectPrompt += `\n\nProject working folder: ${resolvedWorkingFolder}\nWhen the user asks about files, search this folder first. Use this folder for reading/writing project files.\nIMPORTANT: All output files (charts, reports, documents, etc.) are saved directly to this project working folder. The Python working directory (os.chdir) is set to this folder. PROJECT_DIR also points to this folder.`;
       }
 
-      // Inject selected skills
+      // Inject selected skills info
       if (project.skills && project.skills.length > 0) {
         const allSkills = getSkills();
         const selectedSkills = allSkills.filter((s) => project.skills.includes(s.id));
         if (selectedSkills.length > 0) {
-          projectPrompt += `\n\nProject priority skills: ${selectedSkills.map((s) => s.name).join(", ")}\nThese skills are selected for this project. Prioritize using them when relevant.`;
+          projectPrompt += `\n\nProject skills (ONLY these skills are available for this project): ${selectedSkills.map((s) => s.name).join(", ")}\nYou MUST use these skills when they match the user's request. These are the only skills loaded for this project.`;
         }
       }
 

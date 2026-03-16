@@ -20,7 +20,7 @@
     "name": "BOQ",
     "description": "BOQ",
     "workingFolder": "/root/cowork/project/boq",
-    "memory": "",
+    "memory": "# Project Memory: BOQ (Bill of Quantities)\n\n## **Project Overview**\nThe BOQ project is an automated material estimation and Bill of Quantities generation system. It utilizes AI agents to analyze architectural drawings (e.g., image files like `draw1.png`) to perform quantity take-offs, verify measurements, and generate structured reports for construction cost estimation.\n\n## **Tech Stack**\n*   **AI Agents/Roles**: \n    *   **Construction Cost Estimator (Orchestrator)**: Manages the workflow and scope.\n    *   **Quantity Surveyor**: Performs detailed take-offs and material measurements.\n    *   **QS Checker**: Validates measurements against architectural standards.\n    *   **BOQ Report Engineer**: Compiles final reports.\n*   **Specialized Engines/Skills**: `quantity-survey-arch` (architectural computation engine).\n*   **File Formats**: PNG (drawings), XLSX (reports), PDF (output tables).\n\n## **Key Decisions**\n*   **Multi-Agent Workflow**: Implementation of a multi-tier verification process (Surveyor -> Checker -> Orchestrator) to ensure professional-grade accuracy in material estimates.\n*   **Standardized Take-offs**: Use of specialized architectural skills to align computations with industry standards.\n\n## **File Structure**\n*   `draw1.png`: The primary architectural drawing used for material estimation.\n*   `Architectural_BOQ_Report.xlsx`: The data source/output for quantified material lists.\n\n## **Current Status**\n*   **Completed Tasks**:\n    *   Analysis of `draw1.png` for structural and architectural elements.\n    *   Initial material estimation: Excavation (150 m³), Concrete (45 m³), Masonry (1,200 m²), Plastering (2,400 m²), and Roofing (350 m²).\n    *   Enumeration of openings: 10 Doors (D1, D2, D3 types) and 8 Windows.\n*   **In Progress**:\n    *   Recreating BOQ tables in PDF format.\n    *   Re-investigating estimates using specialized architectural skills for higher precision.\n\n## **Notes**\n*   The system encountered initial API rate-limiting issues (429/500 errors) which were resolved in later sessions.\n*   The project distinguishes between general material quantities and specific \"Openings\" (Doors/Windows) counts.",
     "skills": [
       "b336a1f9-e173-4b60-8ef1-4d11eebc8b26",
       "19c484fd-fb78-47fe-b849-bd3d1276a7ab",
@@ -33,6 +33,6 @@
       "5b0b5ca9-aa66-411b-8171-903f0dd68c62"
     ],
     "createdAt": "2026-03-16T10:46:13.040Z",
-    "updatedAt": "2026-03-16T11:50:02.134Z"
+    "updatedAt": "2026-03-16T12:34:42.232Z"
   }
 ]

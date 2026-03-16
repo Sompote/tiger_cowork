@@ -128,6 +128,7 @@ export const api = {
   deleteProject: (id: string) => request(`/projects/${id}`, { method: "DELETE" }),
   getProjectMemory: (id: string) => request(`/projects/${id}/memory`),
   saveProjectMemory: (id: string, content: string) => request(`/projects/${id}/memory`, { method: "PUT", body: JSON.stringify({ content }) }),
+  generateProjectMemory: (id: string) => request(`/projects/${id}/memory/generate`, { method: "POST" }),
   getProjectFiles: (id: string, path?: string) => request(`/projects/${id}/files?path=${encodeURIComponent(path || "")}`),
   projectMkdir: (id: string, name: string, subPath?: string) => request(`/projects/${id}/files/mkdir`, { method: "POST", body: JSON.stringify({ name, path: subPath || "" }) }),
   projectDeleteFile: (id: string, filePath: string) => request(`/projects/${id}/files?path=${encodeURIComponent(filePath)}`, { method: "DELETE" }),

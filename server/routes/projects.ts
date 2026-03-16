@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { getProjects, saveProjects, getSettings, Project } from "../services/data";
+import { getProjects, saveProjects, getSettings, getChatHistory, Project } from "../services/data";
+import { callTigerBot } from "../services/tigerbot";
 import { v4 as uuid } from "uuid";
 import fs from "fs";
 import path from "path";
@@ -148,6 +149,76 @@ projectsRouter.put("/:id/memory", (req, res) => {
   projects[idx].updatedAt = new Date().toISOString();
   saveProjects(projects);
   res.json({ ok: true });
+});
+
+// Generate memory from chat history using LLM
+projectsRouter.post("/:id/memory/generate", async (req, res) => {
+  try {
+    const projects = getProjects();
+    const project = projects.find((p) => p.id === req.params.id);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    // Find project chat sessions (prefixed with [ProjectName])
+    const sessions = getChatHistory();
+    const prefix = `[${project.name}]`;
+    const projectSessions = sessions.filter((s) => s.title.startsWith(prefix));
+
+    if (projectSessions.length === 0) {
+      return res.status(400).json({ error: "No chat history found for this project" });
+    }
+
+    // Collect messages from all project sessions (limit to keep token usage reasonable)
+    let chatSummary = "";
+    for (const session of projectSessions.slice(-10)) {
+      chatSummary += `\n--- Session: ${session.title} (${session.updatedAt}) ---\n`;
+      for (const msg of session.messages.slice(-50)) {
+        const role = msg.role === "user" ? "User" : "Assistant";
+        const content = typeof msg.content === "string" ? msg.content : "[non-text content]";
+        chatSummary += `${role}: ${content.slice(0, 500)}\n`;
+      }
+    }
+
+    // Read existing memory if any
+    let existingMemory = "";
+    if (project.workingFolder) {
+      const resolved = resolveWorkingFolder(project);
+      const memoryPath = path.join(resolved, "memory.md");
+      try {
+        if (fs.existsSync(memoryPath)) {
+          existingMemory = fs.readFileSync(memoryPath, "utf-8");
+        }
+      } catch {}
+    }
+    if (!existingMemory && project.memory) existingMemory = project.memory;
+
+    const prompt = `You are a project memory assistant. Analyze the chat history below from project "${project.name}" and generate a concise project memory document in Markdown format.
+
+${existingMemory ? `Here is the existing project memory — update and improve it based on the new chat history:\n\n${existingMemory}\n\n` : ""}Extract and organize the following information:
+- **Project Overview**: What the project is about
+- **Tech Stack**: Technologies, frameworks, libraries used
+- **Key Decisions**: Important architectural or design decisions made
+- **File Structure**: Important files and their purposes (if discussed)
+- **Conventions**: Coding conventions or patterns established
+- **Current Status**: What's been done and what's in progress
+- **Notes**: Any other important information
+
+Only include sections that have relevant information from the chat history. Be concise but thorough. Write in Markdown format.
+
+--- CHAT HISTORY ---
+${chatSummary.slice(0, 30000)}
+--- END CHAT HISTORY ---
+
+Generate the project memory document now:`;
+
+    const result = await callTigerBot([
+      { role: "user", content: prompt },
+    ]);
+
+    res.json({ content: result.content });
+  } catch (err: any) {
+    console.error("Memory generation error:", err.message);
+    res.status(500).json({ error: err.message || "Failed to generate memory" });
+  }
 });
 
 // List files in project working folder

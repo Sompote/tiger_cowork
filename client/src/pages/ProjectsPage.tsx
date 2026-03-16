@@ -618,6 +618,7 @@ export default function ProjectsPage() {
   const [memoryDirty, setMemoryDirty] = useState(false);
   const [memorySaving, setMemorySaving] = useState(false);
   const [memoryEditing, setMemoryEditing] = useState(false);
+  const [memoryGenerating, setMemoryGenerating] = useState(false);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [projectFiles, setProjectFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState("");
@@ -687,6 +688,24 @@ export default function ProjectsPage() {
     setMemoryDirty(false);
     setMemorySaving(false);
     setMemoryEditing(false);
+  };
+
+  const generateMemory = async () => {
+    if (!activeProject) return;
+    setMemoryGenerating(true);
+    try {
+      const data = await api.generateProjectMemory(activeProject.id);
+      if (data.content) {
+        setMemoryContent(data.content);
+        setMemoryDirty(true);
+        setMemoryEditing(true);
+      } else if (data.error) {
+        alert(data.error);
+      }
+    } catch (err: any) {
+      alert(err.message || "Failed to generate memory");
+    }
+    setMemoryGenerating(false);
   };
 
   const toggleSkill = async (skillId: string) => {
@@ -956,9 +975,14 @@ export default function ProjectsPage() {
                           </button>
                         </>
                       ) : (
-                        <button className="btn btn-ghost btn-sm" onClick={() => setMemoryEditing(true)}>
-                          Edit
-                        </button>
+                        <>
+                          <button className="btn btn-ghost btn-sm" onClick={() => setMemoryEditing(true)}>
+                            Edit
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={generateMemory} disabled={memoryGenerating}>
+                            {memoryGenerating ? "Generating..." : "Generate from Chat"}
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -977,7 +1001,12 @@ export default function ProjectsPage() {
                       ) : (
                         <div className="memory-empty">
                           <p>No memory recorded yet.</p>
-                          <button className="btn btn-primary btn-sm" onClick={() => setMemoryEditing(true)}>Add Memory</button>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button className="btn btn-primary btn-sm" onClick={() => setMemoryEditing(true)}>Add Memory</button>
+                            <button className="btn btn-secondary btn-sm" onClick={generateMemory} disabled={memoryGenerating}>
+                              {memoryGenerating ? "Generating..." : "Generate from Chat"}
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
