@@ -5,3 +5,7 @@ client/dist
 .git
 *.md
 .DS_Store
+data/settings.json
+data/chat_history.json
+data/tasks.json
+data/file_tokens.json
