@@ -22,6 +22,14 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install Python3 and required system libraries
+RUN apk add --no-cache python3 py3-pip py3-numpy py3-pillow \
+    && python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir \
+       matplotlib pandas openpyxl python-docx scipy seaborn
+
+ENV PATH="/opt/venv/bin:$PATH"
+
 # Install clawhub globally
 RUN npm i -g clawhub
 
