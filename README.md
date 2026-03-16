@@ -295,12 +295,19 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 
 ## What's New in v0.2.4
 
-- **Rich file preview in Files page** — Clicking files in the sandbox file browser now shows visual previews instead of raw source code. Supported formats: images (PNG, JPG, GIF, WebP, SVG, BMP), HTML (rendered in iframe), Excel (XLS/XLSX as tables), PDF (extracted text), Word (DOCX/DOC), Markdown (rendered with headings, tables, code blocks), and video/audio (native player controls).
-- **Excel file preview** — New `xlsx` library for server-side Excel parsing. Excel files are converted to HTML tables with sheet name headers, viewable in the output panel, project file preview, and sandbox file browser.
-- **Markdown file preview** — Markdown files are rendered with full GFM support (tables, code blocks, blockquotes) using ReactMarkdown in all preview contexts.
-- **Auto-generate project memory from chat** — New "Generate from Chat" button in the project Memory tab. Uses the LLM to analyze all project chat sessions and generate a structured memory document (overview, tech stack, key decisions, file structure, conventions, current status). The generated draft opens in edit mode for the user to review and confirm before saving.
-- **Skill enabled/disabled enforced in backend** — Disabling a skill in the Skills page now truly removes it from the LLM system prompt. Previously, ClawHub and custom skills loaded from directories ignored the `enabled` flag — they were always included regardless of the frontend toggle.
-- **Project skill selection enforced in backend** — When a project has specific skills selected, the system prompt now only includes those skills (filtered at the `buildSystemPrompt` level). Previously, all skills were loaded and the selected ones were only mentioned as a text "priority" hint.
+**New Features:**
+- **Rich file preview in file browser** — Clicking files in the sandbox file browser and project files now shows visual previews instead of raw source code: images (inline), HTML (iframe), Excel (XLS/XLSX as styled tables), PDF (extracted text), Word (DOC/DOCX as HTML), Markdown (GFM with tables, code blocks, headings), video/audio (native player controls).
+- **Auto-generate project memory from chat** — New "Generate from Chat" button in the project Memory tab. The LLM analyzes all project chat sessions and generates a structured memory document (overview, tech stack, key decisions, file structure, conventions, status). Opens in edit mode for the user to review and confirm before saving.
+- **LLM-powered agent definition generator** — The Agent Editor's "Generate with AI" now uses a real LLM call instead of a Python template. Describe the agent you need and the LLM generates the role, persona, and responsibilities.
+- **Agent model validation** — New "Specify model for this agent" checkbox in the Agent Editor. When enabled, shows a model input with a "Validate" button that checks if the model is available via the API. When disabled, the agent uses the system default model.
+- **Project file browser with preview panel** — The project Files tab now includes a split-panel layout with a file list on the left and a rich preview panel on the right. Supports upload, mkdir, delete, download, and click-to-preview for all supported file types.
+
+**Improvements:**
+- **Skill enabled/disabled enforced in backend** — Disabling a skill in the Skills page now truly removes it from the LLM system prompt. Previously, ClawHub and custom skills loaded from directories ignored the `enabled` flag.
+- **Project skill selection enforced in backend** — When a project has specific skills selected, only those skills are included in the system prompt. Previously all skills were loaded and selected ones were only mentioned as a "priority" text hint.
+- **Agent Editor remembers filename** — Loading a YAML config from Settings now passes the filename through, so saving overwrites the original file instead of creating a new one.
+- **Sandbox 401 fix** — Fixed image preview returning 401 unauthorized on fresh installs when no access token is configured.
+- **Docker image includes Python3** — Added Python3 and required libraries to the Docker image so Python execution works out of the box.
 
 ### Previous: v0.2.2
 
