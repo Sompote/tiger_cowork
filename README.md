@@ -309,45 +309,46 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - **Sandbox 401 fix** — Fixed image preview returning 401 unauthorized on fresh installs when no access token is configured.
 - **Docker image includes Python3** — Added Python3 and required libraries to the Docker image so Python execution works out of the box.
 
+### Previous: v0.2.3
+
+- **Windows installer** — New one-click installer for Windows (`TigerCoworkInstaller.bat`) with PowerShell GUI progress, auto-installs Docker Desktop and Git if needed.
+- **Docker Desktop prerequisite** — Added Docker Desktop download links and install instructions for both Mac and Windows.
+- **Sandbox 401 fix** — Fixed image preview returning 401 unauthorized on fresh installs when no access token is configured.
+- **Docker image includes Python3** — Added Python3 and required libraries (pandas, matplotlib, openpyxl, etc.) to the Docker image.
+
 ### Previous: v0.2.2
 
-- **Realtime Agent Mode** — New sub-agent operating mode where all agents from a YAML config boot at session start and stay alive. Tasks are sent via `send_task` / `wait_result` tools for true parallel execution. Agents communicate through the message bus and protocol tools. The orchestrator delegates to the agent team hierarchy automatically.
-- **New orchestrator tools** — `send_task` (assign work to a running agent), `wait_result` (block until agent finishes), `check_agents` (view status of all agents in the session).
-- **Bus toggle per agent** — Individual agents can be connected/disconnected from the shared message bus in the Agent Editor. Configure bus topics per agent for targeted pub/sub communication.
-- **Protocol-aware tool filtering** — Sub-agents now only receive the protocol tools they're configured to use (bus tools only if `bus.enabled`, TCP/queue tools only for connected protocols), reducing noise and preventing misuse.
-- **Agent Editor file manager** — Upload, load, and delete YAML architecture files directly within the Agent Editor. A collapsible file manager panel shows all existing configs with agent count and metadata.
-- **YAML upload in Settings** — Upload YAML agent config files directly from the Settings page alongside the existing Swarm Agent Creator.
-- **Port-based connection drawing** — Agent nodes now have distinct input (left) and output (right) port dots. Drag from an output port to an input port to create connections — no more shift+drag required.
-- **Free-text model input** — Model selection changed from a hardcoded dropdown to a free-text input, supporting any model name from any provider.
-- **Spawn Agent mode renamed** — "Manual" mode renamed to "Spawn Agent" in the Settings UI for clarity. Agents in this mode now respect workflow boundaries — they can only spawn downstream targets defined in `outputs_to` and connections.
-- **Improved realtime status UI** — Chat shows detailed realtime agent lifecycle events: ready, working, delegating, waiting, tool calls with protocol tags, and completion status.
+- **Realtime Agent Mode** — All agents from YAML config boot at session start and stay alive. Tasks sent via `send_task` / `wait_result` for true parallel execution with message bus communication.
+- **New orchestrator tools** — `send_task`, `wait_result`, `check_agents` for realtime agent orchestration.
+- **Bus toggle per agent** — Enable/disable shared message bus per agent with configurable topics.
+- **Protocol-aware tool filtering** — Sub-agents only receive protocol tools they're configured to use.
+- **Agent Editor file manager** — Upload, load, and delete YAML files directly within the editor.
+- **Port-based connection drawing** — Drag from output port to input port to create connections.
+- **Free-text model input** — Model selection supports any model name from any provider.
+- **Spawn Agent mode renamed** — "Manual" mode renamed to "Spawn Agent" with workflow boundary enforcement.
 
 ### Previous: v0.2.1
 
-- **Agent System Editor** — A new visual editor for designing multi-agent systems. Build agent teams on a drag-and-drop canvas, define roles (orchestrator, worker, checker, reporter, researcher), set models, personas, and responsibilities. Connect agents with configurable communication protocols (TCP, Bus, Queue) and export the entire system as YAML. Includes AI-assisted agent setup — describe what you need and the editor generates the definition.
-- **Agent YAML management** — New backend API for listing, creating, parsing, and generating agent configuration files stored in `data/agents/`.
-- **Protocol status endpoint** — New `/api/agents/protocols/status` endpoint for monitoring inter-agent communication protocols.
+- **Agent System Editor** — Visual drag-and-drop editor for multi-agent systems with roles, models, personas, communication protocols (TCP, Bus, Queue), and YAML export.
+- **Agent YAML management** — Backend API for agent configuration files in `data/agents/`.
 
 ### Previous: v0.2.0
 
-- **Sub-Agent System** — The main agent can now spawn independent sub-agents to handle specific sub-tasks. Each sub-agent gets its own tool loop and can use all available tools. Supports configurable depth limits, concurrency, timeout, and optional model override. Enable in Settings > Agent Parameters > Sub-Agent.
-- **New sub-agent settings** — Five new parameters: `subAgentEnabled` (on/off), `subAgentModel` (optional model override), `subAgentMaxDepth` (1–5, default 2), `subAgentMaxConcurrent` (1–10, default 3), `subAgentTimeout` (30–600s, default 120s).
-- **New tool: `spawn_subagent`** — Allows the AI to delegate sub-tasks with a task description, optional label, and optional context.
-- **Real-time sub-agent status** — Socket.IO broadcasts sub-agent lifecycle events (spawn, tool calls, completion, errors) to the chat UI.
+- **Sub-Agent System** — Spawn independent child agents with own tool loops. Configurable depth, concurrency, timeout, and model override.
+- **New tool: `spawn_subagent`** — Delegate sub-tasks with description, label, and context.
+- **Real-time sub-agent status** — Socket.IO broadcasts agent lifecycle events to chat UI.
 
 ### Previous: v0.1.5
 
-- **Agent Reflection Loop** — After the tool loop completes, the agent now self-evaluates whether it satisfied the user's objective. A separate LLM call scores the work 0.0–1.0. If the score is below the threshold (default 0.7), the agent automatically retries to address gaps. Enable in Settings > Agent Parameters > Reflection Enabled.
-- **New reflection settings** — Three new parameters: `agentReflectionEnabled` (on/off), `agentEvalThreshold` (pass score 0.0–1.0), `agentMaxReflectionRetries` (max retry attempts).
-- **Bug fix: reflection was never triggered** — The previous tool loop had an early `return` that skipped the reflection block entirely. Changed to `break` so the code flows through to the evaluation step.
+- **Agent Reflection Loop** — Self-evaluation after tool loops, scores 0.0–1.0, auto-retries if below threshold.
+- **Bug fix** — Reflection was never triggered due to early `return` in tool loop.
 
 ### Previous: v0.1.4
 
-- **Working folder: Sandbox vs External** — Projects now let you choose where the working folder lives. **In Sandbox** creates a folder inside the sandbox directory with full access. **External Folder** lets you mount any local path (outside the sandbox) with configurable access levels.
-- **Agent access control** — External folders support three access levels: **Read Only** (agent can only read files), **Read & Write** (agent can read and write), and **Full Access** (agent can read, write, and execute shell commands). Sandbox folders always have full access.
-- **Docker volume mount generator** — The Overview tab includes a "Docker Volume Mounts" button that generates ready-to-copy `docker run` and `docker-compose` volume configurations for all external project folders, with correct `:ro`/`:rw` flags.
-- **Configurable agent parameters** — Settings page now has an "Agent Parameters" section to tune: Max Tool Rounds (default 8), Max Tool Calls (default 12), Max Consecutive Errors (default 3), and Tool Result Max Length (default 6000). Increase these for complex research tasks that were previously cut short.
-- **Server-side access enforcement** — `write_file` and `run_shell` tools respect the project's access level. Read-only projects block writes; only full-access projects allow shell commands.
+- **Working folder: Sandbox vs External** — Choose between sandbox or external folder with access levels (Read Only, Read & Write, Full Access).
+- **Docker volume mount generator** — Auto-generates `docker run` and `docker-compose` volume configs.
+- **Configurable agent parameters** — Max Tool Rounds, Max Tool Calls, Consecutive Errors, Result Max Length.
+- **Server-side access enforcement** — Tools respect project access level.
 
 ## Features
 
