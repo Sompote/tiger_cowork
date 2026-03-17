@@ -32,12 +32,15 @@ export function killActiveTask(taskId: string): boolean {
   const controller = taskAbortControllers.get(taskId);
   if (controller) {
     controller.abort();
+    // Immediately remove from active tasks so UI updates
+    activeTasks.delete(taskId);
+    taskAbortControllers.delete(taskId);
     return true;
   }
   return false;
 }
 
-function buildSystemPrompt(filterSkillIds?: string[]): string {
+async function buildSystemPrompt(filterSkillIds?: string[]): Promise<string> {
   // Gather installed clawhub skills
   const clawhubDir = path.resolve("Tiger_bot/skills");
   let clawhubSkills: string[] = [];
@@ -84,7 +87,7 @@ function buildSystemPrompt(filterSkillIds?: string[]): string {
   // Filter clawhub and custom skills by enabled status in skills.json
   let allSkillRecords: { id: string; name: string; enabled: boolean; source: string }[] = [];
   try {
-    allSkillRecords = getSkills();
+    allSkillRecords = await getSkills();
   } catch {}
   const disabledSkillNames = new Set(allSkillRecords.filter((s) => !s.enabled).map((s) => s.name));
   clawhubSkills = clawhubSkills.filter((name) => !disabledSkillNames.has(name));
@@ -100,7 +103,7 @@ function buildSystemPrompt(filterSkillIds?: string[]): string {
   if (filterSkillIds && filterSkillIds.length > 0) {
     clawhubSkills = clawhubSkills.filter((name) => filterSkillIds.includes(name));
     customSkills = customSkills.filter((cs) => filterSkillIds.includes(cs.name));
-    const allSkills = getSkills();
+    const allSkills = await getSkills();
     const selectedSkillNames = allSkills.filter((s) => filterSkillIds.includes(s.id)).map((s) => s.name);
     registeredSkills = registeredSkills.filter((rs) => {
       const name = rs.split(" (")[0];
@@ -129,7 +132,7 @@ function buildSystemPrompt(filterSkillIds?: string[]): string {
     skillsList += `\n\nSkill usage workflow: 1) call load_skill("<name>") to read SKILL.md and see supporting files, 2) if the skill has supporting .py files, use read_file to load them, 3) use run_python or run_shell to execute following the skill instructions.`;
   }
 
-  const settings = getSettings();
+  const settings = await getSettings();
   const isManualSubAgent = settings.subAgentEnabled && settings.subAgentMode === "manual";
   const isRealtimeAgent = settings.subAgentEnabled && settings.subAgentMode === "realtime";
   const subAgentInfo = settings.subAgentEnabled
@@ -188,7 +191,7 @@ Rules:${isRealtimeAgent ? `
 - FILE PATHS: A variable PROJECT_DIR is available in run_python pointing to the project root. Use it to access uploaded files: e.g. os.path.join(PROJECT_DIR, 'uploads/filename.xlsx'). ALWAYS use PROJECT_DIR when reading files from uploads/ or other project directories. Never use bare relative paths like 'uploads/...' — they won't work because the working directory is output_file/.
 - REACT APPS: When asked to build UI components or interactive visualizations, use run_react. The component renders in the output panel. You can include dependencies like 'recharts', 'tailwindcss', 'chart.js', etc. IMPORTANT: Do NOT use import/export statements in run_react code — React, ReactDOM, hooks (useState, useEffect, etc.), and library globals (like Recharts components: BarChart, LineChart, etc.) are already available as globals. Just define your component function and it will be auto-rendered.
 - Use matplotlib.use('Agg') is already set automatically. Just import matplotlib.pyplot and save figures.
-- MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}${getManualAgentConfigSummary() || ""}`;
+- MCP TOOLS: External tools connected via Model Context Protocol are available with names starting with "mcp_". Use them like any other tool when they match the user's request.${skillsList}${await getManualAgentConfigSummary() || ""}`;
 }
 
 // Store io reference for broadcasting status to all connected clients
@@ -281,7 +284,7 @@ export function setupSocket(io: Server): void {
 
     socket.on("chat:send", async (data: { sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
       const { sessionId, message, images } = data;
-      const sessions = getChatHistory();
+      const sessions = await getChatHistory();
       let session = sessions.find((s) => s.id === sessionId);
 
       if (!session) {
@@ -301,12 +304,12 @@ export function setupSocket(io: Server): void {
         timestamp: new Date().toISOString(),
       });
       session.updatedAt = new Date().toISOString();
-      saveChatHistory(sessions);
+      await saveChatHistory(sessions);
 
       // Check if user sent Python code directly
       const pythonMatch = message.match(/```python\n([\s\S]*?)```/);
       if (pythonMatch) {
-        const settings = getSettings();
+        const settings = await getSettings();
         const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
         broadcastStatus({ sessionId, status: "running_python" });
         const result = await runPython(pythonMatch[1], sandboxDir);
@@ -323,13 +326,13 @@ export function setupSocket(io: Server): void {
           timestamp: new Date().toISOString(),
           files: result.outputFiles,
         });
-        saveChatHistory(sessions);
+        await saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: assistantMsg, done: true, files: result.outputFiles });
         return;
       }
 
       // Use tool-calling AI loop — build multimodal content for images
-      const settings = getSettings();
+      const settings = await getSettings();
       const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
       const chatMessages = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
@@ -411,12 +414,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         setCallContext(sessionId, 0);
 
         // Boot realtime agents if in realtime mode
-        const rtSettings = getSettings();
+        const rtSettings = await getSettings();
         let realtimeTools: any[] | undefined;
         if (rtSettings.subAgentEnabled && rtSettings.subAgentMode === "realtime" && rtSettings.subAgentConfigFile) {
           const rtSession = await startRealtimeSession(sessionId, rtSettings.subAgentConfigFile, abortController.signal);
           if (rtSession) {
-            realtimeTools = getToolsForRealtimeOrchestrator();
+            realtimeTools = await getToolsForRealtimeOrchestrator();
             // Notify client that realtime agents are alive
             const agentNames = Array.from(rtSession.agents.values()).map(h => `${h.agentDef.name} (${h.agentDef.id})`);
             socket.emit("chat:chunk", {
@@ -428,7 +431,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
         const result = await callTigerBotWithTools(
           chatMessages,
-          buildSystemPrompt(),
+          await buildSystemPrompt(),
           // onToolCall — show status + protocol tags
           (name, args) => {
             toolsUsed.push(name);
@@ -496,7 +499,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           timestamp: new Date().toISOString(),
           files: outputFiles.length > 0 ? outputFiles : undefined,
         });
-        saveChatHistory(sessions);
+        await saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
       } catch (err: any) {
         // If aborted, don't fallback — just report cancellation
@@ -509,12 +512,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             timestamp: new Date().toISOString(),
             files: outputFiles.length > 0 ? outputFiles : undefined,
           });
-          saveChatHistory(sessions);
+          await saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         } else {
           // Fallback to simple call without tools — still include any outputFiles collected during tool calls
           try {
-            const result = await callTigerBot(chatMessages, buildSystemPrompt());
+            const result = await callTigerBot(chatMessages, await buildSystemPrompt());
             const fallbackContent = result.content +
               (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
@@ -523,7 +526,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               timestamp: new Date().toISOString(),
               files: outputFiles.length > 0 ? outputFiles : undefined,
             });
-            saveChatHistory(sessions);
+            await saveChatHistory(sessions);
             socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           } catch (fallbackErr: any) {
             const errMsg = `Error: ${fallbackErr.message || err.message}`;
@@ -535,7 +538,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               timestamp: new Date().toISOString(),
               files: outputFiles.length > 0 ? outputFiles : undefined,
             });
-            saveChatHistory(sessions);
+            await saveChatHistory(sessions);
             socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           }
         }
@@ -550,7 +553,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
     // ─── Project Chat ───
     socket.on("project:chat:send", async (data: { projectId: string; sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
       const { projectId, sessionId, message, images } = data;
-      const projects = getProjects();
+      const projects = await getProjects();
       const project = projects.find((p) => p.id === projectId);
       if (!project) {
         socket.emit("chat:response", { sessionId, content: "Error: Project not found", done: true });
@@ -558,14 +561,14 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       }
 
       // Resolve working folder (handle relative paths)
-      const settings_proj = getSettings();
+      const settings_proj = await getSettings();
       const sandboxDir_proj = settings_proj.sandboxDir || path.resolve("sandbox");
       const resolvedWorkingFolder = project.workingFolder
         ? (path.isAbsolute(project.workingFolder) ? project.workingFolder : path.join(sandboxDir_proj, project.workingFolder))
         : "";
 
       // Build project-aware system prompt (filter skills to only project-selected ones)
-      let projectPrompt = buildSystemPrompt(project.skills && project.skills.length > 0 ? project.skills : undefined);
+      let projectPrompt = await buildSystemPrompt(project.skills && project.skills.length > 0 ? project.skills : undefined);
 
       // Read project memory fresh from {workingFolder}/memory.md every time
       let projectMemory = "";
@@ -601,7 +604,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
       // Inject selected skills info
       if (project.skills && project.skills.length > 0) {
-        const allSkills = getSkills();
+        const allSkills = await getSkills();
         const selectedSkills = allSkills.filter((s) => project.skills.includes(s.id));
         if (selectedSkills.length > 0) {
           projectPrompt += `\n\nProject skills (ONLY these skills are available for this project): ${selectedSkills.map((s) => s.name).join(", ")}\nYou MUST use these skills when they match the user's request. These are the only skills loaded for this project.`;
@@ -612,7 +615,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       projectPrompt += `\n\nIMPORTANT: If the user shares project information (tech stack, architecture decisions, conventions, key files, etc.), suggest recording it to the project memory. You can mention "Would you like me to add this to the project memory?"`;
 
       // Reuse the same chat session logic
-      const sessions = getChatHistory();
+      const sessions = await getChatHistory();
       let session = sessions.find((s) => s.id === sessionId);
 
       if (!session) {
@@ -632,9 +635,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         timestamp: new Date().toISOString(),
       });
       session.updatedAt = new Date().toISOString();
-      saveChatHistory(sessions);
+      await saveChatHistory(sessions);
 
-      const settings = getSettings();
+      const settings = await getSettings();
       const chatMessages = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
@@ -703,12 +706,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         setCallContext(sessionId, 0, undefined, resolvedWorkingFolder || undefined);
 
         // Boot realtime agents if in realtime mode
-        const rtSettings = getSettings();
+        const rtSettings = await getSettings();
         let realtimeTools: any[] | undefined;
         if (rtSettings.subAgentEnabled && rtSettings.subAgentMode === "realtime" && rtSettings.subAgentConfigFile) {
           const rtSession = await startRealtimeSession(sessionId, rtSettings.subAgentConfigFile, abortController.signal);
           if (rtSession) {
-            realtimeTools = getToolsForRealtimeOrchestrator();
+            realtimeTools = await getToolsForRealtimeOrchestrator();
             const agentNames = Array.from(rtSession.agents.values()).map(h => `${h.agentDef.name} (${h.agentDef.id})`);
             socket.emit("chat:chunk", {
               sessionId,
@@ -782,7 +785,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           timestamp: new Date().toISOString(),
           files: outputFiles.length > 0 ? outputFiles : undefined,
         });
-        saveChatHistory(sessions);
+        await saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
       } catch (err: any) {
         if (abortController.signal.aborted) {
@@ -794,7 +797,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             timestamp: new Date().toISOString(),
             files: outputFiles.length > 0 ? outputFiles : undefined,
           });
-          saveChatHistory(sessions);
+          await saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         } else {
           try {
@@ -807,7 +810,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               timestamp: new Date().toISOString(),
               files: outputFiles.length > 0 ? outputFiles : undefined,
             });
-            saveChatHistory(sessions);
+            await saveChatHistory(sessions);
             socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           } catch (fallbackErr: any) {
             const errMsg = `Error: ${fallbackErr.message || err.message}`;
@@ -816,7 +819,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               content: errMsg,
               timestamp: new Date().toISOString(),
             });
-            saveChatHistory(sessions);
+            await saveChatHistory(sessions);
             socket.emit("chat:response", { sessionId, content: errMsg, done: true });
           }
         }
@@ -828,7 +831,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
     });
 
     socket.on("python:run", async (data: { code: string }) => {
-      const settings = getSettings();
+      const settings = await getSettings();
       const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
       socket.emit("python:status", { status: "running" });
       const result = await runPython(data.code, sandboxDir);

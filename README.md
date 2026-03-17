@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.2.4
+# Tiger Cowork v0.3.0
 
 ## Quick Start (No coding required)
 
@@ -293,21 +293,39 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Complex analysis: break a report into sections, each handled by a dedicated sub-agent
 - Realtime orchestration: boot an entire agent team (orchestrator + workers + checker) and send tasks for true parallel execution with inter-agent communication via bus
 
-## What's New in v0.2.4
+## What's New in v0.3.0 — Async Architecture
 
-**New Features:**
-- **Rich file preview in file browser** — Clicking files in the sandbox file browser and project files now shows visual previews instead of raw source code: images (inline), HTML (iframe), Excel (XLS/XLSX as styled tables), PDF (extracted text), Word (DOC/DOCX as HTML), Markdown (GFM with tables, code blocks, headings), video/audio (native player controls).
-- **Auto-generate project memory from chat** — New "Generate from Chat" button in the project Memory tab. The LLM analyzes all project chat sessions and generates a structured memory document (overview, tech stack, key decisions, file structure, conventions, status). Opens in edit mode for the user to review and confirm before saving.
-- **LLM-powered agent definition generator** — The Agent Editor's "Generate with AI" now uses a real LLM call instead of a Python template. Describe the agent you need and the LLM generates the role, persona, and responsibilities.
-- **Agent model validation** — New "Specify model for this agent" checkbox in the Agent Editor. When enabled, shows a model input with a "Validate" button that checks if the model is available via the API. When disabled, the agent uses the system default model.
-- **Project file browser with preview panel** — The project Files tab now includes a split-panel layout with a file list on the left and a rich preview panel on the right. Supports upload, mkdir, delete, download, and click-to-preview for all supported file types.
+**Major rewrite: Express → Fastify async-first framework**
 
-**Improvements:**
-- **Skill enabled/disabled enforced in backend** — Disabling a skill in the Skills page now truly removes it from the LLM system prompt. Previously, ClawHub and custom skills loaded from directories ignored the `enabled` flag.
-- **Project skill selection enforced in backend** — When a project has specific skills selected, only those skills are included in the system prompt. Previously all skills were loaded and selected ones were only mentioned as a "priority" text hint.
-- **Agent Editor remembers filename** — Loading a YAML config from Settings now passes the filename through, so saving overwrites the original file instead of creating a new one.
-- **Sandbox 401 fix** — Fixed image preview returning 401 unauthorized on fresh installs when no access token is configured.
-- **Docker image includes Python3** — Added Python3 and required libraries to the Docker image so Python execution works out of the box.
+This release migrates the entire server from Express.js to **Fastify 5**, delivering a faster, natively async architecture with parallel I/O throughout.
+
+**Architecture Changes:**
+- **Fastify 5** replaces Express.js — natively async handlers, ~2x faster request throughput, built-in Pino structured logging
+- **Async file I/O everywhere** — All data layer (`data.ts`) and sandbox operations (`sandbox.ts`) converted from synchronous `fs.*Sync` to async `fs/promises`, eliminating event loop blocking
+- **Plugin architecture** — All 10 route files converted from Express `Router()` to Fastify async plugins with scoped hooks
+- **@fastify/multipart** replaces `multer` — async file upload handling for skills, projects, and chat uploads
+- **@fastify/static** replaces `express.static()` — serves sandbox files and production client build
+- **@fastify/cors** replaces `cors` middleware
+- **@fastify/middie** bridges Vite dev middleware for HMR in development mode
+
+**New Features & Fixes:**
+- **Native PDF preview** — PDF files in chat output panel and project output panel now render inline using the browser's native PDF viewer (iframe) instead of extracted text
+- **Abort signal propagation** — Kill task now immediately cancels blocking `wait_result` and `send_task` calls via abort signal passed through `callTool` → `busWaitForMessage`. Previously, killing a task during agent wait would block for up to 120 seconds
+- **Immediate task cleanup on kill** — Active task removed from task list instantly on kill, not after the tool finishes
+- **React output path fix** — `run_react` tool now returns correct sandbox-relative paths when running inside a project context (was hardcoded to `output_file/`)
+- **Clean 404 for missing files** — Sandbox static serving returns proper 404 instead of 500 ENOENT for missing files
+
+**Dependencies:**
+- Added: `fastify@5`, `@fastify/cors`, `@fastify/static`, `@fastify/multipart`, `@fastify/middie`
+- Removed: `express`, `cors`, `multer`, `@types/express`, `@types/cors`, `@types/multer`
+
+### Previous: v0.2.4
+
+- **Rich file preview in file browser** — Visual previews for images, HTML, Excel, PDF, Word, Markdown, video/audio
+- **Auto-generate project memory from chat** — LLM analyzes chat sessions to generate structured project memory
+- **LLM-powered agent definition generator** — AI generates role, persona, and responsibilities from description
+- **Agent model validation** — Validate model availability via API
+- **Project file browser with preview panel** — Split-panel layout with upload, mkdir, delete, download, and click-to-preview
 
 ### Previous: v0.2.3
 
@@ -464,7 +482,7 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 | Layer    | Technology                                                |
 |----------|-----------------------------------------------------------|
 | Frontend | React 18, React Router 6, Vite 5, Socket.IO Client 4     |
-| Backend  | Node.js, Express 4, Socket.IO 4, TypeScript               |
+| Backend  | Node.js, Fastify 5, Socket.IO 4, TypeScript               |
 | AI       | Any OpenAI-compatible API (OpenRouter, TigerBot, etc.)     |
 | Tools    | MCP SDK 1.27, esbuild (JSX), node-cron, Python 3          |
 | Data     | JSON file-based persistence (`data/` directory)            |
@@ -783,7 +801,7 @@ ACCESS_TOKEN=mysecret PORT=8080 SANDBOX_DIR=/home/user/workspace npm run dev
 ```
 tiger_cowork/
 ├── server/
-│   ├── index.ts                    # Express + Socket.IO + Vite dev server entry
+│   ├── index.ts                    # Fastify + Socket.IO + Vite dev server entry
 │   ├── routes/
 │   │   ├── chat.ts                 # Chat session CRUD + message API
 │   │   ├── files.ts                # File manager (list, read, write, delete, preview)

@@ -1,59 +1,89 @@
-import express from "express";
+import Fastify from "fastify";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import cors from "cors";
+import fastifyCors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
+import middie from "@fastify/middie";
 import path from "path";
-import fs from "fs";
+import fs from "fs/promises";
+import fsSync from "fs";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { chatRouter } from "./routes/chat";
-import { filesRouter } from "./routes/files";
-import { tasksRouter } from "./routes/tasks";
-import { skillsRouter } from "./routes/skills";
-import { settingsRouter } from "./routes/settings";
-import { pythonRouter } from "./routes/python";
-import { toolsRouter } from "./routes/tools";
-import { clawhubRouter } from "./routes/clawhub";
-import { projectsRouter } from "./routes/projects";
-import { agentsRouter } from "./routes/agents";
+import { chatRoutes } from "./routes/chat";
+import { filesRoutes } from "./routes/files";
+import { tasksRoutes } from "./routes/tasks";
+import { skillsRoutes } from "./routes/skills";
+import { settingsRoutes } from "./routes/settings";
+import { pythonRoutes } from "./routes/python";
+import { toolsRoutes } from "./routes/tools";
+import { clawhubRoutes } from "./routes/clawhub";
+import { projectsRoutes } from "./routes/projects";
+import { agentsRoutes } from "./routes/agents";
 import { setupSocket } from "./services/socket";
 import { initMcpServers } from "./services/mcp";
+import { initScheduler } from "./services/scheduler";
 import { getFileTokens, saveFileTokens, generateToken, isValidFileToken } from "./services/data";
 
 dotenv.config();
 
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN || "";
-
-const app = express();
-const server = createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
-});
-
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
 const SANDBOX_DIR = process.env.SANDBOX_DIR || path.resolve(".");
 const DATA_DIR = path.resolve("data");
 
-// Ensure directories exist
-[SANDBOX_DIR, DATA_DIR, path.resolve("skills"), path.join(SANDBOX_DIR, "output_file"), path.join(DATA_DIR, "agents")].forEach((dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+// Create raw HTTP server for sharing with Socket.io and Vite HMR
+const httpServer = createServer();
+
+const fastify = Fastify({
+  logger: true,
+  bodyLimit: 50 * 1024 * 1024, // 50MB
+  serverFactory: (handler) => {
+    httpServer.on("request", handler);
+    return httpServer;
+  },
 });
 
-// Initialize data files
-const dataFiles = ["chat_history.json", "tasks.json", "settings.json", "skills.json", "projects.json", "file_tokens.json"];
-dataFiles.forEach((file) => {
-  const fp = path.join(DATA_DIR, file);
-  if (!fs.existsSync(fp)) {
-    const initial = file === "settings.json"
-      ? JSON.stringify({ sandboxDir: SANDBOX_DIR, tigerBotApiKey: "", tigerBotModel: "TigerBot-70B-Chat", mcpTools: [], webSearchEnabled: false }, null, 2)
-      : "[]";
-    fs.writeFileSync(fp, initial);
+// Socket.io on the shared HTTP server
+const io = new Server(httpServer, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+});
+
+// Decorate fastify with shared config
+fastify.decorate("sandboxDir", SANDBOX_DIR);
+fastify.decorate("dataDir", DATA_DIR);
+
+// Augment Fastify types
+declare module "fastify" {
+  interface FastifyInstance {
+    sandboxDir: string;
+    dataDir: string;
   }
-});
+}
 
-// Auto-generate a default file access token if none exist
-{
-  const tokens = getFileTokens();
+async function start() {
+  // Ensure directories exist
+  const dirs = [SANDBOX_DIR, DATA_DIR, path.resolve("skills"), path.join(SANDBOX_DIR, "output_file"), path.join(DATA_DIR, "agents")];
+  await Promise.all(dirs.map((dir) => fs.mkdir(dir, { recursive: true })));
+
+  // Initialize data files
+  const dataFiles = ["chat_history.json", "tasks.json", "settings.json", "skills.json", "projects.json", "file_tokens.json"];
+  await Promise.all(
+    dataFiles.map(async (file) => {
+      const fp = path.join(DATA_DIR, file);
+      try {
+        await fs.access(fp);
+      } catch {
+        const initial =
+          file === "settings.json"
+            ? JSON.stringify({ sandboxDir: SANDBOX_DIR, tigerBotApiKey: "", tigerBotModel: "TigerBot-70B-Chat", mcpTools: [], webSearchEnabled: false }, null, 2)
+            : "[]";
+        await fs.writeFile(fp, initial);
+      }
+    })
+  );
+
+  // Auto-generate a default file access token if none exist
+  const tokens = await getFileTokens();
   if (tokens.length === 0) {
     const defaultToken = {
       id: Date.now().toString(36),
@@ -61,103 +91,137 @@ dataFiles.forEach((file) => {
       token: generateToken(),
       createdAt: new Date().toISOString(),
     };
-    saveFileTokens([defaultToken]);
+    await saveFileTokens([defaultToken]);
     console.log(`[Security] Auto-generated file access token: ${defaultToken.token}`);
   }
-}
 
-app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+  // Register plugins
+  await fastify.register(fastifyCors, { origin: "*", methods: ["GET", "POST"] });
 
-// Make sandbox and data dirs available to routes
-app.locals.sandboxDir = SANDBOX_DIR;
-app.locals.dataDir = DATA_DIR;
-
-// Access token verification endpoint (no auth required)
-app.post("/api/auth/verify", (req, res) => {
-  if (!ACCESS_TOKEN) {
-    return res.json({ ok: true, required: false });
-  }
-  const token = req.body.token;
-  if (token === ACCESS_TOKEN) {
-    return res.json({ ok: true });
-  }
-  return res.status(401).json({ ok: false, error: "Invalid access token" });
-});
-
-// Access token middleware for all /api routes (except /api/auth/verify)
-app.use("/api", (req, res, next) => {
-  if (req.path === "/auth/verify") return next();
-  if (!ACCESS_TOKEN) return next();
-  const token = req.headers.authorization?.replace("Bearer ", "") || (req.query.token as string);
-  if (token === ACCESS_TOKEN) return next();
-  // Allow file token for /files routes
-  if (req.path.startsWith("/files") && token && isValidFileToken(token)) return next();
-  return res.status(401).json({ error: "Unauthorized — invalid or missing access token" });
-});
-
-// API routes
-app.use("/api/chat", chatRouter);
-app.use("/api/files", filesRouter);
-app.use("/api/tasks", tasksRouter);
-app.use("/api/skills", skillsRouter);
-app.use("/api/settings", settingsRouter);
-app.use("/api/python", pythonRouter);
-app.use("/api/tools", toolsRouter);
-app.use("/api/clawhub", clawhubRouter);
-app.use("/api/projects", projectsRouter);
-app.use("/api/agents", agentsRouter);
-
-// Serve sandbox files for preview — protected by file token or access token
-app.use("/sandbox", (req, res, next) => {
-  // If no access token configured, app is open — allow all sandbox access
-  if (!ACCESS_TOKEN) return next();
-  const fileToken = (req.query.token as string) || req.headers.authorization?.replace("Bearer ", "");
-  // Allow if valid file token
-  if (fileToken && isValidFileToken(fileToken)) return next();
-  // Allow if valid access token (for authenticated users)
-  if (fileToken === ACCESS_TOKEN) return next();
-  return res.status(401).json({ error: "Unauthorized — invalid or missing file access token" });
-}, express.static(SANDBOX_DIR));
-
-// Socket.io access token auth
-if (ACCESS_TOKEN) {
-  io.use((socket, next) => {
-    const token = socket.handshake.auth?.token;
-    if (token === ACCESS_TOKEN) return next();
-    return next(new Error("Unauthorized — invalid or missing access token"));
+  // Auth verify endpoint (no auth required) — registered before auth hook
+  fastify.post("/api/auth/verify", async (request, reply) => {
+    if (!ACCESS_TOKEN) {
+      return { ok: true, required: false };
+    }
+    const token = (request.body as any).token;
+    if (token === ACCESS_TOKEN) {
+      return { ok: true };
+    }
+    reply.code(401);
+    return { ok: false, error: "Invalid access token" };
   });
-}
 
-setupSocket(io);
+  // API routes with auth hook
+  await fastify.register(
+    async function apiRoutes(api) {
+      // Auth hook for all /api routes
+      api.addHook("onRequest", async (request, reply) => {
+        // Skip auth verify endpoint
+        if (request.url.startsWith("/api/auth/verify")) return;
+        if (!ACCESS_TOKEN) return;
+        const token = request.headers.authorization?.replace("Bearer ", "") || (request.query as any).token;
+        if (token === ACCESS_TOKEN) return;
+        // Allow file token for /files routes
+        if (request.url.startsWith("/api/files") && token && (await isValidFileToken(token))) return;
+        reply.code(401);
+        throw new Error("Unauthorized — invalid or missing access token");
+      });
 
-// Start server with Vite middleware (dev) or static files (production)
-async function start() {
+      // Register route plugins
+      api.register(chatRoutes, { prefix: "/chat" });
+      api.register(filesRoutes, { prefix: "/files" });
+      api.register(tasksRoutes, { prefix: "/tasks" });
+      api.register(skillsRoutes, { prefix: "/skills" });
+      api.register(settingsRoutes, { prefix: "/settings" });
+      api.register(pythonRoutes, { prefix: "/python" });
+      api.register(toolsRoutes, { prefix: "/tools" });
+      api.register(clawhubRoutes, { prefix: "/clawhub" });
+      api.register(projectsRoutes, { prefix: "/projects" });
+      api.register(agentsRoutes, { prefix: "/agents" });
+    },
+    { prefix: "/api" }
+  );
+
+  // Sandbox static files — protected by token
+  fastify.register(
+    async function sandboxRoutes(sandbox) {
+      sandbox.addHook("onRequest", async (request, reply) => {
+        if (!ACCESS_TOKEN) return;
+        const fileToken = ((request.query as any).token as string) || request.headers.authorization?.replace("Bearer ", "");
+        if (fileToken && (await isValidFileToken(fileToken))) return;
+        if (fileToken === ACCESS_TOKEN) return;
+        reply.code(401);
+        throw new Error("Unauthorized — invalid or missing file access token");
+      });
+
+      sandbox.register(fastifyStatic, {
+        root: SANDBOX_DIR,
+        prefix: "/",
+      });
+
+      // Convert ENOENT errors to clean 404 responses
+      sandbox.setErrorHandler(async (error, request, reply) => {
+        if ((error as any).code === "ENOENT") {
+          reply.code(404);
+          return { error: "File not found" };
+        }
+        reply.code(500);
+        return { error: (error as Error).message };
+      });
+    },
+    { prefix: "/sandbox" }
+  );
+
+  // Socket.io access token auth
+  if (ACCESS_TOKEN) {
+    io.use((socket, next) => {
+      const token = socket.handshake.auth?.token;
+      if (token === ACCESS_TOKEN) return next();
+      return next(new Error("Unauthorized — invalid or missing access token"));
+    });
+  }
+
+  setupSocket(io);
+
+  // Initialize scheduler
+  await initScheduler();
+
+  // Vite dev middleware or production static files
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       root: path.resolve("client"),
       server: {
         middlewareMode: true,
-        hmr: { server },
+        hmr: { server: httpServer },
       },
     });
-    app.use(vite.middlewares);
+    await fastify.register(middie);
+    fastify.use(vite.middlewares);
   } else {
     const clientDist = path.resolve("client/dist");
-    if (fs.existsSync(clientDist)) {
-      app.use(express.static(clientDist));
-      app.get("*", (_req, res) => {
-        res.sendFile(path.join(clientDist, "index.html"));
+    if (fsSync.existsSync(clientDist)) {
+      await fastify.register(fastifyStatic, {
+        root: clientDist,
+        prefix: "/",
+        decorateReply: false, // avoid conflict with sandbox static
+      });
+      // SPA fallback
+      fastify.setNotFoundHandler(async (request, reply) => {
+        if (request.url.startsWith("/api/") || request.url.startsWith("/sandbox/")) {
+          reply.code(404);
+          return { error: "Not found" };
+        }
+        return reply.sendFile("index.html");
       });
     }
   }
 
-  server.listen(PORT, () => {
-    console.log(`Tiger Cowork running on http://localhost:${PORT}`);
-    console.log(`Sandbox directory: ${SANDBOX_DIR}`);
-    // Initialize MCP servers in background (don't block startup)
-    initMcpServers().catch((err) => console.error("[MCP] Init error:", err.message));
-  });
+  await fastify.listen({ port: PORT, host: "0.0.0.0" });
+  console.log(`Tiger Cowork running on http://localhost:${PORT}`);
+  console.log(`Sandbox directory: ${SANDBOX_DIR}`);
+
+  // Initialize MCP servers in background (don't block startup)
+  initMcpServers().catch((err) => console.error("[MCP] Init error:", err.message));
 }
 
 start();

@@ -10,14 +10,14 @@ export interface PythonResult {
   outputFiles: string[];
 }
 
-export function runPython(
+export async function runPython(
   code: string,
   sandboxDir: string,
   timeout: number = 30000,
   projectOutputDir?: string
 ): Promise<PythonResult> {
+  const settings = await getSettings();
   return new Promise((resolve) => {
-    const settings = getSettings();
     const pythonPath = settings.pythonPath || "python3";
     const scriptPath = path.join(sandboxDir, `_run_${Date.now()}.py`);
 

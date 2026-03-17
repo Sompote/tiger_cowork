@@ -35,8 +35,8 @@ function sanitizeToolCallContent(content: string): string {
   return cleaned.trim();
 }
 
-function getApiConfig() {
-  const settings = getSettings();
+async function getApiConfig() {
+  const settings = await getSettings();
   const apiKey = settings.tigerBotApiKey;
   const model = settings.tigerBotModel || "TigerBot-70B-Chat";
   const rawUrl = settings.tigerBotApiUrl || "https://api.tigerbot.com/bot-chat/openai/v1/chat/completions";
@@ -46,10 +46,10 @@ function getApiConfig() {
 
 // Single LLM call (no tool loop)
 async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string; signal?: AbortSignal } = {}): Promise<any> {
-  const { apiKey, model, apiUrl } = getApiConfig();
+  const { apiKey, model, apiUrl } = await getApiConfig();
   if (!apiKey) throw new Error("API key not configured");
 
-  const settings = getSettings();
+  const settings = await getSettings();
   const body: any = {
     model: options.model || model,
     messages,
@@ -96,7 +96,7 @@ export async function callTigerBotWithTools(
   toolsOverride?: any[],
   modelOverride?: string
 ): Promise<TigerBotResponse> {
-  const { apiKey } = getApiConfig();
+  const { apiKey } = await getApiConfig();
   if (!apiKey) {
     return { content: "API key not configured. Go to Settings to add your API key." };
   }
@@ -107,7 +107,7 @@ export async function callTigerBotWithTools(
   }
   allMessages.push(...messages);
 
-  const settings = getSettings();
+  const settings = await getSettings();
   const maxToolRounds = settings.agentMaxToolRounds || 8;
   const maxToolCalls = settings.agentMaxToolCalls || 12;
   const toolResults: Array<{ tool: string; result: any }> = [];
@@ -128,7 +128,7 @@ export async function callTigerBotWithTools(
     }
     let data: any;
     try {
-      data = await llmCall(allMessages, { tools: toolsOverride || getTools(), signal, model: modelOverride });
+      data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
     } catch (err: any) {
       if (err.name === "AbortError") {
         return { content: earlyContent || "Task was cancelled.", toolResults };
@@ -255,7 +255,7 @@ export async function callTigerBotWithTools(
 
       let result: any;
       try {
-        result = await callTool(fnName, fnArgs);
+        result = await callTool(fnName, fnArgs, signal);
       } catch (err: any) {
         result = { ok: false, error: err.message };
       }
@@ -426,7 +426,7 @@ Scoring guide:
         for (let round = 0; round < retryMaxRounds; round++) {
           let data: any;
           try {
-            data = await llmCall(allMessages, { tools: getTools() });
+            data = await llmCall(allMessages, { tools: await getTools() });
           } catch (err: any) {
             console.error(`[Reflection retry] LLM call failed: ${err.message}`);
             break;
@@ -509,7 +509,7 @@ Scoring guide:
     const maxNudgeRounds = 3;
     for (let nudgeRound = 0; nudgeRound < maxNudgeRounds; nudgeRound++) {
       try {
-        const nudgeData = await llmCall(allMessages, { tools: getTools() });
+        const nudgeData = await llmCall(allMessages, { tools: await getTools() });
         const nudgeChoice = nudgeData.choices?.[0];
         if (!nudgeChoice?.message?.tool_calls?.length) {
           // LLM responded with text instead of tools
@@ -627,7 +627,7 @@ export async function callTigerBot(
   messages: ChatMessage[],
   systemPrompt?: string
 ): Promise<TigerBotResponse> {
-  const { apiKey } = getApiConfig();
+  const { apiKey } = await getApiConfig();
   if (!apiKey) {
     return { content: "TigerBot API key not configured. Go to Settings to add your API key." };
   }
@@ -673,8 +673,8 @@ export async function streamTigerBot(
   onChunk: (text: string) => void,
   onDone: () => void
 ): Promise<void> {
-  const { apiKey, model, apiUrl } = getApiConfig();
-  const settings = getSettings();
+  const { apiKey, model, apiUrl } = await getApiConfig();
+  const settings = await getSettings();
 
   if (!apiKey) {
     onChunk("TigerBot API key not configured. Go to Settings to add your API key.");

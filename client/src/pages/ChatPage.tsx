@@ -186,14 +186,14 @@ function OutputCanvas({ files }: { files: string[] }) {
         </div>
       ))}
 
-      {/* PDF preview with extracted text */}
+      {/* PDF preview with native iframe viewer */}
       {pdfFiles.map((f) => (
-        <div key={f} className="canvas-doc-wrap">
-          <div className="canvas-doc-header">
-            <div className="canvas-doc-icon pdf">PDF</div>
+        <div key={f} className="canvas-html-wrap">
+          <div className="canvas-html-header">
+            <div className="canvas-doc-icon pdf" style={{ marginRight: 6 }}>PDF</div>
             <span>{f.split("/").pop()}</span>
-            <div style={{ display: "flex", gap: 6 }}>
-              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open">
+            <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+              <a href={sandboxUrl(f)} target="_blank" rel="noreferrer" className="canvas-dl-btn" title="Open in new tab">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
               </a>
               <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
@@ -201,7 +201,7 @@ function OutputCanvas({ files }: { files: string[] }) {
               </a>
             </div>
           </div>
-          <DocPreview file={f} />
+          <iframe src={sandboxUrl(f)} className="canvas-html-iframe" style={{ height: 700 }} title={f.split("/").pop() || "PDF"} />
         </div>
       ))}
 

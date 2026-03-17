@@ -70,7 +70,7 @@ const builtinTools = [
       parameters: {
         type: "object",
         properties: {
-          code: { type: "string", description: "React JSX component code. Should export or define a default component. Can use hooks, state, etc." },
+          code: { type: "string", description: "React JSX component code. Should export or define a default component. Can use hooks, state, etc. IMPORTANT: Keep code under 3000 characters to avoid truncation. For complex UIs, split into multiple run_react calls or use helper functions." },
           title: { type: "string", description: "Title for the HTML page (optional)" },
           dependencies: {
             type: "array",
@@ -378,8 +378,8 @@ export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connecti
 }
 
 // Dynamic tools getter: built-in + MCP tools + conditional OpenRouter search + sub-agent
-export function getTools(opts?: { excludeSubagent?: boolean }) {
-  const settings = getSettings();
+export async function getTools(opts?: { excludeSubagent?: boolean }) {
+  const settings = await getSettings();
   const tools: any[] = [...builtinTools];
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     tools.push(openRouterSearchTool);
@@ -399,10 +399,10 @@ export function getTools(opts?: { excludeSubagent?: boolean }) {
 }
 
 // Get manual agent config summary for system prompt injection
-export function getManualAgentConfigSummary(): string | null {
-  const settings = getSettings();
+export async function getManualAgentConfigSummary(): Promise<string | null> {
+  const settings = await getSettings();
   // Realtime mode has its own summary
-  if (settings.subAgentMode === "realtime") return getRealtimeAgentConfigSummary();
+  if (settings.subAgentMode === "realtime") return await getRealtimeAgentConfigSummary();
   if (settings.subAgentMode !== "manual" || !settings.subAgentConfigFile) return null;
   const config = loadAgentConfig(settings.subAgentConfigFile);
   if (!config) return null;
@@ -434,13 +434,13 @@ export function getManualAgentConfigSummary(): string | null {
 }
 
 // Get tools for sub-agents — filters protocol tools based on agent config
-export function getToolsForSubagent(
+export async function getToolsForSubagent(
   currentDepth: number,
   agentDef?: AgentConfig | null,
   connections?: any[],
   systemConfig?: AgentSystemConfig | null
-): any[] {
-  const settings = getSettings();
+): Promise<any[]> {
+  const settings = await getSettings();
   const maxDepth = settings.subAgentMaxDepth || 2;
   const tools: any[] = [...builtinTools];
 
@@ -474,7 +474,7 @@ export const tools = builtinTools;
 // --- Tool implementations ---
 
 async function webSearch(args: { query: string }): Promise<any> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const query = args.query;
   const results: any[] = [];
 
@@ -589,7 +589,7 @@ async function fetchUrl(args: { url: string; method?: string }): Promise<any> {
 }
 
 async function runPythonTool(args: { code: string }): Promise<any> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
   const result = await runPython(args.code, sandboxDir, 60000, _currentProjectWorkingFolder);
   return {
@@ -601,7 +601,7 @@ async function runPythonTool(args: { code: string }): Promise<any> {
 }
 
 async function runReactTool(args: { code: string; title?: string; dependencies?: string[] }): Promise<any> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
   const outputDir = _currentProjectWorkingFolder || path.join(sandboxDir, "output_file");
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
@@ -667,7 +667,7 @@ return ${renderTarget || "null"};`;
 
   try {
     fs.writeFileSync(filePath, output, "utf8");
-    const relPath = `output_file/${filename}`;
+    const relPath = path.relative(sandboxDir, filePath);
     return {
       ok: true,
       outputFiles: [relPath],
@@ -682,7 +682,7 @@ async function runShell(args: { command?: string; cmd?: string; cwd?: string }):
   // Accept both "command" and "cmd" since models sometimes use either
   const command = args.command || args.cmd;
   if (!command) return { ok: false, error: "No command provided" };
-  const settings = getSettings();
+  const settings = await getSettings();
   const cwd = args.cwd || settings.sandboxDir || process.cwd();
   try {
     const { stdout, stderr } = await execAsync(command, {
@@ -705,8 +705,8 @@ function readFileTool(args: { path?: string; file?: string; filepath?: string })
   return { ok: true, path: target, content: content.slice(0, 30000), truncated: content.length > 30000 };
 }
 
-function writeFileTool(args: { path: string; content: string; append?: boolean }): any {
-  const settings = getSettings();
+async function writeFileTool(args: { path: string; content: string; append?: boolean }): Promise<any> {
+  const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
   const outputDir = _currentProjectWorkingFolder || path.join(sandboxDir, "output_file");
   const target = path.resolve(outputDir, args.path);
@@ -724,8 +724,8 @@ function writeFileTool(args: { path: string; content: string; append?: boolean }
   return { ok: true, path: target, bytes: Buffer.byteLength(args.content), outputFiles };
 }
 
-function listFilesTool(args: { path?: string; recursive?: boolean }): any {
-  const settings = getSettings();
+async function listFilesTool(args: { path?: string; recursive?: boolean }): Promise<any> {
+  const settings = await getSettings();
   const target = path.resolve(args.path || settings.sandboxDir || ".");
   if (!fs.existsSync(target)) return { ok: false, error: "Directory not found" };
   const items: { path: string; type: string }[] = [];
@@ -927,7 +927,7 @@ async function clawhubInstallTool(args: { slug: string; force?: boolean }): Prom
 // --- OpenRouter Web Search ---
 
 async function openRouterWebSearch(args: { query: string }): Promise<any> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const apiKey = settings.openRouterSearchApiKey;
   if (!apiKey) return { ok: false, error: "OpenRouter API key not configured" };
 
@@ -1105,7 +1105,7 @@ export async function spawnSubagent(
   currentDepth: number = 0,
   signal?: AbortSignal,
 ): Promise<any> {
-  const settings = getSettings();
+  const settings = await getSettings();
   if (!settings.subAgentEnabled) {
     return { ok: false, error: "Sub-agents are disabled. Enable them in Settings > Sub-Agent." };
   }
@@ -1296,7 +1296,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       : timeoutController.signal;
 
     // Build filtered tool set for this sub-agent
-    const subagentTools = getToolsForSubagent(currentDepth + 1, resolvedAgentDef, resolvedConnections, resolvedSystemConfig);
+    const subagentTools = await getToolsForSubagent(currentDepth + 1, resolvedAgentDef, resolvedConnections, resolvedSystemConfig);
 
     // Use agent-specific model if defined, fall back to system sub-agent model override
     const agentModel = resolvedAgentDef?.model || subModel || undefined;
@@ -1478,7 +1478,7 @@ export async function startRealtimeSession(
   configFile: string,
   signal?: AbortSignal,
 ): Promise<RealtimeSession | null> {
-  const settings = getSettings();
+  const settings = await getSettings();
   const systemConfig = loadAgentConfig(configFile);
   if (!systemConfig) {
     console.error("[Realtime] Failed to load agent config:", configFile);
@@ -1563,7 +1563,7 @@ async function realtimeAgentLoop(
   handle: RealtimeAgentHandle,
 ): Promise<void> {
   const agentId = agentDef.id;
-  const settings = getSettings();
+  const settings = await getSettings();
 
   // Build system prompt from YAML
   let systemPrompt = getManualAgentPrompt(agentDef, systemConfig);
@@ -1725,7 +1725,7 @@ async function realtimeAgentLoop(
 
 // --- Realtime tool implementations ---
 
-async function realtimeSendTask(args: { to: string; task: string; context?: string; wait?: boolean }): Promise<any> {
+async function realtimeSendTask(args: { to: string; task: string; context?: string; wait?: boolean }, signal?: AbortSignal): Promise<any> {
   const sessionId = _currentParentSessionId || "default";
   const session = realtimeSessions.get(sessionId);
   if (!session) {
@@ -1772,9 +1772,9 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   // If wait=true, block until the agent publishes its result
   if (args.wait) {
     try {
-      const settings = getSettings();
+      const settings = await getSettings();
       const timeout = (args as any).timeout || (settings.subAgentTimeout || 120);
-      const resultMsg = await busWaitForMessage(sessionId, `result:${args.to}`, timeout * 1000);
+      const resultMsg = await busWaitForMessage(sessionId, `result:${args.to}`, timeout * 1000, signal);
       return {
         ok: true,
         agentId: args.to,
@@ -1796,7 +1796,7 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   };
 }
 
-async function realtimeWaitResult(args: { from: string; timeout?: number }): Promise<any> {
+async function realtimeWaitResult(args: { from: string; timeout?: number }, signal?: AbortSignal): Promise<any> {
   const sessionId = _currentParentSessionId || "default";
   const session = realtimeSessions.get(sessionId);
   if (!session) {
@@ -1822,9 +1822,9 @@ async function realtimeWaitResult(args: { from: string; timeout?: number }): Pro
 
   // Otherwise wait for the bus message
   try {
-    const settings = getSettings();
+    const settings = await getSettings();
     const timeout = (args.timeout || settings.subAgentTimeout || 120) * 1000;
-    const resultMsg = await busWaitForMessage(sessionId, `result:${args.from}`, timeout);
+    const resultMsg = await busWaitForMessage(sessionId, `result:${args.from}`, timeout, signal);
     return {
       ok: true,
       agentId: args.from,
@@ -1857,8 +1857,8 @@ function realtimeCheckAgents(): any {
 
 // --- Get tools for realtime orchestrator ---
 
-export function getToolsForRealtimeOrchestrator(): any[] {
-  const settings = getSettings();
+export async function getToolsForRealtimeOrchestrator(): Promise<any[]> {
+  const settings = await getSettings();
   const tools: any[] = [...builtinTools];
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     tools.push(openRouterSearchTool);
@@ -1872,8 +1872,8 @@ export function getToolsForRealtimeOrchestrator(): any[] {
 
 // --- Config summary for realtime mode ---
 
-export function getRealtimeAgentConfigSummary(): string | null {
-  const settings = getSettings();
+export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
+  const settings = await getSettings();
   if (settings.subAgentMode !== "realtime" || !settings.subAgentConfigFile) return null;
   const config = loadAgentConfig(settings.subAgentConfigFile);
   if (!config) return null;
@@ -1945,7 +1945,7 @@ export function setCallContext(sessionId?: string, depth?: number, agentId?: str
   _currentProjectWorkingFolder = projectWorkingFolder;
 }
 
-export async function callTool(name: string, args: any): Promise<any> {
+export async function callTool(name: string, args: any, signal?: AbortSignal): Promise<any> {
   switch (name) {
     case "web_search": return webSearch(args);
     case "openrouter_web_search": return openRouterWebSearch(args);
@@ -1963,8 +1963,8 @@ export async function callTool(name: string, args: any): Promise<any> {
     case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth);
 
     // ─── Realtime Agent Tools ───
-    case "send_task": return realtimeSendTask(args);
-    case "wait_result": return realtimeWaitResult(args);
+    case "send_task": return realtimeSendTask(args, signal);
+    case "wait_result": return realtimeWaitResult(args, signal);
     case "check_agents": return realtimeCheckAgents();
 
     // ─── Protocol Tools ───

@@ -1,16 +1,21 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 
 const DATA_DIR = path.resolve("data");
 
-function readJSON(file: string): any {
+async function readJSON(file: string): Promise<any> {
   const fp = path.join(DATA_DIR, file);
-  if (!fs.existsSync(fp)) return file.endsWith("settings.json") ? {} : [];
-  return JSON.parse(fs.readFileSync(fp, "utf-8"));
+  try {
+    await fs.access(fp);
+    const content = await fs.readFile(fp, "utf-8");
+    return JSON.parse(content);
+  } catch {
+    return file.endsWith("settings.json") ? {} : [];
+  }
 }
 
-function writeJSON(file: string, data: any): void {
-  fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
+async function writeJSON(file: string, data: any): Promise<void> {
+  await fs.writeFile(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
 // Chat history
@@ -22,12 +27,12 @@ export interface ChatSession {
   updatedAt: string;
 }
 
-export function getChatHistory(): ChatSession[] {
+export async function getChatHistory(): Promise<ChatSession[]> {
   return readJSON("chat_history.json");
 }
 
-export function saveChatHistory(sessions: ChatSession[]): void {
-  writeJSON("chat_history.json", sessions);
+export async function saveChatHistory(sessions: ChatSession[]): Promise<void> {
+  await writeJSON("chat_history.json", sessions);
 }
 
 // Tasks (cron)
@@ -42,12 +47,12 @@ export interface ScheduledTask {
   createdAt: string;
 }
 
-export function getTasks(): ScheduledTask[] {
+export async function getTasks(): Promise<ScheduledTask[]> {
   return readJSON("tasks.json");
 }
 
-export function saveTasks(tasks: ScheduledTask[]): void {
-  writeJSON("tasks.json", tasks);
+export async function saveTasks(tasks: ScheduledTask[]): Promise<void> {
+  await writeJSON("tasks.json", tasks);
 }
 
 // Settings
@@ -71,12 +76,12 @@ export interface Settings {
   [key: string]: any;
 }
 
-export function getSettings(): Settings {
+export async function getSettings(): Promise<Settings> {
   return readJSON("settings.json");
 }
 
-export function saveSettings(settings: Settings): void {
-  writeJSON("settings.json", settings);
+export async function saveSettings(settings: Settings): Promise<void> {
+  await writeJSON("settings.json", settings);
 }
 
 // Projects
@@ -91,12 +96,12 @@ export interface Project {
   updatedAt: string;
 }
 
-export function getProjects(): Project[] {
+export async function getProjects(): Promise<Project[]> {
   return readJSON("projects.json");
 }
 
-export function saveProjects(projects: Project[]): void {
-  writeJSON("projects.json", projects);
+export async function saveProjects(projects: Project[]): Promise<void> {
+  await writeJSON("projects.json", projects);
 }
 
 // File Access Tokens
@@ -107,12 +112,12 @@ export interface FileToken {
   createdAt: string;
 }
 
-export function getFileTokens(): FileToken[] {
+export async function getFileTokens(): Promise<FileToken[]> {
   return readJSON("file_tokens.json");
 }
 
-export function saveFileTokens(tokens: FileToken[]): void {
-  writeJSON("file_tokens.json", tokens);
+export async function saveFileTokens(tokens: FileToken[]): Promise<void> {
+  await writeJSON("file_tokens.json", tokens);
 }
 
 export function generateToken(): string {
@@ -124,8 +129,8 @@ export function generateToken(): string {
   return token;
 }
 
-export function isValidFileToken(token: string): boolean {
-  const tokens = getFileTokens();
+export async function isValidFileToken(token: string): Promise<boolean> {
+  const tokens = await getFileTokens();
   return tokens.some((t) => t.token === token);
 }
 
@@ -140,10 +145,10 @@ export interface Skill {
   installedAt: string;
 }
 
-export function getSkills(): Skill[] {
+export async function getSkills(): Promise<Skill[]> {
   return readJSON("skills.json");
 }
 
-export function saveSkills(skills: Skill[]): void {
-  writeJSON("skills.json", skills);
+export async function saveSkills(skills: Skill[]): Promise<void> {
+  await writeJSON("skills.json", skills);
 }

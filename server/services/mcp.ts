@@ -81,7 +81,7 @@ export async function initMcpServers(): Promise<void> {
   // Disconnect existing
   await disconnectAll();
 
-  const settings = getSettings();
+  const settings = await getSettings();
   const servers = settings.mcpTools || [];
 
   for (const server of servers) {

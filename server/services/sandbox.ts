@@ -1,9 +1,9 @@
 import path from "path";
-import fs from "fs";
+import fs from "fs/promises";
+import fsSync from "fs";
 
 export function validatePath(sandboxDir: string, requestedPath: string): string {
   const resolved = path.resolve(sandboxDir, requestedPath);
-  // Allow access to the installation folder and its contents
   const root = path.resolve(sandboxDir);
   if (!resolved.startsWith(root)) {
     throw new Error("Access denied: path outside workspace");
@@ -11,36 +11,48 @@ export function validatePath(sandboxDir: string, requestedPath: string): string 
   return resolved;
 }
 
-export function listFiles(sandboxDir: string, subPath: string = ""): any[] {
+export async function listFiles(sandboxDir: string, subPath: string = ""): Promise<any[]> {
   const dir = validatePath(sandboxDir, subPath);
-  if (!fs.existsSync(dir)) return [];
+  try {
+    await fs.access(dir);
+  } catch {
+    return [];
+  }
 
-  return fs.readdirSync(dir, { withFileTypes: true }).map((entry) => ({
-    name: entry.name,
-    path: path.join(subPath, entry.name),
-    isDirectory: entry.isDirectory(),
-    size: entry.isDirectory() ? 0 : fs.statSync(path.join(dir, entry.name)).size,
-    modified: fs.statSync(path.join(dir, entry.name)).mtime.toISOString(),
-  }));
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const results = await Promise.all(
+    entries.map(async (entry) => {
+      const stat = await fs.stat(path.join(dir, entry.name));
+      return {
+        name: entry.name,
+        path: path.join(subPath, entry.name),
+        isDirectory: entry.isDirectory(),
+        size: entry.isDirectory() ? 0 : stat.size,
+        modified: stat.mtime.toISOString(),
+      };
+    })
+  );
+  return results;
 }
 
-export function readFile(sandboxDir: string, filePath: string): string {
+export async function readFile(sandboxDir: string, filePath: string): Promise<string> {
   const resolved = validatePath(sandboxDir, filePath);
-  return fs.readFileSync(resolved, "utf-8");
+  return fs.readFile(resolved, "utf-8");
 }
 
-export function writeFile(sandboxDir: string, filePath: string, content: string): void {
+export async function writeFile(sandboxDir: string, filePath: string, content: string): Promise<void> {
   const resolved = validatePath(sandboxDir, filePath);
   const dir = path.dirname(resolved);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(resolved, content);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(resolved, content);
 }
 
-export function deleteFile(sandboxDir: string, filePath: string): void {
+export async function deleteFile(sandboxDir: string, filePath: string): Promise<void> {
   const resolved = validatePath(sandboxDir, filePath);
-  if (fs.statSync(resolved).isDirectory()) {
-    fs.rmSync(resolved, { recursive: true });
+  const stat = await fs.stat(resolved);
+  if (stat.isDirectory()) {
+    await fs.rm(resolved, { recursive: true });
   } else {
-    fs.unlinkSync(resolved);
+    await fs.unlink(resolved);
   }
 }

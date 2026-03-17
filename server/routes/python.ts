@@ -1,16 +1,16 @@
-import { Router } from "express";
+import { FastifyInstance } from "fastify";
 import { runPython } from "../services/python";
 import { getSettings } from "../services/data";
 import path from "path";
 
-export const pythonRouter = Router();
+export async function pythonRoutes(fastify: FastifyInstance) {
+  fastify.post("/run", async (request, reply) => {
+    const { code } = request.body as any;
+    if (!code) { reply.code(400); return { error: "code required" }; }
 
-pythonRouter.post("/run", async (req, res) => {
-  const { code } = req.body;
-  if (!code) return res.status(400).json({ error: "code required" });
-
-  const settings = getSettings();
-  const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-  const result = await runPython(code, sandboxDir);
-  res.json(result);
-});
+    const settings = await getSettings();
+    const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
+    const result = await runPython(code, sandboxDir);
+    return result;
+  });
+}
