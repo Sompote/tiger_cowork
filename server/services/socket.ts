@@ -3,7 +3,7 @@ import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
-import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator } from "./toolbox";
+import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent } from "./toolbox";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -260,6 +260,10 @@ export function setupSocket(io: Server): void {
         // silent — avoid flooding
       } else if (data.status === "realtime_agent_done") {
         progressText = `> **✅ ${data.label}** task completed\n`;
+
+      // ─── Human Node messages (agent → human) ───
+      } else if (data.status === "human_node_message") {
+        progressText = `\n<div class="agent-response-tag" data-agent="${data.agentId}">📨 <strong>${data.label}</strong></div>\n\n${data.content}\n`;
       }
       if (progressText) {
         ioRef.emit("chat:chunk", { sessionId: data.sessionId, content: progressText });
@@ -305,6 +309,148 @@ export function setupSocket(io: Server): void {
       });
       session.updatedAt = new Date().toISOString();
       await saveChatHistory(sessions);
+
+      // ─── /agent command: talk directly to agents in realtime mode ───
+      // Format: /agent [agent_name_or_id] "prompt"  OR  /agent "prompt" (broadcast to all connected)
+      const agentCmdMatch = message.match(/^\/agent\s+(?:(\S+)\s+)?[""]?([\s\S]+?)[""]?\s*$/i);
+      if (agentCmdMatch) {
+        const rtSession = getRealtimeSession(sessionId);
+        if (!rtSession) {
+          const errMsg = "No realtime agent session is active. Start a realtime session first (enable realtime mode in settings with an agent config).";
+          session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+          return;
+        }
+
+        const targetArg = agentCmdMatch[1]; // agent name/id or undefined (broadcast)
+        const prompt = agentCmdMatch[2].trim();
+
+        if (targetArg) {
+          // Find agent by ID or name (case-insensitive)
+          const connectedIds = getHumanConnectedAgents(sessionId);
+          let targetId: string | undefined;
+
+          // First try exact ID match
+          if (rtSession.agents.has(targetArg)) {
+            targetId = targetArg;
+          } else {
+            // Try name match (case-insensitive)
+            for (const [id, handle] of rtSession.agents.entries()) {
+              if (handle.agentDef.name.toLowerCase() === targetArg.toLowerCase() ||
+                  handle.agentDef.id.toLowerCase() === targetArg.toLowerCase()) {
+                targetId = id;
+                break;
+              }
+            }
+          }
+
+          if (!targetId) {
+            const available = Array.from(rtSession.agents.entries())
+              .filter(([, h]) => h.agentDef.role !== "human")
+              .map(([id, h]) => `${h.agentDef.name} (${id})`)
+              .join(", ");
+            const errMsg = `Agent "${targetArg}" not found. Available agents: ${available}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          // Validate human can talk to this agent
+          if (connectedIds.length > 0 && !connectedIds.includes(targetId)) {
+            const allowedNames = connectedIds.map((id) => {
+              const h = rtSession.agents.get(id);
+              return h ? `${h.agentDef.name} (${id})` : id;
+            }).join(", ");
+            const errMsg = `You can only talk to agents connected to the human node: ${allowedNames}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          // Send task to specific agent
+          const agentName = rtSession.agents.get(targetId)!.agentDef.name;
+          socket.emit("chat:chunk", {
+            sessionId,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
+          });
+
+          const result = humanSendToAgent(sessionId, targetId, prompt);
+          if (!result.ok) {
+            const errMsg = `Failed to send to ${targetId}: ${result.error}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          // Wait for the agent's result
+          socket.emit("chat:chunk", { sessionId, content: `> Waiting for **${agentName}** to respond...\n` });
+          const waitResult = await humanWaitForAgent(sessionId, targetId, 120000);
+          const responseContent = waitResult.ok
+            ? `<div class="agent-response-tag" data-agent="${targetId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`
+            : `**${agentName}** did not respond in time: ${waitResult.error}`;
+
+          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+          socket.emit("chat:response", { sessionId, content: responseContent, done: true });
+          return;
+
+        } else {
+          // Broadcast to all connected agents
+          const connectedIds = getHumanConnectedAgents(sessionId);
+          if (connectedIds.length === 0) {
+            const errMsg = "No agents are connected to the human node. Add connections from the human node to agents in the Agent Editor.";
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          const agentNames = connectedIds.map((id) => {
+            const h = rtSession.agents.get(id);
+            return h ? `${h.agentDef.name} (${id})` : id;
+          });
+          socket.emit("chat:chunk", {
+            sessionId,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
+          });
+
+          const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
+          if (!broadcastResult.ok) {
+            const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          // Collect results from all agents concurrently
+          socket.emit("chat:chunk", { sessionId, content: `> Waiting for ${broadcastResult.sent.length} agent(s) to respond...\n` });
+
+          const resultPromises = broadcastResult.sent.map(async (agentId) => {
+            const agentName = rtSession.agents.get(agentId)?.agentDef.name || agentId;
+            const waitResult = await humanWaitForAgent(sessionId, agentId, 120000);
+            if (waitResult.ok) {
+              return `<div class="agent-response-tag" data-agent="${agentId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`;
+            } else {
+              return `<div class="agent-response-tag" data-agent="${agentId}">⏱️ <strong>${agentName}</strong> (timeout)</div>\n\n${waitResult.error}`;
+            }
+          });
+
+          const results = await Promise.all(resultPromises);
+          const fullResponse = results.join("\n\n---\n\n");
+
+          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+          socket.emit("chat:response", { sessionId, content: fullResponse, done: true });
+          return;
+        }
+      }
 
       // Check if user sent Python code directly
       const pythonMatch = message.match(/```python\n([\s\S]*?)```/);
@@ -543,8 +689,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
-        // Shutdown realtime session when task completes
-        shutdownRealtimeSession(sessionId);
+        // Shutdown realtime session when task completes — unless human node is present
+        // (human mode keeps the session alive for multi-turn interaction via /agent commands)
+        const rtSessionCheck = getRealtimeSession(sessionId);
+        const hasHumanNode = rtSessionCheck?.systemConfig?.agents?.some((a: any) => a.role === "human");
+        if (!hasHumanNode) {
+          shutdownRealtimeSession(sessionId);
+        }
         activeTasks.delete(taskId);
         taskAbortControllers.delete(taskId);
       }
@@ -636,6 +787,129 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       });
       session.updatedAt = new Date().toISOString();
       await saveChatHistory(sessions);
+
+      // ─── /agent command in project chat ───
+      const agentCmdMatchProj = message.match(/^\/agent\s+(?:(\S+)\s+)?[""]?([\s\S]+?)[""]?\s*$/i);
+      if (agentCmdMatchProj) {
+        const rtSession = getRealtimeSession(sessionId);
+        if (!rtSession) {
+          const errMsg = "No realtime agent session is active for this project.";
+          session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+          return;
+        }
+
+        const targetArg = agentCmdMatchProj[1];
+        const prompt = agentCmdMatchProj[2].trim();
+
+        if (targetArg) {
+          const connectedIds = getHumanConnectedAgents(sessionId);
+          let targetId: string | undefined;
+          if (rtSession.agents.has(targetArg)) {
+            targetId = targetArg;
+          } else {
+            for (const [id, handle] of rtSession.agents.entries()) {
+              if (handle.agentDef.name.toLowerCase() === targetArg.toLowerCase() ||
+                  handle.agentDef.id.toLowerCase() === targetArg.toLowerCase()) {
+                targetId = id;
+                break;
+              }
+            }
+          }
+
+          if (!targetId) {
+            const available = Array.from(rtSession.agents.entries())
+              .filter(([, h]) => h.agentDef.role !== "human")
+              .map(([id, h]) => `${h.agentDef.name} (${id})`)
+              .join(", ");
+            const errMsg = `Agent "${targetArg}" not found. Available: ${available}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          if (connectedIds.length > 0 && !connectedIds.includes(targetId)) {
+            const allowedNames = connectedIds.map((id) => rtSession.agents.get(id)?.agentDef.name || id).join(", ");
+            const errMsg = `You can only talk to agents connected to the human node: ${allowedNames}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          const agentName = rtSession.agents.get(targetId)!.agentDef.name;
+          socket.emit("chat:chunk", {
+            sessionId,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
+          });
+
+          const result = humanSendToAgent(sessionId, targetId, prompt);
+          if (!result.ok) {
+            const errMsg = `Failed: ${result.error}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          socket.emit("chat:chunk", { sessionId, content: `> Waiting for **${agentName}**...\n` });
+          const waitResult = await humanWaitForAgent(sessionId, targetId, 120000);
+          const responseContent = waitResult.ok
+            ? `<div class="agent-response-tag" data-agent="${targetId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`
+            : `**${agentName}** did not respond: ${waitResult.error}`;
+
+          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+          socket.emit("chat:response", { sessionId, content: responseContent, done: true });
+          return;
+
+        } else {
+          const connectedIds = getHumanConnectedAgents(sessionId);
+          if (connectedIds.length === 0) {
+            const errMsg = "No agents connected to human node.";
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          const agentNames = connectedIds.map((id) => rtSession.agents.get(id)?.agentDef.name || id);
+          socket.emit("chat:chunk", {
+            sessionId,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
+          });
+
+          const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
+          if (!broadcastResult.ok) {
+            const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
+            session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
+            await saveChatHistory(sessions);
+            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            return;
+          }
+
+          socket.emit("chat:chunk", { sessionId, content: `> Waiting for ${broadcastResult.sent.length} agent(s)...\n` });
+          const results = await Promise.all(
+            broadcastResult.sent.map(async (agentId) => {
+              const agentName = rtSession.agents.get(agentId)?.agentDef.name || agentId;
+              const waitResult = await humanWaitForAgent(sessionId, agentId, 120000);
+              return waitResult.ok
+                ? `<div class="agent-response-tag" data-agent="${agentId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`
+                : `<div class="agent-response-tag" data-agent="${agentId}">⏱️ <strong>${agentName}</strong> (timeout)</div>\n\n${waitResult.error}`;
+            })
+          );
+
+          const fullResponse = results.join("\n\n---\n\n");
+          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString() });
+          await saveChatHistory(sessions);
+          socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+          socket.emit("chat:response", { sessionId, content: fullResponse, done: true });
+          return;
+        }
+      }
 
       const settings = await getSettings();
       const chatMessages = session.messages.map((m) => ({
@@ -824,7 +1098,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
-        shutdownRealtimeSession(sessionId);
+        // Keep session alive if human node is present
+        const rtSessionCheck2 = getRealtimeSession(sessionId);
+        const hasHumanNode2 = rtSessionCheck2?.systemConfig?.agents?.some((a: any) => a.role === "human");
+        if (!hasHumanNode2) {
+          shutdownRealtimeSession(sessionId);
+        }
         activeTasks.delete(taskId);
         taskAbortControllers.delete(taskId);
       }

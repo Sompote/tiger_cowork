@@ -1505,22 +1505,27 @@ export async function startRealtimeSession(
 
   console.log(`[Realtime] Starting session ${sessionId} with ${systemConfig.agents.length} agents`);
 
-  // Boot each agent concurrently
+  // Boot each agent concurrently (skip human nodes — they are entry points)
   for (const agentDef of systemConfig.agents) {
     const handle: RealtimeAgentHandle = {
       agentDef,
-      status: "idle",
+      status: agentDef.role === "human" ? "idle" : "idle",
       promise: Promise.resolve(),
     };
 
-    // Start the agent loop
-    handle.promise = realtimeAgentLoop(
-      agentDef,
-      sessionId,
-      systemConfig,
-      abortController.signal,
-      handle,
-    );
+    // Human nodes don't get an LLM loop — they represent the real user
+    if (agentDef.role !== "human") {
+      handle.promise = realtimeAgentLoop(
+        agentDef,
+        sessionId,
+        systemConfig,
+        abortController.signal,
+        handle,
+      );
+    } else {
+      // Start a listener loop for the human node that forwards agent results to the client
+      handle.promise = humanNodeLoop(agentDef, sessionId, abortController.signal);
+    }
 
     session.agents.set(agentDef.id, handle);
 
@@ -1723,6 +1728,133 @@ async function realtimeAgentLoop(
   console.log(`[Realtime:${agentDef.name}] Agent exited`);
 }
 
+// --- Human node loop: listens for tasks sent to the human node and forwards to client ---
+
+async function humanNodeLoop(
+  agentDef: AgentConfig,
+  sessionId: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const agentId = agentDef.id;
+  console.log(`[Realtime:Human] Human node "${agentId}" listening for agent outputs...`);
+
+  while (!signal.aborted) {
+    try {
+      // Wait for any agent to send a task/result to the human node
+      const msg = await busWaitForMessage(sessionId, `task:${agentId}`, 0, signal);
+
+      const fromAgent = msg.payload?.from || "unknown";
+      const content = msg.payload?.task || msg.payload?.result || "(no content)";
+
+      console.log(`[Realtime:Human] Received from ${fromAgent}: ${content.slice(0, 200)}`);
+
+      // Forward to client via status callback
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId,
+          status: "human_node_message",
+          agentId: fromAgent,
+          label: fromAgent,
+          content,
+        });
+      }
+    } catch (err: any) {
+      if (err.message === "aborted" || signal.aborted) break;
+      console.error(`[Realtime:Human] Error:`, err.message);
+    }
+  }
+  console.log(`[Realtime:Human] Human node "${agentId}" exited`);
+}
+
+// --- Human node helpers ---
+
+/** Get agent IDs that the human node is directly connected to */
+export function getHumanConnectedAgents(sessionId: string): string[] {
+  const session = realtimeSessions.get(sessionId);
+  if (!session) return [];
+
+  const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
+  if (!humanNode) return [];
+
+  // Get agents connected FROM the human node
+  const connTargets = (session.systemConfig.connections || [])
+    .filter((c: any) => c.from === humanNode.id)
+    .map((c: any) => c.to);
+
+  // Also include agents connected TO the human node (bidirectional)
+  const connSources = (session.systemConfig.connections || [])
+    .filter((c: any) => c.to === humanNode.id)
+    .map((c: any) => c.from);
+
+  return [...new Set([...connTargets, ...connSources])].filter(
+    (id) => session.agents.has(id) && session.agents.get(id)!.agentDef.role !== "human"
+  );
+}
+
+/** Send a task from the human to a specific agent */
+export function humanSendToAgent(sessionId: string, targetAgentId: string, task: string, context?: string): { ok: boolean; error?: string } {
+  const session = realtimeSessions.get(sessionId);
+  if (!session) return { ok: false, error: "No realtime session active." };
+
+  const targetAgent = session.agents.get(targetAgentId);
+  if (!targetAgent) {
+    const available = Array.from(session.agents.keys()).join(", ");
+    return { ok: false, error: `Agent "${targetAgentId}" not found. Available: ${available}` };
+  }
+
+  // Verify human is connected to this agent
+  const humanConnected = getHumanConnectedAgents(sessionId);
+  if (humanConnected.length > 0 && !humanConnected.includes(targetAgentId)) {
+    return { ok: false, error: `You can only talk to agents connected to the human node: ${humanConnected.join(", ")}` };
+  }
+
+  // Publish task to the agent's bus topic
+  const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
+  busPublish(sessionId, humanNode?.id || "human", `task:${targetAgentId}`, {
+    task,
+    context,
+    from: humanNode?.id || "human",
+  });
+
+  console.log(`[Realtime:Human] Human → ${targetAgentId}: ${task.slice(0, 100)}`);
+  return { ok: true };
+}
+
+/** Send a task from human to ALL connected agents (broadcast) */
+export function humanBroadcastToAgents(sessionId: string, task: string, context?: string): { ok: boolean; sent: string[]; errors: string[] } {
+  const connectedAgents = getHumanConnectedAgents(sessionId);
+  if (connectedAgents.length === 0) {
+    return { ok: false, sent: [], errors: ["No agents connected to the human node"] };
+  }
+
+  const sent: string[] = [];
+  const errors: string[] = [];
+
+  for (const agentId of connectedAgents) {
+    const result = humanSendToAgent(sessionId, agentId, task, context);
+    if (result.ok) {
+      sent.push(agentId);
+    } else {
+      errors.push(`${agentId}: ${result.error}`);
+    }
+  }
+
+  return { ok: sent.length > 0, sent, errors };
+}
+
+/** Wait for a result from a specific agent (called by human) */
+export async function humanWaitForAgent(sessionId: string, agentId: string, timeoutMs: number = 120000, signal?: AbortSignal): Promise<{ ok: boolean; result?: string; error?: string }> {
+  try {
+    const resultMsg = await busWaitForMessage(sessionId, `result:${agentId}`, timeoutMs, signal);
+    return {
+      ok: true,
+      result: resultMsg.payload?.result || "(no result)",
+    };
+  } catch (err: any) {
+    return { ok: false, error: `Timeout waiting for ${agentId}: ${err.message}` };
+  }
+}
+
 // --- Realtime tool implementations ---
 
 async function realtimeSendTask(args: { to: string; task: string; context?: string; wait?: boolean }, signal?: AbortSignal): Promise<any> {
@@ -1758,6 +1890,27 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
     if (allAllowed.length > 0 && !allAllowed.includes(args.to)) {
       return { ok: false, error: `Agent "${callerId}" is not connected to "${args.to}". Allowed targets: ${allAllowed.join(", ")}` };
     }
+  }
+
+  // If target is a human node, route output to client via callback (not LLM loop)
+  if (targetAgent.agentDef.role === "human") {
+    console.log(`[Realtime] ${_currentAgentId} → send_task → HUMAN (${args.to}): ${args.task.slice(0, 100)}`);
+    if (subagentStatusCallback) {
+      subagentStatusCallback({
+        sessionId,
+        status: "human_node_message",
+        agentId: _currentAgentId,
+        label: session.agents.get(_currentAgentId)?.agentDef.name || _currentAgentId,
+        content: args.task,
+      });
+    }
+    return {
+      ok: true,
+      agentId: args.to,
+      agentName: targetAgent.agentDef.name,
+      sent: true,
+      note: `Output sent to human user.`,
+    };
   }
 
   // Publish task to the agent's bus topic
@@ -1890,8 +2043,19 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
     summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n\n`;
   }
 
+  // Note human node
+  const humanNode = config.agents?.find((a: AgentConfig) => a.role === "human");
+  if (humanNode) {
+    summary += `HUMAN NODE: "${humanNode.id}" — the user interacts via this entry point.\n`;
+    summary += `Agents connected to the human node can receive tasks directly from the user and send results back.\n\n`;
+  }
+
   summary += `Agent team:\n`;
   for (const a of config.agents || []) {
+    if (a.role === "human") {
+      summary += `  - ${a.id} ("${a.name}"): role=human (user entry point)\n`;
+      continue;
+    }
     summary += `  - ${a.id} ("${a.name}"): role=${a.role}, persona=${a.persona || "N/A"}\n`;
     if (a.responsibilities && a.responsibilities.length > 0) {
       summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;

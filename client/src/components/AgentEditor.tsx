@@ -35,6 +35,7 @@ interface EditorState {
 }
 
 const ROLE_COLORS: Record<string, string> = {
+  human: "#e91e63",
   orchestrator: "#4285f4",
   worker: "#34a853",
   checker: "#ea8600",
@@ -45,7 +46,7 @@ const ROLE_COLORS: Record<string, string> = {
 
 // No hardcoded model list — users type model names and validate against the backend
 
-const ROLES = ["orchestrator", "worker", "checker", "reporter", "researcher"];
+const ROLES = ["human", "orchestrator", "worker", "checker", "reporter", "researcher"];
 const PROTOCOLS = ["tcp", "bus", "queue"];
 const PROTOCOL_LABELS: Record<string, string> = {
   tcp: "TCP",
@@ -116,27 +117,34 @@ function AgentDefPanel({
       </div>
 
       <div className="agent-def-body">
-        {/* LLM Helper */}
-        <div className="agent-def-llm-section">
-          <label>AI-Assisted Setup</label>
-          <div className="agent-def-llm-row">
-            <textarea
-              placeholder="Describe the agent you want (e.g. 'A structural engineer who reviews calculations and checks code compliance')..."
-              value={llmPrompt}
-              onChange={(e) => setLlmPrompt(e.target.value)}
-              rows={2}
-            />
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={generateWithLLM}
-              disabled={generating || !llmPrompt.trim()}
-            >
-              {generating ? "..." : "Generate"}
-            </button>
+        {/* LLM Helper — not for human nodes */}
+        {agent.role !== "human" && (
+          <div className="agent-def-llm-section">
+            <label>AI-Assisted Setup</label>
+            <div className="agent-def-llm-row">
+              <textarea
+                placeholder="Describe the agent you want (e.g. 'A structural engineer who reviews calculations and checks code compliance')..."
+                value={llmPrompt}
+                onChange={(e) => setLlmPrompt(e.target.value)}
+                rows={2}
+              />
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={generateWithLLM}
+                disabled={generating || !llmPrompt.trim()}
+              >
+                {generating ? "..." : "Generate"}
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
-        <div className="agent-def-divider">or edit manually</div>
+        {agent.role !== "human" && <div className="agent-def-divider">or edit manually</div>}
+        {agent.role === "human" && (
+          <div className="human-node-info">
+            <p>Human node — the entry point for user interaction. Connect this node to agents that the user can talk to directly via <code>/agent [name] "prompt"</code>.</p>
+          </div>
+        )}
 
         <div className="agent-def-form">
           <div className="form-group">
@@ -152,7 +160,7 @@ function AgentDefPanel({
             <input
               value={agent.name}
               onChange={(e) => onUpdate({ ...agent, name: e.target.value })}
-              placeholder="e.g. Design Engineer 1"
+              placeholder={agent.role === "human" ? "e.g. User" : "e.g. Design Engineer 1"}
             />
           </div>
           <div className="form-group">
@@ -166,80 +174,85 @@ function AgentDefPanel({
               ))}
             </select>
           </div>
-          <div className="form-group">
-            <label className="model-checkbox-label">
-              <input
-                type="checkbox"
-                checked={showModelInput}
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  setShowModelInput(checked);
-                  if (!checked) {
-                    onUpdate({ ...agent, model: "" });
-                    setModelValid(null);
-                  }
-                }}
-              />
-              <span>Specify model for this agent</span>
-            </label>
-            {!showModelInput && (
-              <p className="model-hint">Using system default model</p>
-            )}
-            {showModelInput && (
-              <>
-                <div className="model-input-row">
+          {/* Model, Persona, Responsibilities — hidden for human nodes */}
+          {agent.role !== "human" && (
+            <>
+              <div className="form-group">
+                <label className="model-checkbox-label">
                   <input
-                    value={agent.model}
+                    type="checkbox"
+                    checked={showModelInput}
                     onChange={(e) => {
-                      onUpdate({ ...agent, model: e.target.value });
-                      setModelValid(null);
-                    }}
-                    placeholder="e.g. claude-opus-4-6, gpt-4o, gemini-pro"
-                  />
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={async () => {
-                      setModelValidating(true);
-                      try {
-                        const res = await api.validateModel(agent.model);
-                        setModelValid(res.available);
-                      } catch {
-                        setModelValid(false);
+                      const checked = e.target.checked;
+                      setShowModelInput(checked);
+                      if (!checked) {
+                        onUpdate({ ...agent, model: "" });
+                        setModelValid(null);
                       }
-                      setModelValidating(false);
                     }}
-                    disabled={modelValidating || !agent.model.trim()}
-                  >
-                    {modelValidating ? "..." : "Validate"}
-                  </button>
-                </div>
-                {modelValid === true && (
-                  <span className="model-valid-msg">Model available</span>
+                  />
+                  <span>Specify model for this agent</span>
+                </label>
+                {!showModelInput && (
+                  <p className="model-hint">Using system default model</p>
                 )}
-                {modelValid === false && (
-                  <span className="model-invalid-msg">Model not found — you can still use it</span>
+                {showModelInput && (
+                  <>
+                    <div className="model-input-row">
+                      <input
+                        value={agent.model}
+                        onChange={(e) => {
+                          onUpdate({ ...agent, model: e.target.value });
+                          setModelValid(null);
+                        }}
+                        placeholder="e.g. claude-opus-4-6, gpt-4o, gemini-pro"
+                      />
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={async () => {
+                          setModelValidating(true);
+                          try {
+                            const res = await api.validateModel(agent.model);
+                            setModelValid(res.available);
+                          } catch {
+                            setModelValid(false);
+                          }
+                          setModelValidating(false);
+                        }}
+                        disabled={modelValidating || !agent.model.trim()}
+                      >
+                        {modelValidating ? "..." : "Validate"}
+                      </button>
+                    </div>
+                    {modelValid === true && (
+                      <span className="model-valid-msg">Model available</span>
+                    )}
+                    {modelValid === false && (
+                      <span className="model-invalid-msg">Model not found — you can still use it</span>
+                    )}
+                  </>
                 )}
-              </>
-            )}
-          </div>
-          <div className="form-group">
-            <label>Persona</label>
-            <textarea
-              value={agent.persona}
-              onChange={(e) => onUpdate({ ...agent, persona: e.target.value })}
-              rows={4}
-              placeholder="Describe the agent's personality, expertise, and behavior..."
-            />
-          </div>
-          <div className="form-group">
-            <label>Responsibilities (one per line)</label>
-            <textarea
-              value={agent.responsibilities.join("\n")}
-              onChange={(e) => onUpdate({ ...agent, responsibilities: e.target.value.split("\n").filter(Boolean) })}
-              rows={4}
-              placeholder="- Parse and interpret requirements&#10;- Assign tasks to sub-agents&#10;- Review outputs"
-            />
-          </div>
+              </div>
+              <div className="form-group">
+                <label>Persona</label>
+                <textarea
+                  value={agent.persona}
+                  onChange={(e) => onUpdate({ ...agent, persona: e.target.value })}
+                  rows={4}
+                  placeholder="Describe the agent's personality, expertise, and behavior..."
+                />
+              </div>
+              <div className="form-group">
+                <label>Responsibilities (one per line)</label>
+                <textarea
+                  value={agent.responsibilities.join("\n")}
+                  onChange={(e) => onUpdate({ ...agent, responsibilities: e.target.value.split("\n").filter(Boolean) })}
+                  rows={4}
+                  placeholder="- Parse and interpret requirements&#10;- Assign tasks to sub-agents&#10;- Review outputs"
+                />
+              </div>
+            </>
+          )}
 
           {/* Bus Connection */}
           <div className="agent-def-divider">communication</div>
@@ -887,6 +900,36 @@ export default function AgentEditor({
             <button className="btn btn-secondary btn-sm" onClick={addAgent}>
               + Add Agent
             </button>
+            <button
+              className="btn btn-sm"
+              style={{ background: "#e91e63", color: "#fff", border: "none" }}
+              onClick={() => {
+                // Only allow one human node
+                if (state.agents.some((a) => a.role === "human")) {
+                  alert("Only one Human node allowed per system.");
+                  return;
+                }
+                const humanNode: AgentNode = {
+                  id: "human",
+                  name: "User",
+                  role: "human",
+                  model: "",
+                  persona: "",
+                  responsibilities: [],
+                  x: 50,
+                  y: 50 + state.agents.length * 100,
+                  color: ROLE_COLORS.human,
+                  busEnabled: false,
+                  busTopics: [],
+                };
+                setState((s) => ({ ...s, agents: [humanNode, ...s.agents] }));
+                setSelectedAgent(humanNode.id);
+                setSelectedConn(null);
+              }}
+              title="Add a Human entry point node"
+            >
+              + Human Node
+            </button>
             <button className="btn btn-secondary btn-sm" onClick={handlePreviewYaml}>
               Preview YAML
             </button>
@@ -1086,11 +1129,16 @@ export default function AgentEditor({
                     onClick={(e) => { e.stopPropagation(); setSelectedAgent(agent.id); setSelectedConn(null); }}
                   >
                     <div className="agent-node-header" style={{ background: agent.color }}>
-                      <span className="agent-node-role">{agent.role}</span>
+                      <span className="agent-node-role">{agent.role === "human" ? "\u{1F464} human" : agent.role}</span>
                     </div>
                     <div className="agent-node-body">
                       <div className="agent-node-name">{agent.name || agent.id}</div>
-                      <div className="agent-node-model">{agent.model.split("-").slice(-2).join("-")}</div>
+                      {agent.role !== "human" && (
+                        <div className="agent-node-model">{agent.model.split("-").slice(-2).join("-")}</div>
+                      )}
+                      {agent.role === "human" && (
+                        <div className="agent-node-model" style={{ color: "#e91e63", fontSize: "9px" }}>entry point</div>
+                      )}
                     </div>
                     {agent.busEnabled && (
                       <div className="agent-node-bus-badge" title={`Bus topics: ${agent.busTopics.join(", ") || "all"}`}>

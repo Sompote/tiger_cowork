@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.3.0
+# Tiger Cowork v0.3.1
 
 ## Quick Start (No coding required)
 
@@ -293,7 +293,20 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Complex analysis: break a report into sections, each handled by a dedicated sub-agent
 - Realtime orchestration: boot an entire agent team (orchestrator + workers + checker) and send tasks for true parallel execution with inter-agent communication via bus
 
-## What's New in v0.3.0 — Async Architecture
+## What's New in v0.3.1 — Human Node & Agent Commands
+
+**Human-in-the-loop for realtime multi-agent systems**
+
+This release adds the **Human Node** role to the Agent System Editor, allowing users to participate directly in realtime agent orchestration as a first-class node in the agent graph.
+
+**New Features:**
+- **Human node role** — New "human" role in Agent Editor acts as the user's entry point in the agent graph. Human nodes don't run an LLM loop — they represent the real user and forward agent messages to the chat UI
+- **`/agent` command** — Talk directly to agents during realtime sessions: `/agent [name] "prompt"` sends to a specific agent, `/agent "prompt"` broadcasts to all connected agents
+- **Agent-to-human messaging** — Agents can send results back to the human node, displayed in chat with agent attribution tags
+- **Human node UI in Agent Editor** — Dedicated styling and info panel for human nodes; AI-assisted setup and model fields are hidden since human nodes don't use an LLM
+- **Drawing analyzer skill** — Added drawing-analyzer v2.1.0 to ClawHub plugins
+
+### Previous: v0.3.0 — Async Architecture
 
 **Major rewrite: Express → Fastify async-first framework**
 
@@ -939,6 +952,14 @@ tiger_cowork/
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.3.1 (2026-03-22)
+- Add **Human Node** role — new "human" agent role that acts as the user's entry point in realtime agent graphs without running an LLM loop
+- Add **`/agent` command** for direct agent communication: `/agent [name] "prompt"` (targeted) or `/agent "prompt"` (broadcast to all connected agents)
+- Add **human-to-agent and agent-to-human messaging** — human node loop listens for agent outputs and forwards to chat UI with attribution tags
+- Add human node UI in Agent Editor — dedicated styling, info panel, hidden AI-setup and model fields for human role
+- Add `getHumanConnectedAgents`, `humanSendToAgent`, `humanBroadcastToAgents`, `humanWaitForAgent` helpers in toolbox service
+- Add drawing-analyzer v2.1.0 to ClawHub plugin registry
 
 ### v0.2.2 (2026-03-15)
 - Add **Realtime Agent Mode** — all agents boot at session start and stay alive for true parallel execution via `send_task` / `wait_result` / `check_agents` tools

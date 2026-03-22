@@ -48,6 +48,10 @@
     "nano-pdf": {
       "version": "1.0.0",
       "installedAt": 1772929726307
+    },
+    "drawing-analyzer": {
+      "version": "2.1.0",
+      "installedAt": 1773697414165
     }
   }
 }

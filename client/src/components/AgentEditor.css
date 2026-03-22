@@ -708,3 +708,22 @@
     border-bottom: 1px solid var(--border, #333);
   }
 }
+
+/* Human node styling */
+.human-node-info {
+  background: rgba(233, 30, 99, 0.1);
+  border: 1px solid rgba(233, 30, 99, 0.3);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #ccc;
+  line-height: 1.5;
+}
+
+.human-node-info code {
+  background: rgba(233, 30, 99, 0.2);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}

@@ -4,10 +4,12 @@ system:
   communication_protocol: structured_handoff
   context_passing: full_chain
 agents:
+  - id: human
+    name: User
+    role: human
   - id: agent_1
     name: Project manager
     role: orchestrator
-    model: ''
     persona: 'You are a specialized agent based on: Project manager for civil engineering design'
     responsibilities:
       - Analyze and process assigned tasks
@@ -18,7 +20,6 @@ agents:
   - id: agent_2
     name: structure engineer
     role: worker
-    model: ''
     persona: 'You are a specialized agent based on: Design engineer, structural engineer'
     responsibilities:
       - Analyze and process assigned tasks
@@ -29,7 +30,6 @@ agents:
   - id: agent_3
     name: checker
     role: checker
-    model: ''
     persona: 'You are a specialized agent based on: Senior engineer, careful, and experienced.'
     responsibilities:
       - >-
@@ -40,7 +40,6 @@ agents:
   - id: agent_4
     name: geotechnical engineer
     role: worker
-    model: ''
     persona: You are a geotechnical engineer. Expert in underground investigations and foundation.
     responsibilities:
       - Analyze and process assigned tasks
@@ -149,6 +148,22 @@ workflow:
     - step: 5
       agent: agent_5
       action: Analyze and process assigned tasks
+    - step: 6
+      agent: human
+      action: Execute User tasks
+      communication:
+        enabled: true
+        protocols:
+          - tcp
+        participants:
+          - human
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - human
+        permitted_topics: []
 connections:
   - from: agent_1
     to: agent_2
@@ -179,6 +194,14 @@ connections:
     label: connection
     protocol: tcp
   - from: agent_1
+    to: agent_5
+    label: connection
+    protocol: tcp
+  - from: human
+    to: agent_1
+    label: connection
+    protocol: tcp
+  - from: human
     to: agent_5
     label: connection
     protocol: tcp
