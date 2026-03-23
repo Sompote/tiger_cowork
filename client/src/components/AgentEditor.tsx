@@ -16,6 +16,7 @@ interface AgentNode {
   color: string;
   busEnabled: boolean;
   busTopics: string[];
+  meshEnabled: boolean;
 }
 
 interface Connection {
@@ -47,10 +48,9 @@ const ROLE_COLORS: Record<string, string> = {
 // No hardcoded model list — users type model names and validate against the backend
 
 const ROLES = ["human", "orchestrator", "worker", "checker", "reporter", "researcher"];
-const PROTOCOLS = ["tcp", "bus", "queue"];
+const PROTOCOLS = ["tcp", "queue"];
 const PROTOCOL_LABELS: Record<string, string> = {
   tcp: "TCP",
-  bus: "Bus",
   queue: "Queue",
 };
 
@@ -278,6 +278,19 @@ function AgentDefPanel({
               />
             </div>
           )}
+
+          {/* Mesh — free to talk to any agent */}
+          <div className="form-group">
+            <label className="bus-toggle-label">
+              <input
+                type="checkbox"
+                checked={agent.meshEnabled}
+                onChange={(e) => onUpdate({ ...agent, meshEnabled: e.target.checked })}
+              />
+              <span>Mesh (free to talk)</span>
+            </label>
+            <p className="bus-hint">Can send tasks to any agent without needing connection lines</p>
+          </div>
         </div>
       </div>
 
@@ -393,8 +406,110 @@ export default function AgentEditor({
   const [existingFiles, setExistingFiles] = useState<{ filename: string; name: string; agentCount: number; updatedAt: string }[]>([]);
   const [uploadError, setUploadError] = useState("");
 
+  // Auto Architecture state
+  const [showAutoArch, setShowAutoArch] = useState(false);
+  const [autoArchMessages, setAutoArchMessages] = useState<{ role: "user" | "assistant" | "system"; content: string }[]>([]);
+  const [autoArchInput, setAutoArchInput] = useState("");
+  const [autoArchType, setAutoArchType] = useState("hierarchical");
+  const [autoArchCount, setAutoArchCount] = useState("auto");
+  const [autoArchGenerating, setAutoArchGenerating] = useState(false);
+  const [autoArchResult, setAutoArchResult] = useState<any>(null);
+
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const autoArchChatRef = useRef<HTMLDivElement>(null);
+
+  // Auto Architecture handlers
+  const openAutoArch = () => {
+    setShowAutoArch(true);
+    setAutoArchMessages([
+      { role: "system", content: "Welcome to Auto Architecture! Describe the agent system you want to build and I'll generate it for you." },
+    ]);
+    setAutoArchInput("");
+    setAutoArchResult(null);
+  };
+
+  const handleAutoArchSend = async () => {
+    const prompt = autoArchInput.trim();
+    if (!prompt || autoArchGenerating) return;
+
+    const newMessages = [...autoArchMessages, { role: "user" as const, content: prompt }];
+    setAutoArchMessages(newMessages);
+    setAutoArchInput("");
+    setAutoArchGenerating(true);
+
+    // Scroll to bottom
+    setTimeout(() => autoArchChatRef.current?.scrollTo(0, autoArchChatRef.current.scrollHeight), 50);
+
+    try {
+      const res = await api.generateAgentSystem(prompt, autoArchType, autoArchCount);
+      if (res.ok && res.system) {
+        const sys = res.system;
+        const agentCount = sys.agents?.length || 0;
+        const connCount = sys.connections?.length || 0;
+        setAutoArchResult(sys);
+        setAutoArchMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant" as const,
+            content: `I've generated a **${sys.system?.orchestration_mode || autoArchType}** agent system called "${sys.system?.name || "Agent System"}" with **${agentCount} agents** and **${connCount} connections**.\n\nAgents:\n${(sys.agents || []).map((a: any) => `- **${a.name}** (${a.role})`).join("\n")}\n\nClick **"Apply to Editor"** to load this into the editor where you can revise and edit it, then save.`,
+          },
+        ]);
+      } else {
+        setAutoArchMessages((prev) => [
+          ...prev,
+          { role: "assistant" as const, content: `Sorry, generation failed: ${res.error || "Unknown error"}. Please try again with a different description.` },
+        ]);
+      }
+    } catch (err: any) {
+      setAutoArchMessages((prev) => [
+        ...prev,
+        { role: "assistant" as const, content: `Error: ${err.message}. Please try again.` },
+      ]);
+    }
+    setAutoArchGenerating(false);
+    setTimeout(() => autoArchChatRef.current?.scrollTo(0, autoArchChatRef.current.scrollHeight), 100);
+  };
+
+  const applyAutoArchResult = () => {
+    if (!autoArchResult) return;
+    const sys = autoArchResult;
+
+    // Convert the LLM result into EditorState
+    const agents: AgentNode[] = (sys.agents || []).map((a: any, i: number) => ({
+      id: a.id || "agent_" + (i + 1),
+      name: a.name || "Agent " + (i + 1),
+      role: a.role || "worker",
+      model: a.model || "",
+      persona: a.persona || "",
+      responsibilities: a.responsibilities || [],
+      x: a.role === "human" ? 50 : a.role === "orchestrator" ? 300 : 150 + (i % 3) * 250,
+      y: a.role === "human" ? 200 : a.role === "orchestrator" ? 80 : 100 + Math.floor(i / 3) * 180,
+      color: ROLE_COLORS[a.role] || ROLE_COLORS.default,
+      busEnabled: a.bus?.enabled || false,
+      busTopics: a.bus?.topics || [],
+      meshEnabled: a.mesh?.enabled || false,
+    }));
+
+    const connections: Connection[] = (sys.connections || []).map((c: any) => ({
+      id: generateId(),
+      from: c.from || "",
+      to: c.to || "",
+      label: c.label || "connection",
+      protocol: c.protocol || "tcp",
+      topics: c.topics || [],
+    }));
+
+    setState({
+      systemName: sys.system?.name || "Auto-Generated System",
+      orchestrationMode: sys.system?.orchestration_mode || autoArchType,
+      agents,
+      connections,
+    });
+
+    setShowAutoArch(false);
+    setAutoArchResult(null);
+  };
 
   // Load initial YAML if provided
   useEffect(() => {
@@ -489,6 +604,7 @@ export default function AgentEditor({
             color: ROLE_COLORS[a.role] || ROLE_COLORS.default,
             busEnabled: a.bus?.enabled || false,
             busTopics: a.bus?.topics || [],
+            meshEnabled: a.mesh?.enabled || false,
           }));
 
           // Extract connections: prefer explicit connections array, fall back to workflow
@@ -563,6 +679,7 @@ export default function AgentEditor({
       color: ROLE_COLORS.worker,
       busEnabled: false,
       busTopics: [],
+      meshEnabled: false,
     };
     setState((s) => ({ ...s, agents: [...s.agents, newAgent] }));
     setSelectedAgent(newAgent.id);
@@ -712,6 +829,9 @@ export default function AgentEditor({
             topics: a.busTopics.length > 0 ? a.busTopics : undefined,
           };
         }
+        if (a.meshEnabled) {
+          agentDef.mesh = { enabled: true };
+        }
         return agentDef;
       }),
       workflow: {
@@ -860,6 +980,13 @@ export default function AgentEditor({
         {/* Toolbar */}
         <div className="editor-toolbar">
           <div className="editor-toolbar-left">
+            <button
+              className="btn btn-sm auto-arch-btn"
+              onClick={openAutoArch}
+              title="Generate an agent system automatically using AI"
+            >
+              Auto Architecture
+            </button>
             <h2>Agent System Editor</h2>
             <div className="editor-toolbar-meta">
               <input
@@ -876,6 +1003,7 @@ export default function AgentEditor({
                 <option value="hierarchical">Hierarchical</option>
                 <option value="flat">Flat</option>
                 <option value="mesh">Mesh</option>
+                <option value="hybrid">Hybrid</option>
                 <option value="pipeline">Pipeline</option>
               </select>
             </div>
@@ -921,6 +1049,7 @@ export default function AgentEditor({
                   color: ROLE_COLORS.human,
                   busEnabled: false,
                   busTopics: [],
+                  meshEnabled: false,
                 };
                 setState((s) => ({ ...s, agents: [humanNode, ...s.agents] }));
                 setSelectedAgent(humanNode.id);
@@ -1021,16 +1150,27 @@ export default function AgentEditor({
                 </div>
               )}
 
-              {/* SVG layer for connections */}
+              {/* Mode indicator */}
+              {state.orchestrationMode === "mesh" && (
+                <div className="mesh-mode-banner">
+                  MESH — all agents can freely communicate (no connection lines needed)
+                </div>
+              )}
+              {state.orchestrationMode === "hybrid" && (
+                <div className="mesh-mode-banner hybrid-mode-banner">
+                  HYBRID — orchestrator controls flow via connections + mesh agents collaborate freely
+                </div>
+              )}
+
+              {/* SVG layer for connections (hidden in mesh mode) */}
               <svg className="editor-svg-layer">
-                {state.connections.map((conn) => {
+                {state.orchestrationMode !== "mesh" && state.connections.map((conn) => {
                   const from = getOutputPort(conn.from);
                   const to = getInputPort(conn.to);
                   const isSelected = selectedConn === conn.id;
                   const protocolColor =
                     conn.protocol === "tcp" ? "#4285f4" :
                     conn.protocol === "queue" ? "#ea8600" :
-                    conn.protocol === "bus" ? "#34a853" :
                     "#607d8b";
 
                   const lineColor = isSelected ? "#e53935" : protocolColor;
@@ -1062,7 +1202,7 @@ export default function AgentEditor({
                         stroke={lineColor}
                         strokeWidth={isSelected ? 3 : 2}
                         fill="none"
-                        strokeDasharray={conn.protocol === "bus" ? "6,3" : "none"}
+                        strokeDasharray="none"
                         markerEnd="url(#arrowhead)"
                       />
                       {/* Protocol badge */}
@@ -1090,8 +1230,8 @@ export default function AgentEditor({
                   );
                 })}
 
-                {/* Drawing line while connecting */}
-                {connecting && (
+                {/* Drawing line while connecting (not in mesh mode) */}
+                {connecting && state.orchestrationMode !== "mesh" && (
                   <line
                     x1={getOutputPort(connecting.fromId).x}
                     y1={getOutputPort(connecting.fromId).y}
@@ -1145,16 +1285,25 @@ export default function AgentEditor({
                         BUS
                       </div>
                     )}
-                    <div className="agent-node-port agent-node-port-in" title="Input port">
-                      <div className="port-dot port-dot-in" />
-                    </div>
-                    <div
-                      className="agent-node-port agent-node-port-out"
-                      title="Drag to connect"
-                      onMouseDown={(e) => handlePortMouseDown(e, agent.id)}
-                    >
-                      <div className="port-dot" />
-                    </div>
+                    {agent.meshEnabled && (
+                      <div className="agent-node-mesh-badge" title="Mesh: can send tasks to any agent">
+                        MESH
+                      </div>
+                    )}
+                    {state.orchestrationMode !== "mesh" && (
+                      <>
+                        <div className="agent-node-port agent-node-port-in" title="Input port">
+                          <div className="port-dot port-dot-in" />
+                        </div>
+                        <div
+                          className="agent-node-port agent-node-port-out"
+                          title="Drag to connect"
+                          onMouseDown={(e) => handlePortMouseDown(e, agent.id)}
+                        >
+                          <div className="port-dot" />
+                        </div>
+                      </>
+                    )}
                   </div>
                 );
               })}
@@ -1171,7 +1320,7 @@ export default function AgentEditor({
             />
           )}
 
-          {selectedConnData && (
+          {selectedConnData && state.orchestrationMode !== "mesh" && (
             <ConnectionPanel
               conn={selectedConnData}
               agents={state.agents}
@@ -1181,6 +1330,93 @@ export default function AgentEditor({
             />
           )}
         </div>
+
+        {/* Auto Architecture Modal */}
+        {showAutoArch && (
+          <div className="auto-arch-overlay" onClick={() => !autoArchGenerating && setShowAutoArch(false)}>
+            <div className="auto-arch-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="auto-arch-header">
+                <h3>Auto Architecture</h3>
+                <button className="btn-icon btn-ghost" onClick={() => !autoArchGenerating && setShowAutoArch(false)}>&times;</button>
+              </div>
+
+              {/* Options bar */}
+              <div className="auto-arch-options">
+                <div className="auto-arch-option">
+                  <label>Architecture Type</label>
+                  <select value={autoArchType} onChange={(e) => setAutoArchType(e.target.value)}>
+                    <option value="hierarchical">Hierarchical</option>
+                    <option value="flat">Flat</option>
+                    <option value="mesh">Mesh</option>
+                    <option value="hybrid">Hybrid</option>
+                    <option value="pipeline">Pipeline</option>
+                  </select>
+                </div>
+                <div className="auto-arch-option">
+                  <label>Agent Count</label>
+                  <select value={autoArchCount} onChange={(e) => setAutoArchCount(e.target.value)}>
+                    <option value="auto">Auto (AI decides)</option>
+                    <option value="3">3 agents</option>
+                    <option value="4">4 agents</option>
+                    <option value="5">5 agents</option>
+                    <option value="6">6 agents</option>
+                    <option value="7">7 agents</option>
+                    <option value="8">8 agents</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Chat area */}
+              <div className="auto-arch-chat" ref={autoArchChatRef}>
+                {autoArchMessages.map((msg, i) => (
+                  <div key={i} className={`auto-arch-msg auto-arch-msg-${msg.role}`}>
+                    <div className="auto-arch-msg-label">
+                      {msg.role === "system" ? "System" : msg.role === "user" ? "You" : "AI Architect"}
+                    </div>
+                    <div className="auto-arch-msg-content">{msg.content}</div>
+                  </div>
+                ))}
+                {autoArchGenerating && (
+                  <div className="auto-arch-msg auto-arch-msg-assistant">
+                    <div className="auto-arch-msg-label">AI Architect</div>
+                    <div className="auto-arch-msg-content auto-arch-thinking">Generating agent system...</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Input area */}
+              <div className="auto-arch-input-area">
+                {autoArchResult && (
+                  <button className="btn btn-primary auto-arch-apply-btn" onClick={applyAutoArchResult}>
+                    Apply to Editor
+                  </button>
+                )}
+                <div className="auto-arch-input-row">
+                  <textarea
+                    value={autoArchInput}
+                    onChange={(e) => setAutoArchInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleAutoArchSend();
+                      }
+                    }}
+                    placeholder="Describe the agent system you want (e.g. 'A software development team with a project manager, frontend dev, backend dev, and QA tester')..."
+                    rows={2}
+                    disabled={autoArchGenerating}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={handleAutoArchSend}
+                    disabled={autoArchGenerating || !autoArchInput.trim()}
+                  >
+                    {autoArchGenerating ? "..." : "Send"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* YAML Preview Modal */}
         {yamlPreview && (

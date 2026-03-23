@@ -48,6 +48,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(!isMobile);
   const [swarmEnabled, setSwarmEnabled] = useState(false);
   const [agentMode, setAgentMode] = useState("");
+  const [configFileName, setConfigFileName] = useState("");
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -56,6 +57,7 @@ export default function Layout({ children }: { children: ReactNode }) {
     api.getSettings().then((s: any) => {
       setSwarmEnabled(!!s.subAgentEnabled);
       setAgentMode(s.subAgentMode || "auto");
+      setConfigFileName(s.subAgentConfigFile ? s.subAgentConfigFile.replace(/\.ya?ml$/, "") : "");
     }).catch(() => {});
   }, [location.pathname]);
 
@@ -80,6 +82,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <span className="logo-badge">AI</span>
           {swarmEnabled && agentMode === "realtime" && <span className="logo-realtime-tag">Realtime Agent</span>}
           {swarmEnabled && agentMode !== "realtime" && <span className="logo-swarm-tag">Swarm</span>}
+          {swarmEnabled && configFileName && <span className="logo-config-tag" title={configFileName}>{configFileName}</span>}
         </div>
         <div className="header-spacer" />
       </header>

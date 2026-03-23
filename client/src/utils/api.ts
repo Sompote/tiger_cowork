@@ -14,8 +14,9 @@ export function clearAccessToken() {
 
 async function request(path: string, options?: RequestInit) {
   const token = getAccessToken();
+  const hasBody = options?.body !== undefined && options?.body !== null;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(hasBody ? { "Content-Type": "application/json" } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
   const res = await fetch(`${BASE}${path}`, {
@@ -179,4 +180,6 @@ export const api = {
   generateAgentYaml: (data: any) => request("/agents/generate", { method: "POST", body: JSON.stringify(data) }),
   validateModel: (model: string) => request("/agents/validate-model", { method: "POST", body: JSON.stringify({ model }) }),
   generateAgentDefinition: (description: string) => request("/agents/generate-definition", { method: "POST", body: JSON.stringify({ description }) }),
+  generateAgentSystem: (description: string, architectureType?: string, agentCount?: string) =>
+    request("/agents/generate-system", { method: "POST", body: JSON.stringify({ description, architectureType, agentCount }) }),
 };

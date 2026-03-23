@@ -4,11 +4,11 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import yaml from "js-yaml";
 import { runPython } from "./python";
-import { getSettings } from "./data";
+import { getSettings, appendAgentHistory, flushAgentHistory } from "./data";
 import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
 import {
   tcpOpen, tcpSend, tcpRead, tcpClose,
-  busPublish, busSubscribe, busHistory, busGet, busWaitForMessage,
+  busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busLoadHistory,
   queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
   getProtocolStatus, cleanupSessionProtocols,
 } from "./protocols";
@@ -351,13 +351,14 @@ const openRouterSearchTool = {
 };
 
 // Get protocol tools filtered by agent config
-export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connections?: any[]): any[] {
+export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connections?: any[], systemConfig?: AgentSystemConfig | null): any[] {
   if (!agentDef) return protocolTools; // no config = give all (orchestrator / auto mode)
 
   const tools: any[] = [];
 
-  // Bus: only if agent has bus.enabled
-  if (agentDef.bus?.enabled) {
+  // Bus: if agent has bus.enabled, OR hybrid orchestrator (monitors all bus traffic)
+  const isHybridOrch = systemConfig?.system?.orchestration_mode === "hybrid" && agentDef.role === "orchestrator";
+  if (agentDef.bus?.enabled || isHybridOrch) {
     tools.push(...busTools);
   }
 
@@ -410,7 +411,11 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
   summary += `Orchestration mode: ${config.system?.orchestration_mode || "hierarchical"}\n`;
   summary += `Available agents:\n`;
   for (const a of config.agents || []) {
-    summary += `  - ${a.id} ("${a.name}"): role=${a.role}, persona=${a.persona || "N/A"}\n`;
+    const flags = [
+      a.bus?.enabled ? "bus" : "",
+      a.mesh?.enabled ? "mesh" : "",
+    ].filter(Boolean).join(", ");
+    summary += `  - ${a.id} ("${a.name}"): role=${a.role}${flags ? ` [${flags}]` : ""}, persona=${a.persona || "N/A"}\n`;
     if (a.responsibilities && a.responsibilities.length > 0) {
       summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
     }
@@ -451,11 +456,12 @@ export async function getToolsForSubagent(
   if (settings.subAgentEnabled) {
     if (isManual) {
       // Manual mode: no depth limit — YAML structure is the boundary.
-      // Agent gets spawn tool only if it has downstream agents (outputs_to) in the workflow.
+      // Agent gets spawn tool if it has downstream agents, mesh.enabled, or global mesh mode.
       const hasDownstream = agentDef && systemConfig?.workflow?.sequence?.some(
         (step: any) => step.agent === agentDef.id && step.outputs_to?.length > 0
       );
-      if (hasDownstream) tools.push(spawnSubagentTool);
+      const hasMesh = agentDef?.mesh?.enabled === true || systemConfig?.system?.orchestration_mode === "mesh";
+      if (hasDownstream || hasMesh) tools.push(spawnSubagentTool);
     } else {
       // Auto mode: depth limit applies
       if (currentDepth < maxDepth) tools.push(spawnSubagentTool);
@@ -463,7 +469,7 @@ export async function getToolsForSubagent(
   }
   if (settings.subAgentEnabled) {
     // Only give protocol tools the agent is configured to use
-    tools.push(...getProtocolToolsForAgent(agentDef, connections));
+    tools.push(...getProtocolToolsForAgent(agentDef, connections, systemConfig));
   }
   return [...tools, ...getMcpTools()];
 }
@@ -1006,6 +1012,9 @@ interface AgentConfig {
     enabled: boolean;
     topics?: string[];
   };
+  mesh?: {
+    enabled: boolean;
+  };
 }
 
 interface AgentSystemConfig {
@@ -1132,19 +1141,25 @@ export async function spawnSubagent(
         return { ok: false, error: `Agent "${targetId}" not found in architecture. Available agents: ${available}` };
       }
 
-      // Validate caller is allowed to spawn target (via workflow outputs_to or connections)
+      // Validate caller is allowed to spawn target (via workflow outputs_to, connections, or mesh)
       if (callerId !== "main") {
-        const callerStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
-        const allowedTargets: string[] = callerStep?.outputs_to || [];
+        const callerDef = systemConfig.agents?.find((a: AgentConfig) => a.id === callerId);
+        const callerHasMesh = callerDef?.mesh?.enabled === true;
+        const isGlobalMesh = systemConfig.system?.orchestration_mode === "mesh";
 
-        // Also check connections
-        const connTargets = (systemConfig.connections || [])
-          .filter((c: any) => c.from === callerId)
-          .map((c: any) => c.to);
-        const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+        if (!callerHasMesh && !isGlobalMesh) {
+          const callerStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
+          const allowedTargets: string[] = callerStep?.outputs_to || [];
 
-        if (!allAllowed.includes(targetId)) {
-          return { ok: false, error: `Agent "${callerId}" is not allowed to spawn "${targetId}". Allowed targets: ${allAllowed.join(", ") || "none"}` };
+          // Also check connections
+          const connTargets = (systemConfig.connections || [])
+            .filter((c: any) => c.from === callerId)
+            .map((c: any) => c.to);
+          const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+
+          if (!allAllowed.includes(targetId)) {
+            return { ok: false, error: `Agent "${callerId}" is not allowed to spawn "${targetId}". Allowed targets: ${allAllowed.join(", ") || "none"}` };
+          }
         }
       }
     }
@@ -1177,6 +1192,14 @@ export async function spawnSubagent(
     toolCalls: [],
   };
   activeSubagents.set(subagentId, run);
+
+  // Persist spawn start to agent history
+  if (parentSessionId) {
+    appendAgentHistory(parentSessionId, "spawn.jsonl", {
+      id: subagentId, label, task: args.task.slice(0, 2000), depth: currentDepth + 1,
+      status: "running", startedAt: run.startedAt,
+    }).catch(() => {});
+  }
 
   // Broadcast sub-agent spawn status
   if (subagentStatusCallback) {
@@ -1255,7 +1278,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
   }
 
   // Append protocol instructions based on agent's actual config
-  const agentProtoTools = getProtocolToolsForAgent(resolvedAgentDef, resolvedConnections);
+  const agentProtoTools = getProtocolToolsForAgent(resolvedAgentDef, resolvedConnections, resolvedSystemConfig);
   const protoNames = agentProtoTools.map((t: any) => t.function.name);
   const hasProto = protoNames.length > 0;
 
@@ -1343,6 +1366,14 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     run.completedAt = new Date().toISOString();
     run.result = result.content?.slice(0, 5000);
 
+    // Persist spawn completion to agent history
+    if (parentSessionId) {
+      appendAgentHistory(parentSessionId, "spawn.jsonl", {
+        id: subagentId, label, status: "completed", completedAt: run.completedAt,
+        result: run.result, toolCallCount: run.toolCalls.length,
+      }).catch(() => {});
+    }
+
     console.log(`[SubAgent:${label}] Completed. ${run.toolCalls.length} tool calls.`);
 
     // Broadcast completion
@@ -1371,6 +1402,14 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     setCallContext(parentSessionId, currentDepth, prevAgentId, prevProjectFolder);
     run.status = "error";
     run.completedAt = new Date().toISOString();
+
+    // Persist spawn error to agent history
+    if (parentSessionId) {
+      appendAgentHistory(parentSessionId, "spawn.jsonl", {
+        id: subagentId, label, status: "error", completedAt: run.completedAt,
+        error: err.message,
+      }).catch(() => {});
+    }
 
     console.error(`[SubAgent:${label}] Error: ${err.message}`);
 
@@ -1505,6 +1544,12 @@ export async function startRealtimeSession(
 
   console.log(`[Realtime] Starting session ${sessionId} with ${systemConfig.agents.length} agents`);
 
+  // Reload saved bus history from previous session runs (if any)
+  const loadedCount = await busLoadHistory(sessionId);
+  if (loadedCount > 0) {
+    console.log(`[Realtime] Loaded ${loadedCount} saved bus messages for session ${sessionId}`);
+  }
+
   // Boot each agent concurrently (skip human nodes — they are entry points)
   for (const agentDef of systemConfig.agents) {
     const handle: RealtimeAgentHandle = {
@@ -1553,6 +1598,8 @@ export function shutdownRealtimeSession(sessionId: string): void {
   if (!session) return;
 
   console.log(`[Realtime] Shutting down session ${sessionId}`);
+  // Flush any buffered agent history before cleanup
+  flushAgentHistory(sessionId).catch(() => {});
   session.abortController.abort();
   realtimeSessions.delete(sessionId);
   cleanupSessionProtocols(sessionId);
@@ -1578,7 +1625,7 @@ async function realtimeAgentLoop(
   systemPrompt += `\nYour agent ID is "${agentId}".`;
 
   // Protocol instructions
-  const agentProtoTools = getProtocolToolsForAgent(agentDef, systemConfig.connections);
+  const agentProtoTools = getProtocolToolsForAgent(agentDef, systemConfig.connections, systemConfig);
   const protoNames = agentProtoTools.map((t: any) => t.function.name);
   if (protoNames.length > 0) {
     const protoLines: string[] = [];
@@ -1599,15 +1646,61 @@ async function realtimeAgentLoop(
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     agentTools.push(openRouterSearchTool);
   }
-  // If this agent has downstream connections, give it send_task + wait_result
-  // so it can delegate work to connected agents
+  // If this agent has downstream connections, mesh enabled, or global mesh mode — give it send_task + wait_result
+  const orchMode = systemConfig.system?.orchestration_mode;
+  const isGlobalMesh = orchMode === "mesh";
+  const isHybrid = orchMode === "hybrid";
+  const agentMeshEnabled = agentDef.mesh?.enabled === true;
+  const hasMesh = isGlobalMesh || agentMeshEnabled;
+
   const workflowStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === agentId);
   const outputsTo: string[] = workflowStep?.outputs_to || [];
   const connTargets = (systemConfig.connections || [])
     .filter((c: any) => c.from === agentId)
     .map((c: any) => c.to);
   const downstream = [...new Set([...outputsTo, ...connTargets])];
-  if (downstream.length > 0) {
+
+  const allPeers = (systemConfig.agents || [])
+    .filter((a: AgentConfig) => a.id !== agentId && a.role !== "human")
+    .map((a: AgentConfig) => a.id);
+
+  const meshPeers = (systemConfig.agents || [])
+    .filter((a: AgentConfig) => a.id !== agentId && a.role !== "human" && a.mesh?.enabled === true)
+    .map((a: AgentConfig) => a.id);
+
+  if (isHybrid && agentDef.role === "orchestrator") {
+    // Hybrid orchestrator: controls flow via connections, monitors bus, can stop mesh agents
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    systemPrompt += `\n\nHYBRID MODE (ORCHESTRATOR): You control the team and coordinate all work.`;
+    systemPrompt += `\nYour connected agents: ${downstream.join(", ")}`;
+    if (meshPeers.length > 0) {
+      systemPrompt += `\nMesh-enabled agents (can collaborate freely): ${meshPeers.join(", ")}`;
+    }
+    systemPrompt += `\nYou can see all bus messages to monitor agent activity.`;
+    systemPrompt += `\nYou are responsible for:`;
+    systemPrompt += `\n  1. Delegating tasks to your connected agents via send_task`;
+    systemPrompt += `\n  2. Monitoring mesh agents' progress via check_agents and bus messages`;
+    systemPrompt += `\n  3. Collecting results via wait_result and synthesizing the final output`;
+    systemPrompt += `\n  4. Ensuring work completes — if mesh agents loop or stall, reassign the task or provide direction`;
+    systemPrompt += `\nUse send_task({to: "agent_id", task: "..."}) then wait_result({from: "agent_id"}) to collect results.`;
+    systemPrompt += `\nSend tasks to MULTIPLE agents in a SINGLE response for parallel execution.`;
+  } else if (hasMesh) {
+    // Mesh: agent can send tasks to any other agent
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    if (isHybrid) {
+      systemPrompt += `\n\nHYBRID MESH AGENT: You can collaborate with any peer agent, but the orchestrator coordinates the overall task.`;
+      systemPrompt += `\nAvailable peers: ${allPeers.join(", ")}`;
+      systemPrompt += `\nIMPORTANT: When your work is done, send your result back to the agent that assigned you the task. Do NOT loop indefinitely — complete your part and report back.`;
+    } else {
+      systemPrompt += `\n\nMESH: You can send tasks to any agent using send_task and wait_result.`;
+      systemPrompt += `\nAvailable agents: ${allPeers.join(", ")}`;
+    }
+    if (downstream.length > 0) {
+      systemPrompt += `\nYour primary downstream agents: ${downstream.join(", ")}`;
+    }
+    systemPrompt += `\nUse send_task({to: "agent_id", task: "..."}) then wait_result({from: "agent_id"}) to collect results.`;
+    systemPrompt += `\nSend tasks to MULTIPLE agents in a SINGLE response for parallel execution. Do NOT use proto_tcp_send or proto_bus_publish to assign tasks — use send_task instead.`;
+  } else if (downstream.length > 0) {
     agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
     systemPrompt += `\n\nDELEGATION: You can delegate tasks to downstream agents using send_task and wait_result.`;
     systemPrompt += `\nYour downstream agents: ${downstream.join(", ")}`;
@@ -1776,6 +1869,17 @@ export function getHumanConnectedAgents(sessionId: string): string[] {
   const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
   if (!humanNode) return [];
 
+  const allNonHuman = Array.from(session.agents.entries())
+    .filter(([, h]) => h.agentDef.role !== "human")
+    .map(([id]) => id);
+
+  // Global mesh mode OR human node has mesh.enabled: can talk to all agents
+  const isGlobalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+  const humanHasMesh = humanNode.mesh?.enabled === true;
+  if (isGlobalMesh || humanHasMesh) {
+    return allNonHuman;
+  }
+
   // Get agents connected FROM the human node
   const connTargets = (session.systemConfig.connections || [])
     .filter((c: any) => c.from === humanNode.id)
@@ -1786,7 +1890,13 @@ export function getHumanConnectedAgents(sessionId: string): string[] {
     .filter((c: any) => c.to === humanNode.id)
     .map((c: any) => c.from);
 
-  return [...new Set([...connTargets, ...connSources])].filter(
+  // Also include any agent that has mesh.enabled (they accept tasks from anyone)
+  const meshAgents = allNonHuman.filter((id) => {
+    const agentDef = session.systemConfig.agents?.find((a: AgentConfig) => a.id === id);
+    return agentDef?.mesh?.enabled === true;
+  });
+
+  return [...new Set([...connTargets, ...connSources, ...meshAgents])].filter(
     (id) => session.agents.has(id) && session.agents.get(id)!.agentDef.role !== "human"
   );
 }
@@ -1803,17 +1913,25 @@ export function humanSendToAgent(sessionId: string, targetAgentId: string, task:
   }
 
   // Verify human is connected to this agent
-  const humanConnected = getHumanConnectedAgents(sessionId);
-  if (humanConnected.length > 0 && !humanConnected.includes(targetAgentId)) {
-    return { ok: false, error: `You can only talk to agents connected to the human node: ${humanConnected.join(", ")}` };
+  // Skip check if: global mesh, human has mesh.enabled, or target agent has mesh.enabled
+  const isGlobalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+  const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
+  const humanHasMesh = humanNode?.mesh?.enabled === true;
+  const targetHasMesh = targetAgent.agentDef.mesh?.enabled === true;
+
+  if (!isGlobalMesh && !humanHasMesh && !targetHasMesh) {
+    const humanConnected = getHumanConnectedAgents(sessionId);
+    if (humanConnected.length > 0 && !humanConnected.includes(targetAgentId)) {
+      return { ok: false, error: `You can only talk to agents connected to the human node: ${humanConnected.join(", ")}` };
+    }
   }
 
   // Publish task to the agent's bus topic
-  const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
-  busPublish(sessionId, humanNode?.id || "human", `task:${targetAgentId}`, {
+  const humanNodeForPublish = humanNode || session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
+  busPublish(sessionId, humanNodeForPublish?.id || "human", `task:${targetAgentId}`, {
     task,
     context,
-    from: humanNode?.id || "human",
+    from: humanNodeForPublish?.id || "human",
   });
 
   console.log(`[Realtime:Human] Human → ${targetAgentId}: ${task.slice(0, 100)}`);
@@ -1879,16 +1997,23 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
       return { ok: false, error: `You must send tasks to the orchestrator agent "${orchestrator.id}" ("${orchestrator.name}") only. The orchestrator will delegate to other agents.` };
     }
   } else {
-    // Sub-agents: validate via workflow outputs_to / connections
-    const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
-    const allowedTargets: string[] = callerStep?.outputs_to || [];
-    const connTargets = (session.systemConfig.connections || [])
-      .filter((c: any) => c.from === callerId)
-      .map((c: any) => c.to);
-    const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+    const callerDef = session.systemConfig.agents?.find((a: AgentConfig) => a.id === callerId);
+    const callerHasMesh = callerDef?.mesh?.enabled === true;
+    const globalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+    const isHybridOrch = session.systemConfig.system?.orchestration_mode === "hybrid" && callerDef?.role === "orchestrator";
 
-    if (allAllowed.length > 0 && !allAllowed.includes(args.to)) {
-      return { ok: false, error: `Agent "${callerId}" is not connected to "${args.to}". Allowed targets: ${allAllowed.join(", ")}` };
+    if (!callerHasMesh && !globalMesh && !isHybridOrch) {
+      // Strict access control via connections
+      const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
+      const allowedTargets: string[] = callerStep?.outputs_to || [];
+      const connTargets = (session.systemConfig.connections || [])
+        .filter((c: any) => c.from === callerId)
+        .map((c: any) => c.to);
+      const allAllowed = [...new Set([...allowedTargets, ...connTargets])];
+
+      if (allAllowed.length > 0 && !allAllowed.includes(args.to)) {
+        return { ok: false, error: `Agent "${callerId}" is not connected to "${args.to}". Allowed targets: ${allAllowed.join(", ")}` };
+      }
     }
   }
 
@@ -2037,10 +2162,17 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
   let summary = `\n\nREALTIME AGENT SESSION (${config.system?.name || "Unnamed"}):\n`;
   summary += `All agents are ALREADY ALIVE and listening for tasks.\n\n`;
 
+  const isHybrid = config.system?.orchestration_mode === "hybrid";
   if (orchestrator) {
     summary += `ORCHESTRATOR AGENT: ${orchestrator.id} ("${orchestrator.name}")\n`;
     summary += `You MUST send ALL tasks to the orchestrator agent ONLY. The orchestrator will coordinate and delegate to the team.\n`;
-    summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n\n`;
+    summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n`;
+    if (isHybrid) {
+      const meshAgents = (config.agents || []).filter((a: AgentConfig) => a.mesh?.enabled && a.role !== "human");
+      summary += `\nHYBRID MODE: The orchestrator controls task flow via connections. Mesh-enabled agents (${meshAgents.map(a => a.id).join(", ")}) can collaborate freely with each other.\n`;
+      summary += `The orchestrator monitors bus traffic and ensures work completes without infinite loops.\n`;
+    }
+    summary += `\n`;
   }
 
   // Note human node
@@ -2056,7 +2188,11 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
       summary += `  - ${a.id} ("${a.name}"): role=human (user entry point)\n`;
       continue;
     }
-    summary += `  - ${a.id} ("${a.name}"): role=${a.role}, persona=${a.persona || "N/A"}\n`;
+    const flags = [
+      a.bus?.enabled ? "bus" : "",
+      a.mesh?.enabled ? "mesh" : "",
+    ].filter(Boolean).join(", ");
+    summary += `  - ${a.id} ("${a.name}"): role=${a.role}${flags ? ` [${flags}]` : ""}, persona=${a.persona || "N/A"}\n`;
     if (a.responsibilities && a.responsibilities.length > 0) {
       summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
     }
@@ -2135,7 +2271,7 @@ export async function callTool(name: string, args: any, signal?: AbortSignal): P
     case "proto_tcp_send": {
       const sessionId = _currentParentSessionId || "default";
       const from = _currentAgentId;
-      await tcpOpen(from, args.to);
+      await tcpOpen(from, args.to, sessionId);
       const sent = await tcpSend(from, args.to, args.topic, args.payload);
       return { ok: sent, protocol: "tcp", from, to: args.to, topic: args.topic };
     }
@@ -2155,7 +2291,8 @@ export async function callTool(name: string, args: any, signal?: AbortSignal): P
       return { ok: true, protocol: "bus", topic: args.topic || "all", messages, count: messages.length };
     }
     case "proto_queue_send": {
-      const depth = queueEnqueue(_currentAgentId, args.to, args.topic, args.payload);
+      const sessionId = _currentParentSessionId || "default";
+      const depth = queueEnqueue(_currentAgentId, args.to, args.topic, args.payload, sessionId);
       return { ok: true, protocol: "queue", from: _currentAgentId, to: args.to, topic: args.topic, queueDepth: depth };
     }
     case "proto_queue_receive": {

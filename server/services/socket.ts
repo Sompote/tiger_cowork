@@ -8,6 +8,28 @@ import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
 
+// ─── Scan output_file/ for newly created files ───
+const OUTPUT_EXTS = [".pdf", ".docx", ".doc", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".svg", ".html", ".gif", ".webp", ".txt", ".md"];
+
+function scanOutputFiles(sandboxDir: string, sinceMs: number): string[] {
+  const outputDir = path.join(sandboxDir, "output_file");
+  const found: string[] = [];
+  try {
+    if (!fs.existsSync(outputDir)) return found;
+    for (const f of fs.readdirSync(outputDir)) {
+      const ext = path.extname(f).toLowerCase();
+      const isJsxJs = f.endsWith(".jsx.js");
+      if (!OUTPUT_EXTS.includes(ext) && !isJsxJs) continue;
+      const fullPath = path.join(outputDir, f);
+      const stat = fs.statSync(fullPath);
+      if (stat.mtimeMs >= sinceMs - 1000) {
+        found.push(path.relative(sandboxDir, fullPath));
+      }
+    }
+  } catch {}
+  return found;
+}
+
 // ─── Active Agent Task Tracking ───
 export interface ActiveTask {
   id: string;
@@ -372,6 +394,7 @@ export function setupSocket(io: Server): void {
 
           // Send task to specific agent
           const agentName = rtSession.agents.get(targetId)!.agentDef.name;
+          const agentStartTime = Date.now();
           socket.emit("chat:chunk", {
             sessionId,
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
@@ -393,10 +416,15 @@ export function setupSocket(io: Server): void {
             ? `<div class="agent-response-tag" data-agent="${targetId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`
             : `**${agentName}** did not respond in time: ${waitResult.error}`;
 
-          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString() });
+          // Scan for output files generated during agent execution
+          const agentSettings = await getSettings();
+          const agentSandboxDir = agentSettings.sandboxDir || path.resolve("sandbox");
+          const agentOutputFiles = scanOutputFiles(agentSandboxDir, agentStartTime);
+
+          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString(), files: agentOutputFiles.length > 0 ? agentOutputFiles : undefined });
           await saveChatHistory(sessions);
           socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-          socket.emit("chat:response", { sessionId, content: responseContent, done: true });
+          socket.emit("chat:response", { sessionId, content: responseContent, done: true, files: agentOutputFiles.length > 0 ? agentOutputFiles : undefined });
           return;
 
         } else {
@@ -419,6 +447,7 @@ export function setupSocket(io: Server): void {
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
           });
 
+          const broadcastStartTime = Date.now();
           const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
           if (!broadcastResult.ok) {
             const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
@@ -444,10 +473,15 @@ export function setupSocket(io: Server): void {
           const results = await Promise.all(resultPromises);
           const fullResponse = results.join("\n\n---\n\n");
 
-          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString() });
+          // Scan for output files generated during agent execution
+          const bcSettings = await getSettings();
+          const bcSandboxDir = bcSettings.sandboxDir || path.resolve("sandbox");
+          const bcOutputFiles = scanOutputFiles(bcSandboxDir, broadcastStartTime);
+
+          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString(), files: bcOutputFiles.length > 0 ? bcOutputFiles : undefined });
           await saveChatHistory(sessions);
           socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-          socket.emit("chat:response", { sessionId, content: fullResponse, done: true });
+          socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: bcOutputFiles.length > 0 ? bcOutputFiles : undefined });
           return;
         }
       }
@@ -840,6 +874,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
 
           const agentName = rtSession.agents.get(targetId)!.agentDef.name;
+          const projAgentStartTime = Date.now();
           socket.emit("chat:chunk", {
             sessionId,
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
@@ -860,10 +895,15 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             ? `<div class="agent-response-tag" data-agent="${targetId}">📨 <strong>${agentName}</strong></div>\n\n${waitResult.result}`
             : `**${agentName}** did not respond: ${waitResult.error}`;
 
-          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString() });
+          // Scan for output files generated during agent execution
+          const projAgentSettings = await getSettings();
+          const projAgentSandboxDir = projAgentSettings.sandboxDir || path.resolve("sandbox");
+          const projAgentOutputFiles = scanOutputFiles(projAgentSandboxDir, projAgentStartTime);
+
+          session.messages.push({ role: "assistant", content: responseContent, timestamp: new Date().toISOString(), files: projAgentOutputFiles.length > 0 ? projAgentOutputFiles : undefined });
           await saveChatHistory(sessions);
           socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-          socket.emit("chat:response", { sessionId, content: responseContent, done: true });
+          socket.emit("chat:response", { sessionId, content: responseContent, done: true, files: projAgentOutputFiles.length > 0 ? projAgentOutputFiles : undefined });
           return;
 
         } else {
@@ -882,6 +922,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
           });
 
+          const projBcStartTime = Date.now();
           const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
           if (!broadcastResult.ok) {
             const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
@@ -903,10 +944,16 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           );
 
           const fullResponse = results.join("\n\n---\n\n");
-          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString() });
+
+          // Scan for output files generated during agent execution
+          const projBcSettings = await getSettings();
+          const projBcSandboxDir = projBcSettings.sandboxDir || path.resolve("sandbox");
+          const projBcOutputFiles = scanOutputFiles(projBcSandboxDir, projBcStartTime);
+
+          session.messages.push({ role: "assistant", content: fullResponse, timestamp: new Date().toISOString(), files: projBcOutputFiles.length > 0 ? projBcOutputFiles : undefined });
           await saveChatHistory(sessions);
           socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-          socket.emit("chat:response", { sessionId, content: fullResponse, done: true });
+          socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: projBcOutputFiles.length > 0 ? projBcOutputFiles : undefined });
           return;
         }
       }

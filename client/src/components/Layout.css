@@ -75,6 +75,20 @@
   50% { box-shadow: 0 0 12px rgba(16, 185, 129, 0.6); }
 }
 
+.logo-config-tag {
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  letter-spacing: 0.3px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .header-spacer {
   flex: 1;
 }

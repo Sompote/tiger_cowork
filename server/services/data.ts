@@ -152,3 +152,41 @@ export async function getSkills(): Promise<Skill[]> {
 export async function saveSkills(skills: Skill[]): Promise<void> {
   await writeJSON("skills.json", skills);
 }
+
+// Agent History (JSONL-based, per-session folder)
+const AGENT_HISTORY_DIR = path.join(DATA_DIR, "agent_history");
+
+export async function ensureAgentHistoryDir(sessionId: string): Promise<string> {
+  const dir = path.join(AGENT_HISTORY_DIR, sessionId);
+  await fs.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+export async function appendAgentHistory(sessionId: string, file: string, entry: any): Promise<void> {
+  const dir = await ensureAgentHistoryDir(sessionId);
+  const fp = path.join(dir, file);
+  await fs.appendFile(fp, JSON.stringify(entry) + "\n");
+}
+
+export async function readAgentHistory(sessionId: string, file: string): Promise<any[]> {
+  const fp = path.join(AGENT_HISTORY_DIR, sessionId, file);
+  try {
+    const content = await fs.readFile(fp, "utf-8");
+    return content
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteAgentHistory(sessionId: string): Promise<void> {
+  const dir = path.join(AGENT_HISTORY_DIR, sessionId);
+  await fs.rm(dir, { recursive: true, force: true });
+}
+
+export async function flushAgentHistory(_sessionId: string): Promise<void> {
+  // JSONL is append-per-call, no buffering needed. Reserved for future batching.
+}

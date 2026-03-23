@@ -156,6 +156,110 @@ Example:
     }
   });
 
+  // Generate a complete agent system using LLM (Auto Architecture)
+  fastify.post("/generate-system", async (request, reply) => {
+    const { description, architectureType, agentCount } = request.body as any;
+    if (!description || typeof description !== "string") {
+      reply.code(400); return { ok: false, error: "description is required" };
+    }
+
+    const archType = architectureType || "hierarchical";
+    const count = agentCount || "auto";
+
+    try {
+      const result = await callTigerBotWithTools(
+        [{ role: "user", content: `Based on this description, generate a complete multi-agent system configuration as a JSON object.
+
+User Request: ${description}
+
+Architecture Type: ${archType}
+Number of Agents: ${count === "auto" ? "Determine the optimal number based on the task" : count}
+
+Return ONLY a valid JSON object (no markdown, no code fences) with this exact structure:
+{
+  "system": {
+    "name": "System Name",
+    "orchestration_mode": "${archType}",
+    "communication_protocol": "structured_handoff",
+    "context_passing": "full_chain"
+  },
+  "agents": [
+    {
+      "id": "unique_snake_case_id",
+      "name": "Agent Display Name",
+      "role": "one of: human, orchestrator, worker, checker, reporter, researcher",
+      "persona": "Detailed 2-3 sentence persona description",
+      "responsibilities": ["responsibility 1", "responsibility 2", "responsibility 3"],
+      "bus": { "enabled": true/false, "topics": ["topic1", "topic2"] },
+      "mesh": { "enabled": true/false }
+    }
+  ],
+  "connections": [
+    {
+      "from": "source_agent_id",
+      "to": "target_agent_id",
+      "label": "connection_label",
+      "protocol": "one of: tcp, queue",
+      "topics": ["topic1"]
+    }
+  ]
+}
+
+IMPORTANT RULES:
+
+CONNECTION POLICY:
+- Connections use ONLY "tcp" or "queue" protocol. NEVER use "bus" as a connection protocol.
+- Every non-human agent MUST have at least one incoming TCP or queue connection (from human, orchestrator, or another agent). Without an incoming connection, an agent cannot receive tasks and will idle forever.
+- "tcp" is for direct point-to-point task delegation. "queue" is for async ordered delivery.
+- Connections define access control: an agent can only send_task to agents it has an outgoing connection to.
+
+BUS POLICY:
+- Bus is a separate broadcast channel configured per-agent via "bus.enabled", NOT via connection lines.
+- Bus is for data sharing and status broadcasting between agents — NOT for task assignment.
+- Enable bus on agents that need to share data broadly (e.g., researchers sharing findings, analysts sharing results).
+- Bus topics should reflect the data being shared (e.g., "market_data", "status_updates").
+- Agents that only do direct task work (no data sharing) do NOT need bus enabled.
+
+ARCHITECTURE RULES:
+- Always include exactly ONE agent with role "human" and id "human" as the entry point
+- For hierarchical: human connects to orchestrator, orchestrator connects to all workers/checkers/reporters. Workers that delegate must have connections to their targets.
+- For flat: human connects to all agents directly
+- For mesh: do NOT generate connections — mesh mode bypasses access control so all agents can freely send tasks to any other agent. Only enable bus on agents that need to share broadcast data.
+- For hybrid: human connects to ONE orchestrator. Orchestrator connects to all workers via tcp. Workers should have "mesh.enabled: true" so they can collaborate freely with each other without needing connection lines between them. The orchestrator should have "bus.enabled: true" to monitor all agent activity. This combines structured control (orchestrator routes tasks) with flexible peer collaboration (mesh workers). The orchestrator is responsible for preventing infinite loops among mesh agents.
+- For pipeline: agents form a sequential chain, each connecting to the next
+- Per-agent mesh: individual agents can have "mesh.enabled: true" which lets them send tasks to any other agent without needing connection lines. Use this for agents that need flexible collaboration (e.g., researchers, analysts). Agents without mesh.enabled must use explicit connections.
+- Each non-human agent must have a meaningful persona and 3-5 responsibilities
+- Agent IDs must be snake_case (e.g., "design_engineer", "quality_checker")
+- Generate between 3-8 agents (including human) unless user specifies otherwise` }],
+        "You are an expert multi-agent system architect. Generate complete, well-structured agent system configurations as JSON. Return ONLY valid JSON, nothing else. Do not use any tools.",
+        undefined,
+        undefined,
+        undefined,
+        [], // no tools
+      );
+
+      if (result.content) {
+        let jsonStr = result.content.trim();
+        const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+        if (jsonMatch) jsonStr = jsonMatch[0];
+        try {
+          const parsed = JSON.parse(jsonStr);
+          // Validate basic structure
+          if (!parsed.system || !parsed.agents || !Array.isArray(parsed.agents)) {
+            return { ok: false, error: "LLM returned invalid structure", raw: result.content };
+          }
+          return { ok: true, system: parsed };
+        } catch {
+          return { ok: false, error: "Failed to parse LLM response as JSON", raw: result.content };
+        }
+      } else {
+        return { ok: false, error: "No response from LLM" };
+      }
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // Validate model availability by calling the provider's /models endpoint
   fastify.post("/validate-model", async (request, reply) => {
     const { model } = request.body as any;

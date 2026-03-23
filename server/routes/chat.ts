@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { v4 as uuid } from "uuid";
-import { getChatHistory, saveChatHistory, ChatSession } from "../services/data";
+import { getChatHistory, saveChatHistory, ChatSession, deleteAgentHistory } from "../services/data";
 import { callTigerBot } from "../services/tigerbot";
 
 export async function chatRoutes(fastify: FastifyInstance) {
@@ -36,9 +36,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
   // Delete session
   fastify.delete("/sessions/:id", async (request, reply) => {
+    const sessionId = (request.params as any).id;
     let sessions = await getChatHistory();
-    sessions = sessions.filter((s) => s.id !== (request.params as any).id);
+    sessions = sessions.filter((s) => s.id !== sessionId);
     await saveChatHistory(sessions);
+    // Clean up agent history folder for this session
+    await deleteAgentHistory(sessionId);
     return { success: true };
   });
 

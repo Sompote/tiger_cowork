@@ -11,6 +11,7 @@
 
 import net from "net";
 import { EventEmitter } from "events";
+import { appendAgentHistory, readAgentHistory } from "./data";
 
 // ─── Types ───
 
@@ -33,12 +34,13 @@ interface TcpChannel {
 }
 
 const tcpChannels = new Map<string, TcpChannel>();
+const tcpChannelSessions = new Map<string, string>(); // channelKey -> sessionId
 
 function tcpChannelKey(from: string, to: string): string {
   return [from, to].sort().join("<->"); // bidirectional
 }
 
-export async function tcpOpen(agentA: string, agentB: string): Promise<{ port: number; channelId: string }> {
+export async function tcpOpen(agentA: string, agentB: string, sessionId?: string): Promise<{ port: number; channelId: string }> {
   const key = tcpChannelKey(agentA, agentB);
   if (tcpChannels.has(key)) {
     const ch = tcpChannels.get(key)!;
@@ -64,6 +66,9 @@ export async function tcpOpen(agentA: string, agentB: string): Promise<{ port: n
             const msg: ProtocolMessage = JSON.parse(line);
             msg.timestamp = msg.timestamp || new Date().toISOString();
             buffer.push(msg);
+            // Persist to agent history
+            const sid = tcpChannelSessions.get(key);
+            if (sid) appendAgentHistory(sid, "tcp.jsonl", msg).catch(() => {});
             // Forward to other connected clients
             for (const c of clients) {
               if (c !== socket && !c.destroyed) {
@@ -86,6 +91,7 @@ export async function tcpOpen(agentA: string, agentB: string): Promise<{ port: n
       const addr = server.address() as net.AddressInfo;
       const channel: TcpChannel = { server, port: addr.port, buffer, clients };
       tcpChannels.set(key, channel);
+      if (sessionId) tcpChannelSessions.set(key, sessionId);
       console.log(`[Protocol:TCP] Channel ${key} opened on port ${addr.port}`);
       resolve({ port: addr.port, channelId: key });
     });
@@ -132,6 +138,7 @@ export function tcpClose(agentA: string, agentB: string): void {
     for (const c of ch.clients) c.destroy();
     ch.server.close();
     tcpChannels.delete(key);
+    tcpChannelSessions.delete(key);
     console.log(`[Protocol:TCP] Channel ${key} closed`);
   }
 }
@@ -161,6 +168,13 @@ class AgentBus extends EventEmitter {
     return [...this.history];
   }
 
+  loadHistory(msgs: ProtocolMessage[]): void {
+    for (const msg of msgs) {
+      this.history.push(msg);
+      if (this.history.length > this.maxHistory) this.history.shift();
+    }
+  }
+
   clear(): void {
     this.history = [];
     this.removeAllListeners();
@@ -180,7 +194,9 @@ export function busGet(sessionId: string): AgentBus {
 
 export function busPublish(sessionId: string, from: string, topic: string, payload: any): void {
   const bus = busGet(sessionId);
-  bus.publish({ from, topic, payload, timestamp: new Date().toISOString() });
+  const msg: ProtocolMessage = { from, topic, payload, timestamp: new Date().toISOString() };
+  bus.publish(msg);
+  appendAgentHistory(sessionId, "bus.jsonl", msg).catch(() => {});
 }
 
 export function busSubscribe(sessionId: string, topic: string, handler: (msg: ProtocolMessage) => void): () => void {
@@ -191,6 +207,15 @@ export function busSubscribe(sessionId: string, topic: string, handler: (msg: Pr
 export function busHistory(sessionId: string, topic?: string): ProtocolMessage[] {
   const bus = busGet(sessionId);
   return bus.getHistory(topic);
+}
+
+export async function busLoadHistory(sessionId: string): Promise<number> {
+  const bus = busGet(sessionId);
+  const saved = await readAgentHistory(sessionId, "bus.jsonl");
+  if (saved.length > 0) {
+    bus.loadHistory(saved);
+  }
+  return saved.length;
 }
 
 export function busDestroy(sessionId: string): void {
@@ -216,7 +241,7 @@ function queueKey(from: string, to: string, topic?: string): string {
   return `${from}->${to}${topic ? `:${topic}` : ""}`;
 }
 
-export function queueEnqueue(from: string, to: string, topic: string, payload: any): number {
+export function queueEnqueue(from: string, to: string, topic: string, payload: any, sessionId?: string): number {
   const key = queueKey(from, to, topic);
   if (!queues.has(key)) {
     queues.set(key, { messages: [], maxSize: 200 });
@@ -231,6 +256,7 @@ export function queueEnqueue(from: string, to: string, topic: string, payload: a
   };
   q.messages.push(msg);
   if (q.messages.length > q.maxSize) q.messages.shift();
+  if (sessionId) appendAgentHistory(sessionId, "queue.jsonl", msg).catch(() => {});
   console.log(`[Protocol:Queue] Enqueued ${key} (depth=${q.messages.length})`);
   return q.messages.length;
 }

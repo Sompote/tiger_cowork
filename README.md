@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/tigerbanner.jpg)
 
-# Tiger Cowork v0.3.1
+# Tiger Cowork v0.3.2
 
 ## Quick Start (No coding required)
 
@@ -75,7 +75,7 @@ A self-hosted AI-powered workspace that combines chat, project management, file 
 
 ![Tiger Cowork — Agent System Editor](picture/agent2.png)
 
-*Agent System Editor with visual canvas for designing multi-agent systems. Drag-and-drop agent nodes, connect via input/output ports with configurable protocols (TCP, Bus, Queue), toggle bus per agent, and edit definitions with AI-assisted setup. Upload, load, and manage YAML files directly. Exports to YAML for the sub-agent system.*
+*Agent System Editor with visual canvas for designing multi-agent systems. Drag-and-drop agent nodes, connect via input/output ports with configurable protocols (TCP, Queue), toggle Bus and Mesh per agent, and edit definitions with AI-assisted setup. Upload, load, and manage YAML files directly. Exports to YAML for the sub-agent system.*
 
 ## Architecture
 
@@ -952,6 +952,18 @@ tiger_cowork/
 | `python:result`     | Server → Client  | Python execution result              |
 
 ## Changelog
+
+### v0.3.2 (2026-03-23)
+- Add **per-agent Mesh checkbox** — individual agents can be marked as "mesh enabled" to freely send tasks to any other agent without needing connection lines, similar to the Bus checkbox for broadcast data sharing
+- Add **Hybrid architecture mode** — combines an orchestrator (controls flow via TCP connections) with mesh-enabled workers (collaborate freely as peers); orchestrator auto-receives bus tools to monitor all agent activity and prevent infinite loops
+- Add **config file name display** in chat header — shows the active YAML architecture file name next to the Realtime Agent / Swarm tag
+- Change connection line protocols to **TCP and Queue only** — removed Bus as a connection protocol since bus access is controlled per-agent via the Bus checkbox, not via connection lines
+- Change **Mesh from global mode to per-agent** — instead of a global orchestration mode, each agent individually opts into mesh via checkbox; global Mesh mode still available for all-agents-free-talk scenarios
+- Add per-agent mesh access control: mesh-enabled agents bypass connection validation in `send_task`; non-mesh agents must use explicit connections
+- Add mesh-aware tool assignment: mesh agents receive `send_task`/`wait_result` tools with full peer list even without explicit downstream connections
+- Add `mesh` field to `AgentConfig` interface and YAML schema (`mesh: { enabled: true }`)
+- Update auto-architecture LLM prompt with connection policy (TCP/Queue only), bus policy (checkbox only), mesh policy (per-agent), and hybrid architecture rules
+- Fix **agent config delete** not working — Fastify 5 rejected DELETE requests with empty JSON body; now only sets `Content-Type: application/json` when request has a body
 
 ### v0.3.1 (2026-03-22)
 - Add **Human Node** role — new "human" agent role that acts as the user's entry point in realtime agent graphs without running an LLM loop
