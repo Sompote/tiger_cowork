@@ -1,4 +1,4 @@
-![Tiger Cowork Banner](picture/tigerbanner.jpg)
+![Tiger Cowork Banner](picture/banner2.png)
 
 # Tiger Cowork v0.3.2
 
