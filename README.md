@@ -266,7 +266,7 @@ User sends a message
 
 - **Three modes** — Auto (AI decides), Spawn Agent (YAML-defined, on-demand), Realtime Agent (YAML-defined, always-on)
 - **Depth control** — In Auto mode, sub-agents can spawn their own sub-agents up to a configurable max depth (default 2). In Spawn Agent mode, the YAML workflow structure is the boundary — agents can only spawn downstream targets defined in `outputs_to` and connections.
-- **Protocol-aware tooling** — Each agent only receives the protocol tools it's configured to use: bus tools if `bus.enabled`, TCP/queue tools only for connected protocols.
+- **Protocol-aware tooling** — Each agent only receives the protocol tools it's configured to use: bus tools if `bus.enabled` (or hybrid orchestrator), TCP/queue tools for connected protocols, and send_task/wait_result for mesh-enabled agents with full peer lists.
 - **Concurrency limit** — Controls how many sub-agents can run simultaneously (default 3).
 - **Timeout** — Each sub-agent has a configurable timeout (default 120 seconds) enforced via AbortController.
 - **Model override** — Sub-agents can use a different model than the parent (e.g. a faster/cheaper model for simple sub-tasks).
@@ -291,20 +291,33 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 - Research tasks: spawn one sub-agent to search the web while another analyzes local files
 - Multi-file operations: delegate file processing to sub-agents in parallel
 - Complex analysis: break a report into sections, each handled by a dedicated sub-agent
-- Realtime orchestration: boot an entire agent team (orchestrator + workers + checker) and send tasks for true parallel execution with inter-agent communication via bus
+- Realtime orchestration: boot an entire agent team (orchestrator + workers + checker) and send tasks for true parallel execution with inter-agent communication via bus, mesh peer collaboration, or hybrid orchestrator+mesh architecture
 
-## What's New in v0.3.1 — Human Node & Agent Commands
+## What's New in v0.3.2 — Per-Agent Mesh & Hybrid Architecture
 
-**Human-in-the-loop for realtime multi-agent systems**
+**Flexible peer-to-peer collaboration within structured agent teams**
 
-This release adds the **Human Node** role to the Agent System Editor, allowing users to participate directly in realtime agent orchestration as a first-class node in the agent graph.
+This release introduces **per-agent mesh networking** and a new **Hybrid architecture mode**, enabling agents to collaborate freely as peers while an orchestrator maintains overall control. The Agent System Editor now supports a Mesh checkbox per agent (alongside the existing Bus checkbox), and connection protocols are simplified to TCP and Queue only.
 
 **New Features:**
+- **Per-agent Mesh checkbox** — Individual agents can be marked as "mesh enabled" to freely send tasks to any other agent without needing connection lines, similar to the Bus checkbox for broadcast data sharing
+- **Hybrid architecture mode** — Combines an orchestrator (controls flow via TCP connections) with mesh-enabled workers (collaborate freely as peers). The orchestrator auto-receives bus tools to monitor all agent activity and prevent infinite loops
+- **Config file name display** — Shows the active YAML architecture file name next to the Realtime Agent / Swarm tag in the chat header
+- **Auto Architecture LLM prompt** — The generate-system endpoint now includes connection policy (TCP/Queue only), bus policy (checkbox only), mesh policy (per-agent), and hybrid architecture rules
+- **Agent history persistence** — Spawn events (start, completion, error) are persisted to `data/agent_history/` as JSONL files, and bus history is reloaded on session restart
+- **Mesh-aware access control** — Mesh-enabled agents bypass connection validation in `send_task`; non-mesh agents must use explicit connections
+- **Mesh-aware tool assignment** — Mesh agents receive `send_task`/`wait_result` tools with full peer list even without explicit downstream connections
+- **`mesh` field in YAML schema** — `mesh: { enabled: true }` per agent in the configuration
+
+**Bug Fixes:**
+- **Agent config delete** — Fastify 5 rejected DELETE requests with empty JSON body; now only sets `Content-Type: application/json` when request has a body
+
+### Previous: v0.3.1 — Human Node & Agent Commands
+
 - **Human node role** — New "human" role in Agent Editor acts as the user's entry point in the agent graph. Human nodes don't run an LLM loop — they represent the real user and forward agent messages to the chat UI
 - **`/agent` command** — Talk directly to agents during realtime sessions: `/agent [name] "prompt"` sends to a specific agent, `/agent "prompt"` broadcasts to all connected agents
 - **Agent-to-human messaging** — Agents can send results back to the human node, displayed in chat with agent attribution tags
 - **Human node UI in Agent Editor** — Dedicated styling and info panel for human nodes; AI-assisted setup and model fields are hidden since human nodes don't use an LLM
-- **Drawing analyzer skill** — Added drawing-analyzer v2.1.0 to ClawHub plugins
 
 ### Previous: v0.3.0 — Async Architecture
 
@@ -389,7 +402,7 @@ This release migrates the entire server from Express.js to **Fastify 5**, delive
 - Configurable tool loop limits: max tool rounds (default 8), max tool calls (default 12), consecutive error threshold, and result truncation length — all adjustable in Settings > Agent Parameters
 - **Sub-Agent Spawning** — Delegate sub-tasks to independent child agents with their own tool loops. Three modes: Auto (AI decides), Spawn Agent (YAML-defined), Realtime Agent (always-on). Configurable: depth limits, concurrency, timeout, and model override
 - **Reflection Loop** — Optional self-evaluation after tool loops. The agent scores its own work against the user's objective and retries if the score is below the threshold. Configurable: enable/disable, score threshold (0.0–1.0), max retries
-- **Agent System Editor** — Visual drag-and-drop editor for designing multi-agent systems. Define agent roles, models, personas, and responsibilities. Connect agents via port-based drawing with communication protocols (TCP, Bus, Queue). Per-agent bus toggle with topic configuration. Built-in file manager for YAML upload/load/delete. AI-assisted agent setup and YAML export
+- **Agent System Editor** — Visual drag-and-drop editor for designing multi-agent systems. Define agent roles, models, personas, and responsibilities. Connect agents via port-based drawing with communication protocols (TCP, Queue). Per-agent Bus toggle (broadcast data sharing) and Mesh toggle (free peer-to-peer task delegation). Hybrid architecture mode combines orchestrator control with mesh peer collaboration. Built-in file manager for YAML upload/load/delete. AI-assisted agent setup and YAML export
 - Real-time streaming of responses and tool call progress via Socket.IO
 - Automatic output file generation for analysis/chart requests
 - File attachments with image vision support
@@ -411,15 +424,16 @@ This release migrates the entire server from Express.js to **Fastify 5**, delive
 
 ### Agent System Editor
 - Visual drag-and-drop canvas for designing multi-agent systems
-- **Agent nodes** — Create agents with configurable roles (orchestrator, worker, checker, reporter, researcher), any LLM model (free-text input), personas, and responsibility lists
+- **Agent nodes** — Create agents with configurable roles (human, orchestrator, worker, checker, reporter, researcher), any LLM model (free-text input), personas, and responsibility lists
 - **Connection drawing** — Drag from an output port (right side) to an input port (left side) to create connections with communication protocols:
-  - **TCP** — Bidirectional async socket communication
-  - **Bus** — Event bus broadcast (toggle per agent with configurable topics)
-  - **Queue** — Message queue handoff
-- **Bus toggle** — Enable/disable the shared message bus per agent. Configure bus topics for targeted pub/sub communication
+  - **TCP** — Bidirectional async socket communication for direct task delegation
+  - **Queue** — Message queue handoff for async ordered delivery
+- **Bus toggle** — Enable/disable the shared message bus per agent. Configure bus topics for targeted pub/sub data sharing. Bus is for broadcasting data between agents, not for task assignment
+- **Mesh toggle** — Enable/disable per-agent mesh networking. Mesh-enabled agents can freely send tasks to any other agent without needing connection lines, enabling flexible peer-to-peer collaboration
 - **AI-assisted setup** — Describe the agent you need in natural language, and the editor generates the role, persona, model, and responsibilities automatically
-- **Orchestration modes** — Choose from Hierarchical, Flat, Mesh, or Pipeline topologies
-- **YAML export** — The editor generates a complete YAML configuration including system metadata, agent definitions, bus settings, workflow sequences, connection topology, and communication settings
+- **Auto Architecture** — Describe the system you want in natural language, and the LLM generates a complete multi-agent architecture with agents, connections, bus/mesh settings, and proper role assignment
+- **Orchestration modes** — Choose from Hierarchical, Flat, Mesh, Hybrid, or Pipeline topologies. Hybrid combines an orchestrator (controls flow via connections) with mesh-enabled workers (collaborate as peers)
+- **YAML export** — The editor generates a complete YAML configuration including system metadata, agent definitions, bus/mesh settings, workflow sequences, connection topology, and communication settings
 - **File manager** — Upload, load, and delete YAML architecture files directly within the editor. Shows existing configs with agent count and metadata
 - **Save & load** — Save agent configurations as `.yaml` files in `data/agents/`, load existing configs back into the editor
 - **YAML upload** — Upload existing `.yaml` / `.yml` files from your local machine into the editor or from the Settings page
