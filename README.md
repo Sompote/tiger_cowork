@@ -26,6 +26,10 @@ A self-hosted AI workspace that brings chat, code execution, multi-agent orchest
 
 *Auto-generate a complete multi-agent architecture from a natural language description — watch the AI build agent teams with roles, connections, and protocols.*
 
+![Auto-Generated Agent Architecture](picture/autoagent.png)
+
+*Auto-generated agent architecture — AI creates a complete multi-agent system with roles, connections, and communication protocols from a single prompt.*
+
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
