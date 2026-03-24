@@ -20,6 +20,12 @@ A self-hosted AI workspace that brings chat, code execution, multi-agent orchest
 
 *Skills marketplace — install and manage skills from built-in catalog, OpenClaw, and ClawHub community.*
 
+## Demo
+
+[![Auto Generate Swarm Agent Architecture](https://img.youtube.com/vi/1Ke2dxha1og/maxresdefault.jpg)](https://youtu.be/1Ke2dxha1og)
+
+*Auto-generate a complete multi-agent architecture from a natural language description — watch the AI build agent teams with roles, connections, and protocols.*
+
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
