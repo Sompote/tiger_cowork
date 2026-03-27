@@ -46,6 +46,7 @@ const fastify = Fastify({
 // Socket.io on the shared HTTP server
 const io = new Server(httpServer, {
   cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 50 * 1024 * 1024, // 50MB — match Fastify bodyLimit
 });
 
 // Decorate fastify with shared config

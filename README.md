@@ -1,8 +1,8 @@
 ![Tiger Cowork Banner](picture/banner2.png)
 
-# Tiger Cowork v0.3.2
+# Tiger Cowork v0.3.3
 
-A self-hosted AI workspace that brings chat, code execution, multi-agent orchestration, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) and let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking.
+A self-hosted AI workspace that brings chat, code execution, multi-agent orchestration, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) and let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -33,6 +33,10 @@ A self-hosted AI workspace that brings chat, code execution, multi-agent orchest
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
+- **Long-Running Session Stability** — Three layers of protection for extended conversations:
+  - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
+  - **Smart Tool Result Compression** — Intelligently compresses tool outputs by type (first/last lines for code output, titles+URLs for search, structure preview for fetched pages) instead of raw truncation
+  - **Checkpoint & Resume** — Automatically saves session state every N rounds; recovers from crashes or aborts without losing progress
 - **Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
 - **Projects** — Dedicated workspaces with memory, skill selection, file browser, and sandboxed or external working folders
 - **Reflection Loop** — Optional self-evaluation that scores and retries incomplete work
@@ -102,6 +106,32 @@ npm run build && pm2 start npm --name "cowork" -- start
 2. Go to **Settings** → enter your API Key, API URL, and Model
 3. Click **Test Connection** to verify
 4. Start chatting — the AI can search the web, run code, generate charts, and more
+
+## Context Management Settings
+
+These settings control how Tiger Cowork handles long conversations. Configure them in **Settings** or directly in `data/settings.json`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `agentCompressionInterval` | `5` | Compress older messages every N tool loop rounds |
+| `agentCompressionWindowSize` | `10` | Number of recent messages to keep uncompressed |
+| `agentCompressionModel` | *(main model)* | Optional cheaper/faster model for compression (e.g., `meta-llama/llama-3.1-8b-instruct`) |
+| `agentCheckpointEnabled` | `true` | Enable automatic checkpoint saving for crash recovery |
+| `agentCheckpointInterval` | `5` | Save checkpoint every N rounds |
+| `agentToolResultMaxLen` | `6000` | Max chars per tool result (hard-capped at 100KB) |
+| `agentMaxToolRounds` | `8` | Max iterations of the tool-calling loop |
+| `agentMaxToolCalls` | `12` | Total tool calls allowed per session |
+
+**Recommended for large-context models (Grok, Gemini 2M):**
+```json
+{
+  "agentMaxToolRounds": 30,
+  "agentMaxToolCalls": 50,
+  "agentToolResultMaxLen": 50000,
+  "agentCompressionInterval": 5,
+  "agentCheckpointInterval": 5
+}
+```
 
 ## Documentation
 

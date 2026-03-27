@@ -151,6 +151,7 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 0;
 }
 
@@ -161,6 +162,8 @@
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .message.assistant {
@@ -201,6 +204,10 @@
   line-height: 1.6;
   font-size: 14px;
   min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 .message-content p {
@@ -213,6 +220,10 @@
 
 .message-content pre {
   margin: 8px 0;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .message-content code {
@@ -573,6 +584,9 @@
   text-align: center;
   color: var(--danger);
   font-size: 13px;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
 }
 
 .doc-preview-content {
@@ -1141,13 +1155,15 @@
   }
 
   .message {
-    padding: 12px 12px;
-    gap: 10px;
+    padding: 12px 8px;
+    gap: 8px;
+    max-width: 100%;
   }
 
   .message-avatar {
     width: 28px;
     height: 28px;
+    min-width: 28px;
     font-size: 11px;
   }
 
@@ -1155,6 +1171,23 @@
     font-size: 13px;
     line-height: 1.5;
     overflow-wrap: break-word;
+    word-break: break-word;
+    max-width: calc(100vw - 72px);
+    overflow-x: hidden;
+  }
+
+  .chat-status {
+    font-size: 12px;
+    margin: 6px 8px;
+    padding: 8px 12px;
+    max-width: 100%;
+    box-sizing: border-box;
+    word-break: break-word;
+  }
+
+  .doc-preview-error {
+    font-size: 12px;
+    padding: 12px;
     word-break: break-word;
   }
 
@@ -1165,10 +1198,15 @@
   .message-content pre {
     font-size: 11px;
     overflow-x: auto;
+    max-width: 100%;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 
   .message-content code {
     font-size: 11px;
+    word-break: break-all;
+    overflow-wrap: break-word;
   }
 
   .message-content table {

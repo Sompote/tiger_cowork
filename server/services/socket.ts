@@ -1,6 +1,6 @@
 import { Server, Socket } from "socket.io";
 import { v4 as uuid } from "uuid";
-import { callTigerBotWithTools, callTigerBot } from "./tigerbot";
+import { callTigerBotWithTools, callTigerBot, trimConversationContext } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
 import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent } from "./toolbox";
@@ -181,9 +181,10 @@ Available tools:
 
 Rules:${isRealtimeAgent ? `
 - REALTIME AGENTS: You are operating in REALTIME agent mode. All agents from the architecture are ALREADY ALIVE and listening. Do NOT try to spawn agents — they are running.
-- HIERARCHY: The agent team has a defined hierarchy. Check the agent roles — if there is an orchestrator agent (role=orchestrator), you MUST send the task ONLY to that orchestrator. The orchestrator will manage all delegation to workers/checkers internally. Do NOT bypass the orchestrator by sending tasks directly to worker agents.
-- SEND TASKS: Use send_task({to: "agent_id", task: "..."}) to assign work. Use wait_result({from: "agent_id"}) to collect results.
-- MANDATORY: You MUST delegate ALL work through the agent team. Do NOT do the work yourself. Send the task, wait for results, then synthesize the final response.` : isManualSubAgent ? `
+- HIERARCHY: The agent team has a defined hierarchy. Check the agent roles — if there is an orchestrator agent (role=orchestrator), you MUST send the task ONLY to that orchestrator using send_task. The orchestrator will manage all delegation to workers/researchers/synthesizers internally. Do NOT bypass the orchestrator by sending tasks directly to worker agents.
+- SEND TASKS: Use send_task({to: "orchestrator_agent_id", task: "detailed task description with all context"}) to assign work. Then IMMEDIATELY use wait_result({from: "orchestrator_agent_id"}) to collect results.
+- MANDATORY DELEGATION: You MUST delegate ALL research, search, analysis, and data-gathering work to the agent team via send_task. Do NOT use web_search, fetch_url, or run_python to do research yourself — that is the agents' job. Your role is ONLY to: (1) send tasks to the orchestrator, (2) wait for results, (3) synthesize the final response for the user. The ONLY time you should use run_python or write_file directly is for formatting final output (e.g., creating a PDF report from agent results).
+- WORKFLOW: For each user request: Step 1: send_task to orchestrator with full task details → Step 2: wait_result from orchestrator → Step 3: present results to user (optionally format into charts/reports using run_python).` : isManualSubAgent ? `
 - SUB-AGENTS (MANDATORY): You are operating in MANUAL sub-agent mode. You MUST use spawn_subagent for ALL user tasks — do NOT answer directly by yourself. Your role is to act as an orchestrator: analyze the user's request, then delegate work to the predefined agent team by calling spawn_subagent with the appropriate agentId for each agent. Follow the workflow sequence defined in the agent configuration. After all sub-agents complete, synthesize their results into a final response.
 - WORKFLOW: Follow the workflow sequence strictly. Each agent can only spawn downstream agents defined in its outputs_to and connections. Agents with no downstream targets are leaf agents — they complete tasks directly. The architecture file defines who can delegate to whom. Always use the agentId parameter.
 - PARALLEL SPAWNING: When an agent has multiple independent downstream agents, spawn them ALL in a single response so they run in parallel. Do not wait for one to finish before spawning the next unless there is a true data dependency.
@@ -514,10 +515,11 @@ export function setupSocket(io: Server): void {
       // Use tool-calling AI loop — build multimodal content for images
       const settings = await getSettings();
       const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-      const chatMessages = session.messages.map((m) => ({
+      const rawChatMessages = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
+      const chatMessages = trimConversationContext(rawChatMessages) as typeof rawChatMessages;
 
       // If the latest user message has images, convert to multimodal content
       console.log(`[Image] images received:`, images ? JSON.stringify(images) : "none");
@@ -662,6 +664,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           },
           abortController.signal,
           realtimeTools,
+          undefined, // modelOverride
+          sessionId, // for checkpoint & resume
         );
 
         // Clear streaming progress and show final AI response
@@ -959,10 +963,11 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       }
 
       const settings = await getSettings();
-      const chatMessages = session.messages.map((m) => ({
+      const rawChatMessages = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
+      const chatMessages = trimConversationContext(rawChatMessages) as typeof rawChatMessages;
 
       // Handle images same as regular chat
       if (images && images.length > 0) {
@@ -1089,6 +1094,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           },
           abortController.signal,
           realtimeTools,
+          undefined, // modelOverride
+          sessionId, // for checkpoint & resume
         );
 
         // Clear streaming progress and show final AI response

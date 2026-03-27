@@ -2137,11 +2137,20 @@ function realtimeCheckAgents(): any {
 
 export async function getToolsForRealtimeOrchestrator(): Promise<any[]> {
   const settings = await getSettings();
-  const tools: any[] = [...builtinTools];
-  if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
-    tools.push(openRouterSearchTool);
-  }
-  // Realtime tools instead of spawn_subagent
+
+  // In realtime mode, the main LLM should DELEGATE work, not do it itself.
+  // Only give it coordination tools + minimal output tools.
+  // Giving it web_search, run_python, fetch_url etc. causes it to bypass the agent team.
+  const essentialTools = builtinTools.filter((t: any) => {
+    const name = t.function?.name || "";
+    // Keep only: file I/O (for saving final results), skill listing, and code execution
+    // for synthesizing outputs. Remove research tools that agents should handle.
+    return ["write_file", "read_file", "list_files", "run_python", "run_react", "list_skills", "load_skill"].includes(name);
+  });
+
+  const tools: any[] = [...essentialTools];
+
+  // Core: realtime coordination tools (these are the PRIMARY tools)
   tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
   // Protocol tools for direct orchestrator communication
   tools.push(...protocolTools);
@@ -2215,16 +2224,23 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
     }
   }
 
-  summary += `\nINSTRUCTIONS:\n`;
+  // Collect downstream agents for the orchestrator reference
+  const orchestratorStep = orchestrator ? config.workflow?.sequence?.find((s: any) => s.agent === orchestrator.id) : null;
+  const orchDownstream = orchestratorStep?.outputs_to || [];
+
+  summary += `\nINSTRUCTIONS (CRITICAL — YOU MUST FOLLOW):\n`;
   if (orchestrator) {
-    summary += `- Send the FULL task to the orchestrator: send_task({to: "${orchestrator.id}", task: "..."})\n`;
-    summary += `- Then wait for the orchestrator's result: wait_result({from: "${orchestrator.id}"})\n`;
-    summary += `- The orchestrator will manage all sub-delegation to worker/checker agents internally\n`;
-    summary += `- Do NOT send tasks to other agents directly — respect the hierarchy\n`;
+    summary += `- STEP 1: Send the FULL user task to the orchestrator: send_task({to: "${orchestrator.id}", task: "provide the complete user request with all context and details"})\n`;
+    summary += `- STEP 2: Wait for the orchestrator's result: wait_result({from: "${orchestrator.id}"})\n`;
+    summary += `- STEP 3: Present the results to the user. Optionally use run_python to format into charts/reports.\n`;
+    summary += `- The orchestrator ("${orchestrator.name}") will break down the task, delegate to ${orchDownstream.length > 0 ? orchDownstream.join(", ") : "worker agents"}, and synthesize results.\n`;
+    summary += `- Do NOT do research, web searches, or data gathering yourself — the agent team handles ALL of that.\n`;
+    summary += `- Do NOT send tasks to other agents directly — ONLY send to "${orchestrator.id}". The orchestrator manages the team.\n`;
   } else {
     summary += `- Use send_task({to: "agent_id", task: "..."}) to assign work to agents\n`;
     summary += `- Use wait_result({from: "agent_id"}) to collect the result\n`;
     summary += `- Send tasks to MULTIPLE agents in a single response for parallel execution\n`;
+    summary += `- Do NOT do research yourself — delegate ALL work to the agent team.\n`;
   }
   summary += `- Use check_agents() to see agent statuses\n`;
   return summary;

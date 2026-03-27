@@ -190,3 +190,11 @@ export async function deleteAgentHistory(sessionId: string): Promise<void> {
 export async function flushAgentHistory(_sessionId: string): Promise<void> {
   // JSONL is append-per-call, no buffering needed. Reserved for future batching.
 }
+
+// Checkpoint directory for tool loop recovery
+const CHECKPOINT_DIR = path.join(DATA_DIR, "checkpoints");
+
+export async function getCheckpointDir(): Promise<string> {
+  await fs.mkdir(CHECKPOINT_DIR, { recursive: true });
+  return CHECKPOINT_DIR;
+}

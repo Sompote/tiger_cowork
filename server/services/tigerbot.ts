@@ -1,11 +1,342 @@
-import { getSettings } from "./data";
+import { getSettings, getCheckpointDir } from "./data";
 import { getTools, callTool } from "./toolbox";
+import fs from "fs/promises";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
   tool_calls?: any[];
   tool_call_id?: string;
+}
+
+/**
+ * Estimate the total character size of a messages array.
+ */
+function estimateMessagesChars(messages: Array<{ content: any; tool_calls?: any[]; [k: string]: any }>): number {
+  let total = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") total += m.content.length;
+    else if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (part.type === "text" && part.text) total += part.text.length;
+        else if (part.type === "image_url") total += 2000;
+      }
+    }
+    if (m.tool_calls) total += JSON.stringify(m.tool_calls).length;
+  }
+  return total;
+}
+
+/**
+ * Trim conversation messages to fit within a character budget.
+ * Keeps the system prompt + most recent messages, drops older ones.
+ * Default ~6M chars ≈ ~1.5M tokens, safe for Grok 2M context with room for response.
+ */
+export function trimConversationContext(
+  messages: Array<{ role: string; content: any; [k: string]: any }>,
+  maxChars: number = 6_000_000
+): Array<{ role: string; content: any; [k: string]: any }> {
+  const totalChars = estimateMessagesChars(messages);
+  if (totalChars <= maxChars) return messages;
+
+  const result: typeof messages = [];
+  let usedChars = 0;
+
+  // Keep system messages from the start
+  let startIdx = 0;
+  while (startIdx < messages.length && messages[startIdx].role === "system") {
+    const c = typeof messages[startIdx].content === "string" ? messages[startIdx].content.length : 500;
+    usedChars += c;
+    result.push(messages[startIdx]);
+    startIdx++;
+  }
+
+  // Add messages from the end (most recent) until budget is reached
+  const reversed: typeof messages = [];
+  for (let i = messages.length - 1; i >= startIdx; i--) {
+    const msgChars = typeof messages[i].content === "string" ? messages[i].content.length : 500;
+    if (usedChars + msgChars > maxChars) break;
+    reversed.push(messages[i]);
+    usedChars += msgChars;
+  }
+
+  if (reversed.length < messages.length - startIdx) {
+    result.push({
+      role: "system",
+      content: "[Earlier conversation history was trimmed to fit context window]",
+    });
+  }
+  result.push(...reversed.reverse());
+
+  console.log(`[ContextTrim] Trimmed ${messages.length} messages (${totalChars} chars) → ${result.length} messages (${usedChars} chars)`);
+  return result;
+}
+
+// ─── Feature 2: Smart Tool Result Compression ───
+
+/**
+ * Compress tool results intelligently based on tool type.
+ * Preserves structure (first/last lines, key fields) instead of raw slice.
+ */
+function compressToolResult(toolName: string, result: any, maxLen: number): string {
+  if (!result) return JSON.stringify(result);
+
+  try {
+    // For error results, keep full error info (usually small)
+    if (result.ok === false || result.exitCode === 1) {
+      const compact: any = { ok: false };
+      if (result.error) compact.error = result.error.slice(0, 2000);
+      if (result.stderr) compact.stderr = result.stderr.slice(0, 2000);
+      if (result.exitCode !== undefined) compact.exitCode = result.exitCode;
+      if (result.outputFiles) compact.outputFiles = result.outputFiles;
+      return JSON.stringify(compact);
+    }
+
+    // run_python / run_shell: keep first+last lines of stdout
+    if ((toolName === "run_python" || toolName === "run_shell") && result.stdout) {
+      const lines = result.stdout.split("\n");
+      const compact: any = { exitCode: result.exitCode ?? 0 };
+      if (result.outputFiles?.length) compact.outputFiles = result.outputFiles;
+      if (lines.length <= 60) {
+        compact.stdout = result.stdout.slice(0, maxLen - 200);
+      } else {
+        const head = lines.slice(0, 30).join("\n");
+        const tail = lines.slice(-20).join("\n");
+        compact.stdout = `${head}\n\n[...${lines.length - 50} lines omitted...]\n\n${tail}`;
+      }
+      if (result.stderr) compact.stderr = result.stderr.slice(0, 1000);
+      return JSON.stringify(compact);
+    }
+
+    // web_search: keep titles + URLs, truncate snippets
+    if (toolName === "web_search" && Array.isArray(result.results)) {
+      const compact = {
+        ...result,
+        results: result.results.map((r: any) => ({
+          title: r.title,
+          url: r.url,
+          snippet: typeof r.snippet === "string" ? r.snippet.slice(0, 150) : r.snippet,
+        })),
+      };
+      return JSON.stringify(compact);
+    }
+
+    // fetch_url: keep structure preview
+    if (toolName === "fetch_url" && result.content) {
+      const content = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+      const lines = content.split("\n");
+      const compact: any = { ok: true, url: result.url };
+      if (lines.length <= 50) {
+        compact.content = content.slice(0, maxLen - 200);
+      } else {
+        compact.content = lines.slice(0, 30).join("\n") + `\n[...${lines.length - 40} lines omitted...]\n` + lines.slice(-10).join("\n");
+      }
+      return JSON.stringify(compact);
+    }
+
+    // read_file: keep first+last lines
+    if (toolName === "read_file" && result.content) {
+      const lines = result.content.split("\n");
+      const compact: any = { path: result.path };
+      if (lines.length <= 50) {
+        compact.content = result.content.slice(0, maxLen - 100);
+      } else {
+        compact.content = lines.slice(0, 30).join("\n") + `\n[...${lines.length - 40} lines omitted...]\n` + lines.slice(-10).join("\n");
+      }
+      return JSON.stringify(compact);
+    }
+
+    // list_files: cap entries
+    if (toolName === "list_files" && Array.isArray(result.files)) {
+      if (result.files.length > 50) {
+        return JSON.stringify({
+          ...result,
+          files: result.files.slice(0, 50),
+          _note: `Showing 50 of ${result.files.length} files`,
+        });
+      }
+    }
+
+    // Default: stringify and truncate with valid JSON
+    const raw = JSON.stringify(result);
+    if (raw.length <= maxLen) return raw;
+
+    // Try to produce a meaningful summary
+    if (typeof result === "object" && result !== null) {
+      const compact: any = {};
+      for (const [key, val] of Object.entries(result)) {
+        if (typeof val === "string" && val.length > 500) {
+          compact[key] = val.slice(0, 500) + `...(${val.length} chars total)`;
+        } else if (Array.isArray(val) && val.length > 20) {
+          compact[key] = val.slice(0, 20);
+          compact[`_${key}_note`] = `Showing 20 of ${val.length} items`;
+        } else {
+          compact[key] = val;
+        }
+      }
+      const compactStr = JSON.stringify(compact);
+      if (compactStr.length <= maxLen) return compactStr;
+      return compactStr.slice(0, maxLen - 50) + '..."_truncated":true}';
+    }
+
+    return raw.slice(0, maxLen - 20) + "...(truncated)";
+  } catch {
+    return JSON.stringify(result).slice(0, maxLen);
+  }
+}
+
+// ─── Feature 1: Sliding Window with Summary Compression ───
+
+/**
+ * Compress older messages in the context into a summary using a fast LLM call.
+ * Keeps system prompt + recent messages, replaces older messages with a compressed summary.
+ */
+async function compressOlderMessages(
+  allMessages: ChatMessage[],
+  windowSize: number = 10,
+  model?: string
+): Promise<ChatMessage[]> {
+  // Find boundaries: system messages at start, then the rest
+  let systemEnd = 0;
+  while (systemEnd < allMessages.length && allMessages[systemEnd].role === "system") {
+    systemEnd++;
+  }
+
+  const nonSystemMessages = allMessages.slice(systemEnd);
+  if (nonSystemMessages.length <= windowSize) {
+    return allMessages; // Nothing to compress
+  }
+
+  // Messages to compress vs keep
+  const toCompress = nonSystemMessages.slice(0, nonSystemMessages.length - windowSize);
+  const toKeep = nonSystemMessages.slice(nonSystemMessages.length - windowSize);
+
+  // Build a summary of older messages
+  const summaryParts: string[] = [];
+  let toolCallCount = 0;
+  for (const msg of toCompress) {
+    if (msg.role === "user") {
+      const text = typeof msg.content === "string" ? msg.content : "(multimodal)";
+      summaryParts.push(`USER: ${text.slice(0, 300)}`);
+    } else if (msg.role === "assistant") {
+      const text = typeof msg.content === "string" ? msg.content : "";
+      if (text) summaryParts.push(`ASSISTANT: ${text.slice(0, 200)}`);
+      if (msg.tool_calls?.length) {
+        for (const tc of msg.tool_calls) {
+          summaryParts.push(`  → Called ${tc.function?.name || "unknown"}`);
+          toolCallCount++;
+        }
+      }
+    } else if (msg.role === "tool") {
+      const text = typeof msg.content === "string" ? msg.content : "";
+      summaryParts.push(`  RESULT: ${text.slice(0, 150)}`);
+    }
+  }
+
+  const compressionPrompt: ChatMessage[] = [
+    {
+      role: "system",
+      content: "You are a context compressor. Summarize the following conversation history into a concise but complete summary. Preserve: key decisions, important data/findings, file paths, errors encountered, and the current state of the task. Be factual and brief. Output ONLY the summary, no preamble."
+    },
+    {
+      role: "user",
+      content: `Compress this conversation history (${toCompress.length} messages, ${toolCallCount} tool calls):\n\n${summaryParts.join("\n").slice(0, 8000)}`
+    }
+  ];
+
+  try {
+    console.log(`[Compression] Compressing ${toCompress.length} messages into summary (keeping ${toKeep.length} recent)...`);
+    const data = await llmCall(compressionPrompt, { model });
+    const summary = data.choices?.[0]?.message?.content || "";
+
+    if (!summary) {
+      console.log("[Compression] LLM returned empty summary, falling back to naive trim.");
+      return allMessages;
+    }
+
+    console.log(`[Compression] Summary generated: ${summary.length} chars (compressed from ${summaryParts.join("\n").length} chars)`);
+
+    // Rebuild: system messages + compressed summary + recent messages
+    const result: ChatMessage[] = [
+      ...allMessages.slice(0, systemEnd),
+      {
+        role: "system",
+        content: `[COMPRESSED CONTEXT — ${toCompress.length} earlier messages, ${toolCallCount} tool calls]\n${summary}`,
+      },
+      ...toKeep,
+    ];
+    return result;
+  } catch (err: any) {
+    console.error(`[Compression] Failed: ${err.message}. Falling back to naive trim.`);
+    return allMessages;
+  }
+}
+
+// ─── Feature 3: Checkpoint & Resume ───
+
+interface ToolLoopCheckpoint {
+  sessionId: string;
+  checkpointRound: number;
+  timestamp: string;
+  allMessages: ChatMessage[];
+  toolResults: Array<{ tool: string; result: any }>;
+  toolCallHistory: string[];
+  totalToolCalls: number;
+  consecutiveErrors: number;
+  earlyContent: string | null;
+  systemPrompt?: string;
+}
+
+async function saveCheckpoint(sessionId: string, checkpoint: ToolLoopCheckpoint): Promise<void> {
+  const dir = await getCheckpointDir();
+  const fp = `${dir}/${sessionId}.json`;
+  // Compress tool results in checkpoint to keep file size reasonable
+  const compactCheckpoint = {
+    ...checkpoint,
+    toolResults: checkpoint.toolResults.map(tr => ({
+      tool: tr.tool,
+      result: {
+        ok: tr.result?.ok,
+        exitCode: tr.result?.exitCode,
+        outputFiles: tr.result?.outputFiles,
+        stdout: tr.result?.stdout?.slice(0, 2000),
+        stderr: tr.result?.stderr?.slice(0, 1000),
+        error: tr.result?.error,
+      }
+    })),
+    // Compress allMessages — only keep last 20 messages fully, summarize earlier ones
+    allMessages: checkpoint.allMessages.length > 30
+      ? [
+          ...checkpoint.allMessages.slice(0, 2), // system prompt(s)
+          { role: "system" as const, content: `[Checkpoint: ${checkpoint.allMessages.length - 22} earlier messages omitted]` },
+          ...checkpoint.allMessages.slice(-20),
+        ]
+      : checkpoint.allMessages,
+  };
+  await fs.writeFile(fp, JSON.stringify(compactCheckpoint));
+  console.log(`[Checkpoint] Saved round ${checkpoint.checkpointRound} for session ${sessionId} (${(JSON.stringify(compactCheckpoint).length / 1024).toFixed(0)}KB)`);
+}
+
+async function loadCheckpoint(sessionId: string): Promise<ToolLoopCheckpoint | null> {
+  const dir = await getCheckpointDir();
+  const fp = `${dir}/${sessionId}.json`;
+  try {
+    const content = await fs.readFile(fp, "utf-8");
+    const checkpoint = JSON.parse(content);
+    console.log(`[Checkpoint] Loaded checkpoint for session ${sessionId} at round ${checkpoint.checkpointRound}`);
+    return checkpoint;
+  } catch {
+    return null;
+  }
+}
+
+async function clearCheckpoint(sessionId: string): Promise<void> {
+  const dir = await getCheckpointDir();
+  const fp = `${dir}/${sessionId}.json`;
+  try {
+    await fs.unlink(fp);
+    console.log(`[Checkpoint] Cleared checkpoint for session ${sessionId}`);
+  } catch {} // Ignore if doesn't exist
 }
 
 interface TigerBotResponse {
@@ -73,13 +404,24 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`API Error (${response.status}): ${error}`);
+    const bodySize = JSON.stringify(body).length;
+    console.error(`[llmCall] API Error ${response.status}. Request body size: ${(bodySize / 1024 / 1024).toFixed(2)}MB, messages: ${messages.length}`);
+    throw new Error(`API Error (${response.status}): ${error.slice(0, 500)}`);
   }
 
-  const json = await response.json();
+  let json: any;
+  const responseText = await response.text();
+  try {
+    json = JSON.parse(responseText);
+  } catch (parseErr: any) {
+    const bodySize = JSON.stringify(body).length;
+    console.error(`[llmCall] JSON parse failed. Response (first 1000): ${responseText.slice(0, 1000)}`);
+    console.error(`[llmCall] Request body size: ${(bodySize / 1024 / 1024).toFixed(2)}MB, messages: ${messages.length}`);
+    throw new Error(`API returned invalid JSON (body size: ${(bodySize / 1024 / 1024).toFixed(1)}MB): ${parseErr.message}`);
+  }
+
   if (!json.choices?.length) {
     console.error(`[llmCall] API returned no choices. Response:`, JSON.stringify(json).slice(0, 2000));
-    // Check if messages contain image content for debugging
     const hasImages = messages.some(m => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
     if (hasImages) console.error(`[llmCall] Request included images. Model may not support vision or format is wrong.`);
   }
@@ -94,38 +436,96 @@ export async function callTigerBotWithTools(
   onToolResult?: (name: string, result: any) => void,
   signal?: AbortSignal,
   toolsOverride?: any[],
-  modelOverride?: string
+  modelOverride?: string,
+  sessionId?: string
 ): Promise<TigerBotResponse> {
   const { apiKey } = await getApiConfig();
   if (!apiKey) {
     return { content: "API key not configured. Go to Settings to add your API key." };
   }
 
-  const allMessages: ChatMessage[] = [];
-  if (systemPrompt) {
-    allMessages.push({ role: "system", content: systemPrompt });
-  }
-  allMessages.push(...messages);
-
   const settings = await getSettings();
   const maxToolRounds = settings.agentMaxToolRounds || 8;
   const maxToolCalls = settings.agentMaxToolCalls || 12;
-  const toolResults: Array<{ tool: string; result: any }> = [];
-  const toolCallHistory: string[] = [];
+  const compressionInterval = settings.agentCompressionInterval || 5;
+  const compressionWindowSize = settings.agentCompressionWindowSize || 10;
+  const checkpointInterval = settings.agentCheckpointInterval || 5;
+  const checkpointEnabled = settings.agentCheckpointEnabled !== false; // default true
+
+  // Try to resume from checkpoint
+  let allMessages: ChatMessage[] = [];
+  let toolResults: Array<{ tool: string; result: any }> = [];
+  let toolCallHistory: string[] = [];
   let totalToolCalls = 0;
-  let usesSkill = false; // Track if a skill was loaded (needs more tool calls)
   let consecutiveErrors = 0;
-  let lastUsage: any = undefined;
+  let startRound = 0;
   let earlyContent: string | null = null;
+
+  if (sessionId && checkpointEnabled) {
+    const checkpoint = await loadCheckpoint(sessionId);
+    if (checkpoint) {
+      console.log(`[ToolLoop] Resuming from checkpoint at round ${checkpoint.checkpointRound}`);
+      allMessages = checkpoint.allMessages;
+      toolResults = checkpoint.toolResults;
+      toolCallHistory = checkpoint.toolCallHistory;
+      totalToolCalls = checkpoint.totalToolCalls;
+      consecutiveErrors = checkpoint.consecutiveErrors;
+      earlyContent = checkpoint.earlyContent;
+      startRound = checkpoint.checkpointRound;
+    }
+  }
+
+  // Initialize messages if not resuming from checkpoint
+  if (allMessages.length === 0) {
+    if (systemPrompt) {
+      allMessages.push({ role: "system", content: systemPrompt });
+    }
+    allMessages.push(...messages);
+  }
+
+  let usesSkill = false;
+  let lastUsage: any = undefined;
 
   if (modelOverride) {
     console.log(`[ToolLoop] Using model override: ${modelOverride}`);
   }
 
-  for (let round = 0; round < maxToolRounds; round++) {
+  for (let round = startRound; round < maxToolRounds; round++) {
     if (signal?.aborted) {
+      // Save checkpoint on abort so we can resume later
+      if (sessionId && checkpointEnabled) {
+        await saveCheckpoint(sessionId, {
+          sessionId, checkpointRound: round, timestamp: new Date().toISOString(),
+          allMessages, toolResults, toolCallHistory, totalToolCalls, consecutiveErrors, earlyContent, systemPrompt,
+        });
+      }
       return { content: earlyContent || "Task was cancelled.", toolResults };
     }
+
+    // Feature 1: Compress older messages periodically (every N rounds)
+    if (round > 0 && round % compressionInterval === 0) {
+      const compressed = await compressOlderMessages(allMessages, compressionWindowSize, settings.agentCompressionModel);
+      if (compressed.length < allMessages.length) {
+        allMessages.length = 0;
+        allMessages.push(...(compressed as ChatMessage[]));
+      }
+    }
+
+    // Safety fallback: naive trim if still over budget after compression
+    const trimmed = trimConversationContext(allMessages) as ChatMessage[];
+    if (trimmed.length < allMessages.length) {
+      allMessages.length = 0;
+      allMessages.push(...trimmed);
+    }
+
+    // Feature 3: Save checkpoint periodically
+    if (sessionId && checkpointEnabled && round > 0 && round % checkpointInterval === 0) {
+      await saveCheckpoint(sessionId, {
+        sessionId, checkpointRound: round, timestamp: new Date().toISOString(),
+        allMessages, toolResults, toolCallHistory, totalToolCalls, consecutiveErrors, earlyContent, systemPrompt,
+      });
+    }
+
     let data: any;
     try {
       data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
@@ -147,11 +547,27 @@ export async function callTigerBotWithTools(
     lastUsage = data.usage;
 
     // Add assistant message to context — truncate large tool_call args to prevent context overflow
+    // IMPORTANT: Must produce valid JSON, otherwise the API rejects with "EOF while parsing a string"
     const truncatedToolCalls = toolCalls.length ? toolCalls.map((tc: any) => {
       const args = tc.function?.arguments || "";
       const argsStr = typeof args === "string" ? args : JSON.stringify(args);
       if (argsStr.length > 4000) {
-        return { ...tc, function: { ...tc.function, arguments: argsStr.slice(0, 4000) + "..." } };
+        // Build a valid JSON summary instead of slicing mid-string
+        try {
+          const parsed = typeof args === "object" ? args : JSON.parse(argsStr);
+          const summary: Record<string, any> = {};
+          for (const [key, val] of Object.entries(parsed)) {
+            if (typeof val === "string" && val.length > 500) {
+              summary[key] = val.slice(0, 500) + "...(truncated)";
+            } else {
+              summary[key] = val;
+            }
+          }
+          return { ...tc, function: { ...tc.function, arguments: JSON.stringify(summary) } };
+        } catch {
+          // If JSON parse fails, wrap the truncated text as a valid JSON string
+          return { ...tc, function: { ...tc.function, arguments: JSON.stringify({ _truncated: argsStr.slice(0, 3000) }) } };
+        }
       }
       return tc;
     }) : undefined;
@@ -271,12 +687,11 @@ export async function callTigerBotWithTools(
       toolResults.push({ tool: fnName, result });
       totalToolCalls++;
 
-      let resultStr = JSON.stringify(result);
-      const baseMaxLen = settings.agentToolResultMaxLen || 6000;
+      // Feature 2: Smart tool result compression
+      const HARD_MAX = 100_000;
+      const baseMaxLen = Math.min(settings.agentToolResultMaxLen || 6000, HARD_MAX);
       const maxLen = fnName === "load_skill" ? Math.min(3000, baseMaxLen) : baseMaxLen;
-      if (resultStr.length > maxLen) {
-        resultStr = resultStr.slice(0, maxLen) + "\n...(truncated)";
-      }
+      const resultStr = compressToolResult(fnName, result, maxLen);
       return { tc, resultStr };
     };
 
@@ -322,6 +737,11 @@ export async function callTigerBotWithTools(
   }
 
   console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls.`);
+
+  // Clear checkpoint on successful completion
+  if (sessionId && checkpointEnabled) {
+    await clearCheckpoint(sessionId);
+  }
 
   // If no tools were called and we have early content, return it directly (no reflection needed)
   if (earlyContent && totalToolCalls === 0) {
@@ -456,9 +876,7 @@ Scoring guide:
             if (onToolResult) onToolResult(fnName, result);
             toolResults.push({ tool: fnName, result });
             totalToolCalls++;
-            let resultStr = JSON.stringify(result);
-            const maxLen = settings.agentToolResultMaxLen || 6000;
-            if (resultStr.length > maxLen) resultStr = resultStr.slice(0, maxLen) + "\n...(truncated)";
+            const resultStr = compressToolResult(fnName, result, Math.min(settings.agentToolResultMaxLen || 6000, 100_000));
             allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
           }
         }
@@ -538,8 +956,7 @@ Scoring guide:
           toolResults.push({ tool: fnName, result });
           totalToolCalls++;
           if (result?.outputFiles?.length > 0) nudgeHasOutput = true;
-          let resultStr = JSON.stringify(result);
-          if (resultStr.length > 6000) resultStr = resultStr.slice(0, 6000) + "\n...(truncated)";
+          const resultStr = compressToolResult(fnName, result, 6000);
           allMessages.push({ role: "tool", content: resultStr, tool_call_id: tc.id });
         }
 
