@@ -61,7 +61,7 @@ export interface Settings {
   tigerBotApiKey: string;
   tigerBotModel: string;
   tigerBotApiUrl?: string;
-  mcpTools: Array<{ name: string; url: string; enabled: boolean }>;
+  mcpTools: Array<{ name: string; url: string; enabled: boolean; type?: string; headers?: Record<string, string> }>;
   webSearchEnabled: boolean;
   webSearchApiKey?: string;
   webSearchEngine?: string;

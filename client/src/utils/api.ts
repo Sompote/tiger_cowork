@@ -155,6 +155,7 @@ export const api = {
   getSettings: () => request("/settings"),
   saveSettings: (data: any) => request("/settings", { method: "PUT", body: JSON.stringify(data) }),
   testConnection: (data: any) => request("/settings/test-connection", { method: "POST", body: JSON.stringify(data) }),
+  getClaudeCodeOAuth: () => request("/settings/claude-code-oauth"),
 
   // Tools
   webSearch: (query: string) => request("/tools/web-search", { method: "POST", body: JSON.stringify({ query }) }),
@@ -167,7 +168,7 @@ export const api = {
 
   // MCP
   mcpStatus: () => request("/settings/mcp/status"),
-  mcpConnect: (name: string, url: string) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url }) }),
+  mcpConnect: (name: string, url: string, type?: string, headers?: Record<string, string>) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url, type, headers }) }),
   mcpDisconnect: (name: string) => request("/settings/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }),
   mcpReconnectAll: () => request("/settings/mcp/reconnect-all", { method: "POST" }),
 

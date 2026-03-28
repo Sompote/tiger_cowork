@@ -432,6 +432,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     const msg = input.trim();
     const userMessage: Message = { role: "user", content: msg, timestamp: new Date().toISOString() };
     setInput("");
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     if (!activeSession) {
       const title = `[${project.name}] ${msg.slice(0, 40)}`;
@@ -554,7 +555,12 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
                 className="chat-input"
                 placeholder={`Message ${project.name}...`}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  const el = e.target;
+                  el.style.height = "auto";
+                  el.style.height = Math.min(el.scrollHeight, 200) + "px";
+                }}
                 onKeyDown={handleKeyDown}
                 rows={1}
                 disabled={isLoading}

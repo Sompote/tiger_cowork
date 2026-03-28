@@ -1301,6 +1301,9 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     subPrompt += `\n\nYour agent ID is "${agentId}". You have no inter-agent communication protocols configured.`;
   }
 
+  // Error recovery instructions for all sub-agents
+  subPrompt += `\n\nERROR RECOVERY: If a tool call fails (Python error, missing package, file not found), do NOT give up. Analyze the error, fix the issue (install packages, correct paths, fix syntax), and retry. If the same approach fails twice, try a different method. Always complete the task.`;
+
   // Set agent context so protocol tools know who we are — preserve project folder
   const prevAgentId = _currentAgentId;
   const prevProjectFolder = _currentProjectWorkingFolder;
@@ -1623,6 +1626,12 @@ async function realtimeAgentLoop(
   systemPrompt += `\nYou receive tasks automatically. Complete each task using your tools — your result is sent back automatically when you finish.`;
   systemPrompt += `\nIMPORTANT: Do NOT use proto_tcp_send or proto_bus_publish to assign tasks to other agents. If you need to delegate, use send_task (if available). Protocol tools are only for exchanging data/status, NOT for task assignment.`;
   systemPrompt += `\nYour agent ID is "${agentId}".`;
+  systemPrompt += `\n\nERROR RECOVERY: If a tool call fails (e.g. Python error, missing package, file not found), you MUST NOT give up. Instead:`;
+  systemPrompt += `\n1. Analyze the error message carefully`;
+  systemPrompt += `\n2. Fix the issue (install missing packages, correct file paths, fix syntax)`;
+  systemPrompt += `\n3. Try again with a corrected approach`;
+  systemPrompt += `\n4. If the same approach fails twice, try a completely different method`;
+  systemPrompt += `\nNever stop working due to a tool error — always find a way to complete the task.`;
 
   // Protocol instructions
   const agentProtoTools = getProtocolToolsForAgent(agentDef, systemConfig.connections, systemConfig);
@@ -1812,8 +1821,26 @@ async function realtimeAgentLoop(
       }
       console.error(`[Realtime:${agentDef.name}] Error:`, err.message);
       handle.status = "error";
-      // Keep the agent alive — publish error and continue
-      busPublish(sessionId, agentId, `error:${agentId}`, { error: err.message });
+
+      // Notify client about the error and recovery
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId,
+          status: "realtime_agent_tool",
+          agentId,
+          label: agentDef.name,
+          tool: `error_recovery`,
+        });
+      }
+
+      // Publish error result to bus so orchestrator gets a response (not stuck waiting)
+      busPublish(sessionId, agentId, `result:${agentId}`, {
+        result: `Error occurred: ${err.message}. Agent is recovering and ready for new tasks.`,
+      });
+
+      // Brief backoff before returning to idle
+      await new Promise(r => setTimeout(r, 2000));
+      console.log(`[Realtime:${agentDef.name}] Recovered from error, returning to idle`);
     }
   }
 

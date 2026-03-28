@@ -257,15 +257,24 @@ async function compressOlderMessages(
     console.log(`[Compression] Summary generated: ${summary.length} chars (compressed from ${summaryParts.join("\n").length} chars)`);
 
     // Rebuild: system messages + compressed summary + recent messages
-    const result: ChatMessage[] = [
+    // Ensure a user message exists after system messages — some APIs (zAi/GLM) reject system→assistant
+    const compressed: ChatMessage[] = [
       ...allMessages.slice(0, systemEnd),
       {
         role: "system",
         content: `[COMPRESSED CONTEXT — ${toCompress.length} earlier messages, ${toolCallCount} tool calls]\n${summary}`,
       },
-      ...toKeep,
     ];
-    return result;
+    if (toKeep.length === 0 || toKeep[0].role !== "user") {
+      // Extract the original user objective from compressed messages
+      const firstUserMsg = toCompress.find((m) => m.role === "user");
+      compressed.push({
+        role: "user",
+        content: firstUserMsg ? (typeof firstUserMsg.content === "string" ? firstUserMsg.content : "Continue with the task.") : "Continue with the task.",
+      });
+    }
+    compressed.push(...toKeep);
+    return compressed;
   } catch (err: any) {
     console.error(`[Compression] Failed: ${err.message}. Falling back to naive trim.`);
     return allMessages;
@@ -368,44 +377,271 @@ function sanitizeToolCallContent(content: string): string {
 
 async function getApiConfig() {
   const settings = await getSettings();
+  const provider = settings.aiProvider || "openrouter";
   const apiKey = settings.tigerBotApiKey;
   const model = settings.tigerBotModel || "TigerBot-70B-Chat";
   const rawUrl = settings.tigerBotApiUrl || "https://api.tigerbot.com/bot-chat/openai/v1/chat/completions";
-  const apiUrl = rawUrl.endsWith("/chat/completions") ? rawUrl : rawUrl.replace(/\/$/, "") + "/chat/completions";
-  return { apiKey, model, apiUrl };
+  // Anthropic uses /v1/messages endpoint, not /chat/completions
+  const isAnthropic = provider === "anthropic_claude_code" || rawUrl.includes("api.anthropic.com");
+  const apiUrl = isAnthropic
+    ? rawUrl.replace(/\/$/, "").replace(/\/messages$/, "") + "/messages"
+    : rawUrl.endsWith("/chat/completions") ? rawUrl : rawUrl.replace(/\/$/, "") + "/chat/completions";
+  // OAuth tokens (sk-ant-oat01-) use Bearer auth; API keys (sk-ant-api) use x-api-key
+  const isOAuthToken = isAnthropic && apiKey?.startsWith("sk-ant-oat01-");
+  return { apiKey, model, apiUrl, isAnthropic, isOAuthToken };
 }
 
 // Single LLM call (no tool loop)
-async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string; signal?: AbortSignal } = {}): Promise<any> {
-  const { apiKey, model, apiUrl } = await getApiConfig();
-  if (!apiKey) throw new Error("API key not configured");
-
-  const settings = await getSettings();
-  const body: any = {
-    model: options.model || model,
-    messages,
-    temperature: settings.agentTemperature ?? 0.7,
-    max_tokens: 81920,
-  };
-  if (options.tools && options.tools.length) {
-    body.tools = options.tools;
-    body.tool_choice = "auto";
+/**
+ * Sanitize messages before sending to LLM API.
+ * Ensures tool call / tool result messages are properly paired —
+ * some APIs (e.g. zAi/GLM) reject orphaned tool messages.
+ */
+function sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
+  // Collect all valid tool_call IDs from assistant messages
+  const validToolCallIds = new Set<string>();
+  for (const msg of messages) {
+    if ((msg as any).tool_calls) {
+      for (const tc of (msg as any).tool_calls) {
+        if (tc.id) validToolCallIds.add(tc.id);
+      }
+    }
   }
 
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: options.signal,
+  // Collect all tool result IDs
+  const toolResultIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "tool" && (msg as any).tool_call_id) {
+      toolResultIds.add((msg as any).tool_call_id);
+    }
+  }
+
+  const filtered = messages.filter((msg) => {
+    // Remove tool results that reference non-existent tool calls
+    if (msg.role === "tool" && (msg as any).tool_call_id) {
+      return validToolCallIds.has((msg as any).tool_call_id);
+    }
+    // Remove assistant messages with tool_calls that have no matching tool results
+    // (only if ALL their tool_call IDs are orphaned — partial is ok)
+    if (msg.role === "assistant" && (msg as any).tool_calls?.length) {
+      const tcIds = (msg as any).tool_calls.map((tc: any) => tc.id).filter(Boolean);
+      const hasAnyResult = tcIds.some((id: string) => toolResultIds.has(id));
+      if (tcIds.length > 0 && !hasAnyResult) {
+        // Convert to plain assistant message — keep content, drop tool_calls
+        delete (msg as any).tool_calls;
+        if (!msg.content) msg.content = "";
+      }
+      // Ensure every tool_call has type: "function" — some APIs omit it in responses
+      // but reject it if missing when sent back
+      if ((msg as any).tool_calls) {
+        for (const tc of (msg as any).tool_calls) {
+          if (!tc.type) tc.type = "function";
+        }
+      }
+    }
+    // Ensure content is never null
+    if (msg.content === null || msg.content === undefined) {
+      msg.content = "";
+    }
+    return true;
   });
+
+  // Ensure a user message exists before the first assistant message
+  // Some APIs (zAi/GLM) reject system→assistant without a user message in between
+  let firstNonSystem = filtered.findIndex((m) => m.role !== "system");
+  if (firstNonSystem >= 0 && filtered[firstNonSystem].role !== "user") {
+    filtered.splice(firstNonSystem, 0, { role: "user", content: "Continue with the task." });
+  }
+
+  return filtered;
+}
+
+// Convert OpenAI-format messages to Anthropic format
+function toAnthropicMessages(messages: ChatMessage[]): { system: string; messages: any[] } {
+  let system = "";
+  const msgs: any[] = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      system += (system ? "\n\n" : "") + (typeof m.content === "string" ? m.content : JSON.stringify(m.content));
+      continue;
+    }
+    if (m.role === "assistant") {
+      const content: any[] = [];
+      if (m.content) content.push({ type: "text", text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) });
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) {
+          let input: any = {};
+          try { input = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments; } catch { input = { raw: tc.function.arguments }; }
+          content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
+        }
+      }
+      msgs.push({ role: "assistant", content: content.length ? content : [{ type: "text", text: "" }] });
+      continue;
+    }
+    if (m.role === "tool") {
+      // Anthropic uses tool_result blocks inside a user message
+      const last = msgs[msgs.length - 1];
+      const resultBlock = { type: "tool_result", tool_use_id: m.tool_call_id, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content) };
+      if (last?.role === "user") {
+        last.content = Array.isArray(last.content) ? [...last.content, resultBlock] : [resultBlock];
+      } else {
+        msgs.push({ role: "user", content: [resultBlock] });
+      }
+      continue;
+    }
+    // user message
+    if (typeof m.content === "string") {
+      msgs.push({ role: "user", content: m.content });
+    } else if (Array.isArray(m.content)) {
+      const parts = m.content.map((p: any) => {
+        if (p.type === "image_url") {
+          const url = p.image_url?.url || "";
+          if (url.startsWith("data:")) {
+            const match = url.match(/^data:(image\/\w+);base64,(.+)/);
+            if (match) return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } };
+          }
+          return { type: "text", text: `[Image: ${url}]` };
+        }
+        return { type: "text", text: p.text || "" };
+      });
+      msgs.push({ role: "user", content: parts });
+    } else {
+      msgs.push({ role: "user", content: String(m.content) });
+    }
+  }
+  // Anthropic requires alternating user/assistant; merge consecutive same-role
+  const merged: any[] = [];
+  for (const msg of msgs) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === msg.role) {
+      const lastContent = Array.isArray(last.content) ? last.content : [{ type: "text", text: last.content }];
+      const newContent = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
+      last.content = [...lastContent, ...newContent];
+    } else {
+      merged.push(msg);
+    }
+  }
+  return { system, messages: merged };
+}
+
+// Convert OpenAI tool definitions to Anthropic format
+function toAnthropicTools(tools: any[]): any[] {
+  return tools.map(t => ({
+    name: t.function.name,
+    description: t.function.description || "",
+    input_schema: t.function.parameters || { type: "object", properties: {} },
+  }));
+}
+
+// Convert Anthropic response to OpenAI-compatible format
+function fromAnthropicResponse(data: any): any {
+  const content = data.content || [];
+  const textParts = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+  const toolUses = content.filter((b: any) => b.type === "tool_use");
+  const toolCalls = toolUses.map((tu: any) => ({
+    id: tu.id,
+    type: "function",
+    function: { name: tu.name, arguments: JSON.stringify(tu.input || {}) },
+  }));
+  const finishReason = data.stop_reason === "tool_use" ? "tool_calls" : data.stop_reason === "end_turn" ? "stop" : data.stop_reason || "stop";
+  return {
+    choices: [{
+      index: 0,
+      message: { role: "assistant", content: textParts, tool_calls: toolCalls.length ? toolCalls : undefined },
+      finish_reason: finishReason,
+    }],
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
+    } : undefined,
+  };
+}
+
+async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string; signal?: AbortSignal } = {}): Promise<any> {
+  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken } = await getApiConfig();
+  if (!apiKey) throw new Error("API key not configured");
+
+  const sanitized = sanitizeMessages(messages);
+  const settings = await getSettings();
+
+  let response: Response;
+  let body: any;
+
+  // Determine max_tokens: use setting if provided, else provider-appropriate default
+  const maxTokens = settings.agentMaxTokens
+    ?? (apiUrl.includes("minimax.io") ? 16384 : 81920);
+
+  if (isAnthropic) {
+    // Anthropic Messages API format
+    const { system, messages: anthropicMsgs } = toAnthropicMessages(sanitized);
+    body = {
+      model: options.model || model,
+      messages: anthropicMsgs,
+      system: system || undefined,
+      temperature: settings.agentTemperature ?? 0.7,
+      max_tokens: maxTokens,
+    };
+    if (options.tools?.length) {
+      body.tools = toAnthropicTools(options.tools);
+      body.tool_choice = { type: "auto" };
+    }
+    // OAuth tokens use Bearer auth; API keys use x-api-key
+    const authHeaders: Record<string, string> = isOAuthToken
+      ? { Authorization: `Bearer ${apiKey}` }
+      : { "x-api-key": apiKey };
+    response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+  } else {
+    // OpenAI-compatible format
+    body = {
+      model: options.model || model,
+      messages: sanitized,
+      temperature: settings.agentTemperature ?? 0.7,
+      max_tokens: maxTokens,
+    };
+    if (options.tools && options.tools.length) {
+      body.tools = options.tools;
+      body.tool_choice = "auto";
+    }
+    response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+  }
 
   if (!response.ok) {
     const error = await response.text();
-    const bodySize = JSON.stringify(body).length;
-    console.error(`[llmCall] API Error ${response.status}. Request body size: ${(bodySize / 1024 / 1024).toFixed(2)}MB, messages: ${messages.length}`);
+    const bodyStr = JSON.stringify(body);
+    const bodySize = bodyStr.length;
+    console.error(`[llmCall] API Error ${response.status}. Request body size: ${(bodySize / 1024 / 1024).toFixed(2)}MB, messages: ${sanitized.length}`);
+    // Dump message roles/structure for debugging
+    const msgDump = sanitized.map((m: any, i: number) => {
+      const tc = m.tool_calls ? ` tool_calls:[${m.tool_calls.map((t: any) => t.id).join(",")}]` : "";
+      const tid = m.tool_call_id ? ` tool_call_id:${m.tool_call_id}` : "";
+      const contentType = m.content === null ? "null" : m.content === undefined ? "undefined" : typeof m.content === "string" ? `str(${m.content.length})` : `array(${m.content.length})`;
+      return `  [${i}] role=${m.role} content=${contentType}${tc}${tid}`;
+    }).join("\n");
+    console.error(`[llmCall] Messages structure:\n${msgDump}`);
+    // Write full request body to debug file for inspection
+    try {
+      const fs = await import("fs/promises");
+      await fs.writeFile("/root/cowork/data/debug_last_request.json", bodyStr);
+      console.error(`[llmCall] Full request body written to /root/cowork/data/debug_last_request.json`);
+    } catch {}
     throw new Error(`API Error (${response.status}): ${error.slice(0, 500)}`);
   }
 
@@ -418,6 +654,11 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
     console.error(`[llmCall] JSON parse failed. Response (first 1000): ${responseText.slice(0, 1000)}`);
     console.error(`[llmCall] Request body size: ${(bodySize / 1024 / 1024).toFixed(2)}MB, messages: ${messages.length}`);
     throw new Error(`API returned invalid JSON (body size: ${(bodySize / 1024 / 1024).toFixed(1)}MB): ${parseErr.message}`);
+  }
+
+  // Convert Anthropic response to OpenAI-compatible format
+  if (isAnthropic && json.content && !json.choices) {
+    json = fromAnthropicResponse(json);
   }
 
   if (!json.choices?.length) {
@@ -437,7 +678,8 @@ export async function callTigerBotWithTools(
   signal?: AbortSignal,
   toolsOverride?: any[],
   modelOverride?: string,
-  sessionId?: string
+  sessionId?: string,
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<TigerBotResponse> {
   const { apiKey } = await getApiConfig();
   if (!apiKey) {
@@ -485,6 +727,9 @@ export async function callTigerBotWithTools(
 
   let usesSkill = false;
   let lastUsage: any = undefined;
+  let errorRecoveryAttempts = 0;
+  const maxErrorRecoveries = settings.agentMaxErrorRecoveries ?? 2; // allow up to 2 self-recovery attempts
+  let noChoicesRetries = 0; // track retries for API returning no choices
 
   if (modelOverride) {
     console.log(`[ToolLoop] Using model override: ${modelOverride}`);
@@ -527,20 +772,81 @@ export async function callTigerBotWithTools(
     }
 
     let data: any;
-    try {
-      data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        return { content: earlyContent || "Task was cancelled.", toolResults };
+    const llmMaxRetries = 3;
+    for (let llmRetry = 0; llmRetry < llmMaxRetries; llmRetry++) {
+      try {
+        data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
+        break; // success
+      } catch (err: any) {
+        if (err.name === "AbortError") {
+          return { content: earlyContent || "Task was cancelled.", toolResults };
+        }
+        if (llmRetry < llmMaxRetries - 1) {
+          const delay = (llmRetry + 1) * 2000; // 2s, 4s backoff
+          console.log(`[ToolLoop] LLM call failed (attempt ${llmRetry + 1}/${llmMaxRetries}): ${err.message}. Retrying in ${delay}ms...`);
+          onRetry?.(llmRetry + 1, llmMaxRetries, err.message);
+          await new Promise(r => setTimeout(r, delay));
+        } else {
+          console.error(`[ToolLoop] LLM call failed after ${llmMaxRetries} attempts: ${err.message}`);
+          return { content: `Connection error after ${llmMaxRetries} retries: ${err.message}`, toolResults };
+        }
       }
-      return { content: `Connection error: ${err.message}`, toolResults };
     }
 
     const choice = data.choices?.[0];
     if (!choice) {
-      console.log(`[ToolLoop] No response from API at round ${round}. Full API response:`, JSON.stringify(data).slice(0, 1000));
-      break;
+      const apiError = data.error?.message || JSON.stringify(data).slice(0, 500);
+      console.log(`[ToolLoop] No response from API at round ${round}. Error: ${apiError}`);
+
+      // If API returned a tool_id error, try fixing the messages and retry
+      if (apiError.includes("tool_id") || apiError.includes("tool result")) {
+        console.log(`[ToolLoop] Tool ID mismatch — removing orphaned tool results and retrying...`);
+        // Remove orphaned tool result messages that reference non-existent tool calls
+        const validToolCallIds = new Set<string>();
+        for (const msg of allMessages) {
+          if ((msg as any).tool_calls) {
+            for (const tc of (msg as any).tool_calls) {
+              validToolCallIds.add(tc.id);
+            }
+          }
+        }
+        const beforeLen = allMessages.length;
+        const filtered = allMessages.filter((msg) => {
+          if (msg.role === "tool" && (msg as any).tool_call_id) {
+            return validToolCallIds.has((msg as any).tool_call_id);
+          }
+          return true;
+        });
+        if (filtered.length < beforeLen) {
+          allMessages.length = 0;
+          allMessages.push(...(filtered as ChatMessage[]));
+          console.log(`[ToolLoop] Removed ${beforeLen - filtered.length} orphaned tool results. Retrying...`);
+          continue; // retry this round
+        }
+      }
+
+      // If content is empty error, try trimming and retrying
+      if (apiError.includes("content is empty") && allMessages.length > 2) {
+        console.log(`[ToolLoop] Empty content error — trimming context and retrying...`);
+        const trimmed = trimConversationContext(allMessages) as ChatMessage[];
+        allMessages.length = 0;
+        allMessages.push(...trimmed);
+        continue; // retry this round
+      }
+
+      noChoicesRetries++;
+      if (noChoicesRetries < 3) {
+        console.log(`[ToolLoop] Retrying after no-choices error (${noChoicesRetries}/3)...`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue; // retry this round
+      }
+
+      // Give up after 3 retries — return what we have
+      console.error(`[ToolLoop] API returned no choices after 3 retries. Stopping.`);
+      if (earlyContent) break;
+      return { content: `The AI model returned an error: ${apiError}. Please try again.`, toolResults };
     }
+    noChoicesRetries = 0; // reset on success
 
     const message = choice.message;
     const toolCalls = message.tool_calls || [];
@@ -548,7 +854,10 @@ export async function callTigerBotWithTools(
 
     // Add assistant message to context — truncate large tool_call args to prevent context overflow
     // IMPORTANT: Must produce valid JSON, otherwise the API rejects with "EOF while parsing a string"
+    // Also ensure every tool_call has type: "function" — some APIs (e.g. zAi/GLM) omit it in responses
+    // but reject it if missing when sent back.
     const truncatedToolCalls = toolCalls.length ? toolCalls.map((tc: any) => {
+      if (!tc.type) tc.type = "function";
       const args = tc.function?.arguments || "";
       const argsStr = typeof args === "string" ? args : JSON.stringify(args);
       if (argsStr.length > 4000) {
@@ -708,8 +1017,18 @@ export async function callTigerBotWithTools(
       }
       const maxConsecutiveErrors = settings.agentMaxConsecutiveErrors || 3;
       if (consecutiveErrors >= maxConsecutiveErrors) {
-        console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors. Breaking.`);
-        break;
+        if (errorRecoveryAttempts < maxErrorRecoveries) {
+          errorRecoveryAttempts++;
+          console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors. Attempting recovery (${errorRecoveryAttempts}/${maxErrorRecoveries})...`);
+          allMessages.push({
+            role: "user" as const,
+            content: `⚠️ SYSTEM: You have had ${maxConsecutiveErrors} consecutive tool errors. Do NOT give up. Analyze the errors above carefully and try a DIFFERENT approach:\n- If a Python package is missing, install it first (pip install)\n- If a file path is wrong, list files to find the correct path\n- If syntax is wrong, fix the syntax\n- If the approach is fundamentally broken, try an alternative method\n- Simplify your code if it's too complex\nReset and try again with a corrected approach.`,
+          });
+          consecutiveErrors = 0; // Reset to give the LLM another chance
+        } else {
+          console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors after ${maxErrorRecoveries} recovery attempts. Breaking.`);
+          break;
+        }
       }
       if (totalToolCalls >= maxToolCalls) break;
     }
@@ -733,7 +1052,7 @@ export async function callTigerBotWithTools(
       console.log(`[ToolLoop] All ${subagentCalls.length} sub-agent(s) completed in parallel.`);
     }
 
-    if (totalToolCalls >= maxToolCalls || consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3)) break;
+    if (totalToolCalls >= maxToolCalls || (consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3) && errorRecoveryAttempts >= maxErrorRecoveries)) break;
   }
 
   console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls.`);
@@ -1090,11 +1409,11 @@ export async function streamTigerBot(
   onChunk: (text: string) => void,
   onDone: () => void
 ): Promise<void> {
-  const { apiKey, model, apiUrl } = await getApiConfig();
+  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken } = await getApiConfig();
   const settings = await getSettings();
 
   if (!apiKey) {
-    onChunk("TigerBot API key not configured. Go to Settings to add your API key.");
+    onChunk("API key not configured. Go to Settings to add your API key.");
     onDone();
     return;
   }
@@ -1102,20 +1421,44 @@ export async function streamTigerBot(
   const allMessages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...messages];
 
   try {
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: allMessages,
-        temperature: settings.agentTemperature ?? 0.7,
-        max_tokens: 40960,
-        stream: true,
-      }),
-    });
+    let response: Response;
+    if (isAnthropic) {
+      const authHeaders: Record<string, string> = isOAuthToken
+        ? { Authorization: `Bearer ${apiKey}` }
+        : { "x-api-key": apiKey };
+      const { system, messages: anthropicMsgs } = toAnthropicMessages(allMessages);
+      response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          messages: anthropicMsgs,
+          system: system || undefined,
+          temperature: settings.agentTemperature ?? 0.7,
+          max_tokens: 40960,
+          stream: true,
+        }),
+      });
+    } else {
+      response = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: allMessages,
+          temperature: settings.agentTemperature ?? 0.7,
+          max_tokens: 40960,
+          stream: true,
+        }),
+      });
+    }
 
     if (!response.ok) {
       onChunk(`API Error (${response.status}): ${await response.text()}`);
@@ -1141,7 +1484,14 @@ export async function streamTigerBot(
         if (trimmed.startsWith("data: ")) {
           try {
             const json = JSON.parse(trimmed.slice(6));
-            const delta = json.choices?.[0]?.delta?.content;
+            // Handle both Anthropic and OpenAI streaming formats
+            let delta: string | undefined;
+            if (isAnthropic) {
+              // Anthropic streaming: event types content_block_delta with delta.text
+              delta = json.delta?.text;
+            } else {
+              delta = json.choices?.[0]?.delta?.content;
+            }
             if (delta) {
               fullContent += delta;
               onChunk(delta);

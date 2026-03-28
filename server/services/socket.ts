@@ -269,7 +269,9 @@ export function setupSocket(io: Server): void {
       } else if (data.status === "realtime_agent_working") {
         progressText = `> **🔄 ${data.label}** working — _${(data.task || "").slice(0, 120)}_\n`;
       } else if (data.status === "realtime_agent_tool") {
-        if (data.tool?.startsWith("proto_")) {
+        if (data.tool === "error_recovery") {
+          progressText = `> **🔄 ${data.label}** encountered an error — recovering and retrying...\n`;
+        } else if (data.tool?.startsWith("proto_")) {
           const protoName = data.tool.replace("proto_", "").split("_")[0].toUpperCase();
           progressText = `> <span class="proto-tag proto-${protoName.toLowerCase()}">${protoName}</span> **${data.label}** → \`${data.tool}\`\n`;
         } else if (data.tool === "send_task") {
@@ -666,6 +668,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           realtimeTools,
           undefined, // modelOverride
           sessionId, // for checkpoint & resume
+          // onRetry — broadcast retry status to client
+          (attempt, maxRetries, error) => {
+            const shortErr = error.length > 120 ? error.slice(0, 120) + "..." : error;
+            broadcastStatus({ sessionId, status: "retrying", attempt, maxRetries, error: shortErr });
+            activeTask.status = `Retrying (${attempt}/${maxRetries})...`;
+            activeTask.lastUpdate = new Date().toISOString();
+          },
         );
 
         // Clear streaming progress and show final AI response
@@ -727,6 +736,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        // Broadcast "done" so client clears active dot for this session
+        broadcastStatus({ sessionId, status: "done" });
         // Shutdown realtime session when task completes — unless human node is present
         // (human mode keeps the session alive for multi-turn interaction via /agent commands)
         const rtSessionCheck = getRealtimeSession(sessionId);
@@ -1096,6 +1107,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           realtimeTools,
           undefined, // modelOverride
           sessionId, // for checkpoint & resume
+          // onRetry — broadcast retry status to client
+          (attempt, maxRetries, error) => {
+            const shortErr = error.length > 120 ? error.slice(0, 120) + "..." : error;
+            broadcastStatus({ sessionId, status: "retrying", attempt, maxRetries, error: shortErr });
+            activeTask.status = `Retrying (${attempt}/${maxRetries})...`;
+            activeTask.lastUpdate = new Date().toISOString();
+          },
         );
 
         // Clear streaming progress and show final AI response
@@ -1152,6 +1170,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        // Broadcast "done" so client clears active dot for this session
+        broadcastStatus({ sessionId, status: "done" });
         // Keep session alive if human node is present
         const rtSessionCheck2 = getRealtimeSession(sessionId);
         const hasHumanNode2 = rtSessionCheck2?.systemConfig?.agents?.some((a: any) => a.role === "human");

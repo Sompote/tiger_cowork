@@ -37,5 +37,22 @@
     ],
     "createdAt": "2026-03-16T10:46:13.040Z",
     "updatedAt": "2026-03-16T12:34:42.232Z"
+  },
+  {
+    "id": "6a4f28db-6d17-467f-ad10-04766668afe1",
+    "name": "hypoplastic",
+    "description": "",
+    "workingFolder": "hypoplastic",
+    "memory": "",
+    "skills": [
+      "b336a1f9-e173-4b60-8ef1-4d11eebc8b26",
+      "19c484fd-fb78-47fe-b849-bd3d1276a7ab",
+      "3cdc16e7-b9f6-4ecc-a45a-74d19a27d7b6",
+      "95067b76-80ec-4389-9874-ac607a4a8d0e",
+      "8495d368-4261-4d8d-b924-26a45fd29896",
+      "36481539-981e-4207-b7eb-34550ce6ac0d"
+    ],
+    "createdAt": "2026-03-27T23:22:38.570Z",
+    "updatedAt": "2026-03-27T23:41:14.778Z"
   }
 ]

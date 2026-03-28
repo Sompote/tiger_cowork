@@ -49,17 +49,36 @@ export default function Layout({ children }: { children: ReactNode }) {
   const [swarmEnabled, setSwarmEnabled] = useState(false);
   const [agentMode, setAgentMode] = useState("");
   const [configFileName, setConfigFileName] = useState("");
+  const [agentGroupName, setAgentGroupName] = useState("");
+  const [agentConfigs, setAgentConfigs] = useState<any[]>([]);
+  const [showAgentDropdown, setShowAgentDropdown] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Check if sub-agent (swarm) mode is enabled
+  // Check if sub-agent (swarm) mode is enabled & load agent configs
   useEffect(() => {
     api.getSettings().then((s: any) => {
       setSwarmEnabled(!!s.subAgentEnabled);
       setAgentMode(s.subAgentMode || "auto");
-      setConfigFileName(s.subAgentConfigFile ? s.subAgentConfigFile.replace(/\.ya?ml$/, "") : "");
+      setConfigFileName(s.subAgentConfigFile || "");
+      // Load agent configs to resolve name and allow switching
+      if (s.subAgentEnabled) {
+        api.getAgentConfigs().then((configs: any[]) => {
+          setAgentConfigs(configs);
+          const current = configs.find((c: any) => c.filename === s.subAgentConfigFile);
+          setAgentGroupName(current?.name || (s.subAgentConfigFile ? s.subAgentConfigFile.replace(/\.ya?ml$/, "") : ""));
+        }).catch(() => {});
+      }
     }).catch(() => {});
   }, [location.pathname]);
+
+  const switchAgentGroup = async (cfg: any) => {
+    setShowAgentDropdown(false);
+    setAgentGroupName(cfg.name);
+    setConfigFileName(cfg.filename);
+    const settings = await api.getSettings();
+    await api.saveSettings({ ...settings, subAgentConfigFile: cfg.filename });
+  };
 
   // Close sidebar on mobile when route changes
   useEffect(() => {
@@ -82,7 +101,38 @@ export default function Layout({ children }: { children: ReactNode }) {
           <span className="logo-badge">AI</span>
           {swarmEnabled && agentMode === "realtime" && <span className="logo-realtime-tag">Realtime Agent</span>}
           {swarmEnabled && agentMode !== "realtime" && <span className="logo-swarm-tag">Swarm</span>}
-          {swarmEnabled && configFileName && <span className="logo-config-tag" title={configFileName}>{configFileName}</span>}
+          {swarmEnabled && agentGroupName && (
+            <div className="agent-group-selector">
+              <span
+                className="logo-config-tag clickable"
+                title={`Agent: ${agentGroupName} (${configFileName}) — click to change`}
+                onClick={() => setShowAgentDropdown(!showAgentDropdown)}
+              >
+                {agentGroupName}
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" style={{ marginLeft: 4 }}>
+                  <path d="M7 10l5 5 5-5z" />
+                </svg>
+              </span>
+              {showAgentDropdown && (
+                <>
+                  <div className="agent-dropdown-backdrop" onClick={() => setShowAgentDropdown(false)} />
+                  <div className="agent-dropdown">
+                    <div className="agent-dropdown-title">Switch Agent Group</div>
+                    {agentConfigs.map((cfg: any) => (
+                      <div
+                        key={cfg.filename}
+                        className={`agent-dropdown-item ${cfg.filename === configFileName ? "active" : ""}`}
+                        onClick={() => switchAgentGroup(cfg)}
+                      >
+                        <span className="agent-dropdown-name">{cfg.name}</span>
+                        <span className="agent-dropdown-meta">{cfg.agentCount} agents</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
         <div className="header-spacer" />
       </header>

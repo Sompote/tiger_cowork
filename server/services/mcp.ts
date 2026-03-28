@@ -27,29 +27,43 @@ const connections = new Map<string, McpConnection>();
 /**
  * Connect to a single MCP server and discover its tools.
  */
-async function connectToServer(config: { name: string; url: string; enabled: boolean }): Promise<McpConnection> {
+async function connectToServer(config: { name: string; url: string; enabled: boolean; type?: string; headers?: Record<string, string>; command?: string; args?: string[] }): Promise<McpConnection> {
   const client = new Client({ name: "cowork", version: "1.0.0" });
 
   let transport: any;
-  const url = config.url.trim();
+  const url = config.url?.trim() || "";
+  const serverType = config.type || "auto";
 
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    // Try StreamableHTTP first, fall back to SSE
-    try {
-      transport = new StreamableHTTPClientTransport(new URL(url));
-      await client.connect(transport);
-    } catch {
-      // Fall back to SSE
-      transport = new SSEClientTransport(new URL(url));
-      await client.connect(transport);
-    }
-  } else {
-    // Stdio: parse "command arg1 arg2 ..."
-    const parts = url.split(/\s+/);
+  // Build requestInit with custom headers if provided
+  const requestInit: RequestInit | undefined = config.headers && Object.keys(config.headers).length > 0
+    ? { headers: config.headers }
+    : undefined;
+
+  if (serverType === "stdio" || (!url.startsWith("http://") && !url.startsWith("https://") && serverType === "auto")) {
+    // Stdio: use command/args or parse URL as "command arg1 arg2 ..."
+    const cmd = config.command || url;
+    const parts = cmd.split(/\s+/);
     const command = parts[0];
-    const args = parts.slice(1);
+    const args = config.args || parts.slice(1);
     transport = new StdioClientTransport({ command, args });
     await client.connect(transport);
+  } else if (serverType === "sse") {
+    // Force SSE transport
+    transport = new SSEClientTransport(new URL(url), { requestInit });
+    await client.connect(transport);
+  } else if (serverType === "http") {
+    // Force StreamableHTTP transport
+    transport = new StreamableHTTPClientTransport(new URL(url), { requestInit });
+    await client.connect(transport);
+  } else {
+    // Auto: Try StreamableHTTP first, fall back to SSE
+    try {
+      transport = new StreamableHTTPClientTransport(new URL(url), { requestInit });
+      await client.connect(transport);
+    } catch {
+      transport = new SSEClientTransport(new URL(url), { requestInit });
+      await client.connect(transport);
+    }
   }
 
   // Discover tools
@@ -112,7 +126,7 @@ export async function disconnectAll(): Promise<void> {
 /**
  * Connect (or reconnect) a single MCP server by name.
  */
-export async function connectServer(config: { name: string; url: string; enabled: boolean }): Promise<{ ok: boolean; tools: number; error?: string }> {
+export async function connectServer(config: { name: string; url: string; enabled: boolean; type?: string; headers?: Record<string, string> }): Promise<{ ok: boolean; tools: number; error?: string }> {
   // Disconnect existing connection for this name
   const existing = connections.get(config.name);
   if (existing) {

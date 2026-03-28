@@ -22,10 +22,11 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<any>({});
   const [saved, setSaved] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [newTool, setNewTool] = useState({ name: "", url: "" });
   const [mcpStatuses, setMcpStatuses] = useState<McpStatus[]>([]);
   const [mcpConnecting, setMcpConnecting] = useState<string | null>(null);
-  const [mcpMessage, setMcpMessage] = useState<{ name: string; text: string; ok: boolean } | null>(null);
+  const [mcpJson, setMcpJson] = useState("");
+  const [mcpJsonError, setMcpJsonError] = useState("");
+  const [mcpJsonDirty, setMcpJsonDirty] = useState(false);
   const [fileTokens, setFileTokens] = useState<FileToken[]>([]);
   const [newTokenName, setNewTokenName] = useState("");
   const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
@@ -35,6 +36,11 @@ export default function SettingsPage() {
   const [agentEditorInitYaml, setAgentEditorInitYaml] = useState<string | undefined>();
   const [agentEditorInitFilename, setAgentEditorInitFilename] = useState<string | undefined>();
   const [uploadError, setUploadError] = useState("");
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [newProviderName, setNewProviderName] = useState("");
+  const [newProviderUrl, setNewProviderUrl] = useState("");
+  const [newProviderModel, setNewProviderModel] = useState("");
+  const [_oauthStatus, _setOauthStatus] = useState<{ message: string; success: boolean } | null>(null); // reserved for future use
   const yamlUploadRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -81,55 +87,82 @@ export default function SettingsPage() {
       apiKey: settings.tigerBotApiKey,
       apiUrl: settings.tigerBotApiUrl,
       model: settings.tigerBotModel,
+      provider: settings.aiProvider,
     });
     setTestResult(result);
   };
 
-  const addTool = () => {
-    if (!newTool.name || !newTool.url) return;
-    const tools = [...(settings.mcpTools || []), { ...newTool, enabled: true }];
-    setSettings({ ...settings, mcpTools: tools });
-    setNewTool({ name: "", url: "" });
-  };
-
-  const removeTool = (idx: number) => {
-    const tools = [...(settings.mcpTools || [])];
-    tools.splice(idx, 1);
-    setSettings({ ...settings, mcpTools: tools });
-  };
-
-  const toggleTool = (idx: number) => {
-    const tools = [...(settings.mcpTools || [])];
-    tools[idx].enabled = !tools[idx].enabled;
-    setSettings({ ...settings, mcpTools: tools });
-  };
-
-  const connectMcp = async (tool: { name: string; url: string }) => {
-    setMcpConnecting(tool.name);
-    setMcpMessage(null);
-    try {
-      const result = await api.mcpConnect(tool.name, tool.url);
-      if (result.ok) {
-        setMcpMessage({ name: tool.name, text: `Connected! ${result.tools} tools discovered`, ok: true });
-      } else {
-        setMcpMessage({ name: tool.name, text: result.error || "Connection failed", ok: false });
-      }
-      api.mcpStatus().then(setMcpStatuses).catch(() => {});
-    } catch (err: any) {
-      setMcpMessage({ name: tool.name, text: err.message, ok: false });
+  // Convert mcpTools array to JSON display format
+  const mcpToolsToJson = (tools: any[]): string => {
+    if (!tools || tools.length === 0) {
+      return JSON.stringify({ mcpServers: {} }, null, 2);
     }
-    setMcpConnecting(null);
+    const servers: Record<string, any> = {};
+    for (const t of tools) {
+      const entry: any = {};
+      if (t.type && t.type !== "auto") entry.type = t.type;
+      if (t.url) entry.url = t.url;
+      if (t.headers && Object.keys(t.headers).length > 0) entry.headers = t.headers;
+      if (t.enabled === false) entry.enabled = false;
+      servers[t.name] = entry;
+    }
+    return JSON.stringify({ mcpServers: servers }, null, 2);
   };
 
-  const disconnectMcp = async (name: string) => {
-    await api.mcpDisconnect(name);
-    setMcpMessage({ name, text: "Disconnected", ok: true });
-    api.mcpStatus().then(setMcpStatuses).catch(() => {});
+  // Convert JSON back to mcpTools array
+  const jsonToMcpTools = (json: string): any[] | null => {
+    try {
+      const parsed = JSON.parse(json);
+      const servers = parsed.mcpServers || parsed;
+      if (typeof servers !== "object" || Array.isArray(servers)) return null;
+      const tools: any[] = [];
+      for (const [name, cfg] of Object.entries(servers)) {
+        const c = cfg as any;
+        tools.push({
+          name,
+          url: c.url || "",
+          enabled: c.enabled !== false,
+          type: c.type || "auto",
+          ...(c.headers && Object.keys(c.headers).length > 0 ? { headers: c.headers } : {}),
+        });
+      }
+      return tools;
+    } catch {
+      return null;
+    }
+  };
+
+  // Sync mcpJson when settings.mcpTools changes externally (initial load)
+  useEffect(() => {
+    if (!mcpJsonDirty && settings.mcpTools !== undefined) {
+      setMcpJson(mcpToolsToJson(settings.mcpTools || []));
+    }
+  }, [settings.mcpTools]);
+
+  const applyMcpJson = () => {
+    const tools = jsonToMcpTools(mcpJson);
+    if (!tools) {
+      setMcpJsonError("Invalid JSON format. Expected: { \"mcpServers\": { \"name\": { \"url\": \"...\", ... } } }");
+      return;
+    }
+    setMcpJsonError("");
+    setMcpJsonDirty(false);
+    setSettings((prev: any) => ({ ...prev, mcpTools: tools }));
   };
 
   const reconnectAll = async () => {
+    // Apply JSON first if dirty
+    if (mcpJsonDirty) {
+      const tools = jsonToMcpTools(mcpJson);
+      if (!tools) {
+        setMcpJsonError("Invalid JSON — fix before connecting");
+        return;
+      }
+      setMcpJsonError("");
+      setMcpJsonDirty(false);
+      settings.mcpTools = tools;
+    }
     setMcpConnecting("__all__");
-    // Save settings first so server has latest config
     await api.saveSettings(settings);
     const result = await api.mcpReconnectAll();
     setMcpStatuses(result.status || []);
@@ -160,10 +193,6 @@ export default function SettingsPage() {
     setTimeout(() => setCopiedTokenId(null), 2000);
   };
 
-  const getMcpStatusFor = (name: string): McpStatus | undefined => {
-    return mcpStatuses.find((s) => s.name === name);
-  };
-
   return (
     <div className="page">
       <div className="page-header">
@@ -175,18 +204,152 @@ export default function SettingsPage() {
 
       <div className="settings-grid">
         <section className="card">
-          <h3>TigerBot API</h3>
+          <h3>AI Provider</h3>
+          <div className="form-group">
+            <label>Provider</label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <select
+                style={{ flex: 1 }}
+                value={settings.aiProvider || "openrouter"}
+                onChange={(e) => {
+                  const newProvider = e.target.value;
+                  const oldProvider = settings.aiProvider || "openrouter";
+                  // Save current provider's settings before switching
+                  const s: any = { ...settings };
+                  s[`provider_${oldProvider}_apiKey`] = settings.tigerBotApiKey || "";
+                  s[`provider_${oldProvider}_apiUrl`] = settings.tigerBotApiUrl || "";
+                  s[`provider_${oldProvider}_model`] = settings.tigerBotModel || "";
+                  // Restore new provider's saved settings or defaults
+                  const builtinDefaults: Record<string, { url: string; model: string }> = {
+                    openrouter: { url: "https://openrouter.ai/api/v1", model: "x-ai/grok-4.20-beta" },
+                    zai: { url: "https://api.z.ai/api/coding/paas/v4", model: "GLM-5.1" },
+                    anthropic_claude_code: { url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514" },
+                  };
+                  // Check custom providers for defaults
+                  const customProviders: Array<{ id: string; name: string; url: string; model: string }> = settings.customProviders || [];
+                  const customMatch = customProviders.find((p: any) => p.id === newProvider);
+                  const d = builtinDefaults[newProvider] || (customMatch ? { url: customMatch.url, model: customMatch.model } : { url: "", model: "" });
+                  s.tigerBotApiKey = s[`provider_${newProvider}_apiKey`] || "";
+                  s.tigerBotApiUrl = s[`provider_${newProvider}_apiUrl`] || d.url;
+                  s.tigerBotModel = s[`provider_${newProvider}_model`] || d.model;
+                  s.aiProvider = newProvider;
+                  setSettings(s);
+                }}
+              >
+                <option value="openrouter">OpenRouter</option>
+                <option value="zai">zAi</option>
+                <option value="anthropic_claude_code">Anthropic (Claude)</option>
+                {(settings.customProviders || []).map((p: any) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <button className="btn btn-secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowAddProvider(true)}>+ Add</button>
+              {/* Show remove button only for custom providers */}
+              {!(["openrouter", "zai", "anthropic_claude_code"].includes(settings.aiProvider || "openrouter")) && (
+                <button className="btn btn-danger" style={{ whiteSpace: "nowrap" }} onClick={() => {
+                  if (!confirm(`Remove provider "${(settings.customProviders || []).find((p: any) => p.id === settings.aiProvider)?.name || settings.aiProvider}"?`)) return;
+                  const customProviders = (settings.customProviders || []).filter((p: any) => p.id !== settings.aiProvider);
+                  // Switch back to openrouter
+                  const s: any = { ...settings, customProviders, aiProvider: "openrouter" };
+                  const d = { url: "https://openrouter.ai/api/v1", model: "x-ai/grok-4.20-beta" };
+                  s.tigerBotApiKey = s.provider_openrouter_apiKey || "";
+                  s.tigerBotApiUrl = s.provider_openrouter_apiUrl || d.url;
+                  s.tigerBotModel = s.provider_openrouter_model || d.model;
+                  setSettings(s);
+                }}>Remove</button>
+              )}
+            </div>
+            <p className="hint">Switch between AI providers. Each provider keeps its own API key, URL, and model.</p>
+          </div>
+          {showAddProvider && (
+            <div style={{ background: "var(--bg-secondary, #1a1a2e)", borderRadius: 8, padding: 16, marginBottom: 16, border: "1px solid var(--border, #333)" }}>
+              <h4 style={{ margin: "0 0 12px 0", fontSize: 14 }}>Add New Provider</h4>
+              <div className="form-group">
+                <label>Name</label>
+                <input value={newProviderName} onChange={(e) => setNewProviderName(e.target.value)} placeholder="e.g. Anthropic, OpenAI, Groq, Gemini" />
+              </div>
+              <div className="form-group">
+                <label>API URL (OpenAI-compatible)</label>
+                <input value={newProviderUrl} onChange={(e) => setNewProviderUrl(e.target.value)} placeholder="e.g. https://api.openai.com/v1" />
+              </div>
+              <div className="form-group">
+                <label>Default Model</label>
+                <input value={newProviderModel} onChange={(e) => setNewProviderModel(e.target.value)} placeholder="e.g. gpt-4o, claude-3-opus" />
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="btn btn-primary" onClick={() => {
+                  if (!newProviderName.trim()) return;
+                  const id = newProviderName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+                  const customProviders = [...(settings.customProviders || [])];
+                  if (customProviders.some((p: any) => p.id === id) || ["openrouter", "zai", "anthropic_claude_code"].includes(id)) return;
+                  customProviders.push({ id, name: newProviderName.trim(), url: newProviderUrl.trim(), model: newProviderModel.trim() });
+                  // Switch to the new provider immediately
+                  const s: any = { ...settings, customProviders };
+                  // Save current provider settings
+                  const oldProvider = settings.aiProvider || "openrouter";
+                  s[`provider_${oldProvider}_apiKey`] = settings.tigerBotApiKey || "";
+                  s[`provider_${oldProvider}_apiUrl`] = settings.tigerBotApiUrl || "";
+                  s[`provider_${oldProvider}_model`] = settings.tigerBotModel || "";
+                  // Set new provider as active
+                  s.aiProvider = id;
+                  s.tigerBotApiKey = "";
+                  s.tigerBotApiUrl = newProviderUrl.trim();
+                  s.tigerBotModel = newProviderModel.trim();
+                  setSettings(s);
+                  setNewProviderName("");
+                  setNewProviderUrl("");
+                  setNewProviderModel("");
+                  setShowAddProvider(false);
+                }}>Add Provider</button>
+                <button className="btn btn-secondary" onClick={() => { setShowAddProvider(false); setNewProviderName(""); setNewProviderUrl(""); setNewProviderModel(""); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {settings.aiProvider === "anthropic_claude_code" && (
+            <div style={{ background: "var(--bg-secondary, #1a1a2e)", borderRadius: 8, padding: 16, marginBottom: 16, border: "1px solid var(--border, #333)" }}>
+              <h4 style={{ margin: "0 0 12px 0", fontSize: 14 }}>Setup Anthropic Claude</h4>
+
+              {/* API Key method */}
+              <div style={{ background: "var(--bg-primary, #0f0f23)", borderRadius: 6, padding: 12, border: "1px solid var(--border, #333)" }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Get your API Key</div>
+                <ol style={{ margin: "0 0 8px 0", paddingLeft: 20, fontSize: 13, opacity: 0.85, lineHeight: 1.7 }}>
+                  <li>Click the button below to open Anthropic Console</li>
+                  <li>Sign up or log in to your Anthropic account</li>
+                  <li>Go to "API Keys" and click "Create Key"</li>
+                  <li>Copy the key (starts with <code style={{ fontSize: 12 }}>sk-ant-api03-</code>)</li>
+                  <li>Paste it in the API Key field below, then click Save</li>
+                </ol>
+                <button className="btn btn-primary" style={{ fontSize: 13 }} onClick={() => {
+                  window.open("https://console.anthropic.com/settings/keys", "_blank");
+                }}>Open Anthropic Console</button>
+                <p className="hint" style={{ fontSize: 12, margin: "8px 0 0 0", opacity: 0.7 }}>
+                  Pay-per-token billing. Requires adding credits to your Anthropic account.
+                </p>
+              </div>
+
+              <p className="hint" style={{ fontSize: 11, margin: "10px 0 0 0", opacity: 0.5 }}>
+                Note: Claude subscription OAuth tokens (sk-ant-oat01-...) are restricted to Claude Code only and cannot be used for direct API access. Use an API key instead.
+              </p>
+            </div>
+          )}
           <div className="form-group">
             <label>API Key</label>
-            <input type="password" value={settings.tigerBotApiKey || ""} onChange={(e) => setSettings({ ...settings, tigerBotApiKey: e.target.value })} placeholder="Enter your TigerBot API key" />
+            <input type="password" value={settings.tigerBotApiKey || ""} onChange={(e) => setSettings({ ...settings, tigerBotApiKey: e.target.value })} placeholder={settings.aiProvider === "anthropic_claude_code" ? "Paste your Anthropic API key (sk-ant-api03-...)" : "Enter your API key"} />
+            {settings.aiProvider === "anthropic_claude_code" && settings.tigerBotApiKey && !settings.tigerBotApiKey.includes("...") && (
+              <p className="hint" style={{ marginTop: 4, fontSize: 12, color: settings.tigerBotApiKey.startsWith("sk-ant-oat01-") ? "var(--error, #f44336)" : settings.tigerBotApiKey.startsWith("sk-ant-api") ? "var(--success, #4caf50)" : "inherit" }}>
+                {settings.tigerBotApiKey.startsWith("sk-ant-oat01-") ? "OAuth token detected — this will NOT work. Please use an API key (sk-ant-api03-...) from the Anthropic Console instead." :
+                 settings.tigerBotApiKey.startsWith("sk-ant-api") ? "API key detected" :
+                 "Key format not recognized, but will try"}
+              </p>
+            )}
           </div>
           <div className="form-group">
             <label>API URL</label>
-            <input value={settings.tigerBotApiUrl || ""} onChange={(e) => setSettings({ ...settings, tigerBotApiUrl: e.target.value })} placeholder="https://api.tigerbot.com/bot-chat/openai/v1/chat/completions" />
+            <input value={settings.tigerBotApiUrl || ""} onChange={(e) => setSettings({ ...settings, tigerBotApiUrl: e.target.value })} placeholder="OpenAI-compatible API endpoint" />
           </div>
           <div className="form-group">
             <label>Model</label>
-            <input value={settings.tigerBotModel || ""} onChange={(e) => setSettings({ ...settings, tigerBotModel: e.target.value })} placeholder="e.g. TigerBot-70B-Chat, gpt-4o, claude-sonnet-4-20250514" />
+            <input value={settings.tigerBotModel || ""} onChange={(e) => setSettings({ ...settings, tigerBotModel: e.target.value })} placeholder="Model name" />
           </div>
           <div className="form-actions">
             <button className="btn btn-secondary" onClick={testConnection}>Test Connection</button>
@@ -560,55 +723,78 @@ export default function SettingsPage() {
         <section className="card">
           <h3>MCP Servers</h3>
           <p className="hint" style={{ marginBottom: 12 }}>
-            Connect external tools via Model Context Protocol (MCP). Supports HTTP/SSE URLs or stdio commands.
+            Configure MCP servers as JSON. Supports type: "http", "sse", "stdio" (default: auto-detect). Add custom headers for authentication.
           </p>
 
-          {(settings.mcpTools || []).map((tool: any, idx: number) => {
-            const status = getMcpStatusFor(tool.name);
-            const isConnected = status?.connected;
-            return (
-              <div key={idx} className="tool-item" style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
-                <label className="toggle-label" style={{ flex: 1 }}>
-                  <input type="checkbox" checked={tool.enabled} onChange={() => toggleTool(idx)} />
-                  <span>
-                    <strong>{tool.name}</strong>
-                    <span style={{ opacity: 0.6, fontSize: 12, marginLeft: 6 }}>{tool.url}</span>
-                  </span>
-                </label>
-                {isConnected && (
-                  <span style={{ fontSize: 11, color: "#137333", fontWeight: 600 }}>
-                    {status!.toolCount} tools
-                  </span>
-                )}
-                <span style={{
-                  width: 8, height: 8, borderRadius: "50%",
-                  background: isConnected ? "#34a853" : "#ea4335",
-                  display: "inline-block",
-                }} title={isConnected ? "Connected" : "Disconnected"} />
-                {!isConnected ? (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => connectMcp(tool)}
-                    disabled={mcpConnecting === tool.name}
-                  >
-                    {mcpConnecting === tool.name ? "..." : "Connect"}
-                  </button>
-                ) : (
-                  <button className="btn btn-ghost btn-sm" onClick={() => disconnectMcp(tool.name)}>
-                    Disconnect
-                  </button>
-                )}
-                <button className="btn btn-danger btn-sm" onClick={() => removeTool(idx)}>Remove</button>
-                {mcpMessage && mcpMessage.name === tool.name && (
-                  <span style={{ fontSize: 11, color: mcpMessage.ok ? "#137333" : "#c5221f" }}>
-                    {mcpMessage.text}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          <textarea
+            value={mcpJson}
+            onChange={(e) => { setMcpJson(e.target.value); setMcpJsonDirty(true); setMcpJsonError(""); }}
+            spellCheck={false}
+            style={{
+              width: "100%", minHeight: 200, fontFamily: "monospace", fontSize: 13,
+              padding: 12, borderRadius: 6, border: `1px solid ${mcpJsonError ? "#ea4335" : "var(--border)"}`,
+              background: "var(--bg-secondary, #1e1e1e)", color: "var(--text-primary, #d4d4d4)",
+              resize: "vertical", lineHeight: 1.5, tabSize: 2,
+            }}
+            placeholder={`{
+  "mcpServers": {
+    "web-search-prime": {
+      "type": "http",
+      "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+      "headers": {
+        "Authorization": "Bearer your_api_key"
+      }
+    }
+  }
+}`}
+          />
+          {mcpJsonError && (
+            <p style={{ color: "#ea4335", fontSize: 12, margin: "4px 0 0" }}>{mcpJsonError}</p>
+          )}
+          {mcpJsonDirty && (
+            <p style={{ color: "#f9ab00", fontSize: 12, margin: "4px 0 0" }}>Unsaved JSON changes — click "Apply" or "Save & Connect All"</p>
+          )}
 
-          {/* Show discovered tools for connected servers */}
+          <div className="form-actions" style={{ marginTop: 10, gap: 8 }}>
+            <button
+              className="btn btn-secondary"
+              onClick={applyMcpJson}
+              disabled={!mcpJsonDirty}
+            >
+              Apply
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={reconnectAll}
+              disabled={mcpConnecting === "__all__"}
+            >
+              {mcpConnecting === "__all__" ? "Connecting..." : "Save & Connect All"}
+            </button>
+          </div>
+
+          {/* Connection Status */}
+          {mcpStatuses.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, display: "block" }}>Connection Status</label>
+              {mcpStatuses.map((s) => (
+                <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: "50%",
+                    background: s.connected ? "#34a853" : "#ea4335",
+                    display: "inline-block", flexShrink: 0,
+                  }} />
+                  <strong style={{ flex: 1 }}>{s.name}</strong>
+                  {s.connected ? (
+                    <span style={{ fontSize: 11, color: "#137333" }}>{s.toolCount} tools</span>
+                  ) : (
+                    <span style={{ fontSize: 11, color: "#ea4335" }}>disconnected</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Discovered tools */}
           {mcpStatuses.some((s) => s.connected && s.toolCount > 0) && (
             <details style={{ marginTop: 8, fontSize: 13 }}>
               <summary style={{ cursor: "pointer", opacity: 0.7 }}>Discovered MCP Tools</summary>
@@ -624,30 +810,6 @@ export default function SettingsPage() {
               </div>
             </details>
           )}
-
-          <div className="inline-form" style={{ marginTop: 8 }}>
-            <input
-              placeholder="Server name (e.g. github)"
-              value={newTool.name}
-              onChange={(e) => setNewTool({ ...newTool, name: e.target.value.replace(/\s+/g, "-").toLowerCase() })}
-            />
-            <input
-              placeholder="URL or command (e.g. http://localhost:8080/mcp or npx @mcp/server)"
-              value={newTool.url}
-              onChange={(e) => setNewTool({ ...newTool, url: e.target.value })}
-              style={{ flex: 2 }}
-            />
-            <button className="btn btn-secondary" onClick={addTool}>Add</button>
-          </div>
-          <div className="form-actions" style={{ marginTop: 8 }}>
-            <button
-              className="btn btn-primary"
-              onClick={reconnectAll}
-              disabled={mcpConnecting === "__all__"}
-            >
-              {mcpConnecting === "__all__" ? "Reconnecting..." : "Save & Connect All"}
-            </button>
-          </div>
         </section>
       </div>
 

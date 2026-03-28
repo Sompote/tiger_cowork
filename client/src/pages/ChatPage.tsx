@@ -323,9 +323,12 @@ export default function ChatPage() {
     send_task: "Delegating task",
     wait_result: "Waiting for agent",
     check_agents: "Checking agents",
+    error_recovery: "Recovering from error",
   };
 
   // Restore in-progress state on mount, reconnect, or session switch
+  // Track whether we previously saw an active task so we can detect completion
+  const wasLoadingRef = useRef(false);
   useEffect(() => {
     if (!activeSession) return;
     let cancelled = false;
@@ -337,6 +340,7 @@ export default function ChatPage() {
         setActiveTaskSessions(new Set(tasks.map((t: any) => t.sessionId).filter(Boolean)));
         const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
         if (activeTask) {
+          wasLoadingRef.current = true;
           setIsLoading(true);
           if (activeTask.status.startsWith("Running:")) {
             const rawTool = activeTask.status.replace("Running: ", "");
@@ -355,16 +359,26 @@ export default function ChatPage() {
           } else {
             setStatus("Thinking...");
           }
+        } else if (wasLoadingRef.current) {
+          // Task was active before but is now gone — the chat:response event was likely missed
+          // Reset loading state and refresh messages to show the result
+          wasLoadingRef.current = false;
+          setIsLoading(false);
+          setStreaming("");
+          setStatus("");
+          api.getSession(activeSession).then((session: any) => {
+            if (!cancelled) setMessages(session.messages || []);
+          });
         }
       }).catch(() => {});
     };
 
     checkActiveTasks();
 
-    // Poll every 5 seconds to keep status fresh after reconnect
+    // Poll every 3 seconds to keep status fresh and detect missed completions
     const interval = setInterval(() => {
       if (!cancelled) checkActiveTasks();
-    }, 5000);
+    }, 3000);
 
     return () => { cancelled = true; clearInterval(interval); };
   }, [activeSession, connected]);
@@ -390,6 +404,7 @@ export default function ChatPage() {
       }
       if (data.sessionId === activeSession) {
         // Refresh messages from server to get the complete history including the new response
+        wasLoadingRef.current = false;
         api.getSession(activeSession).then((session: any) => {
           setMessages(session.messages || []);
         });
@@ -400,7 +415,7 @@ export default function ChatPage() {
     });
     const unsub3 = onStatus((data: any) => {
       // Track active task sessions for sidebar indicators
-      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call")) {
+      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call" || data.status === "realtime_agent_working" || data.status === "realtime_agent_tool")) {
         setActiveTaskSessions((prev) => {
           if (prev.has(data.sessionId)) return prev;
           const next = new Set(prev);
@@ -453,6 +468,37 @@ export default function ChatPage() {
         setStatus(`Sub-agent "${data.label}" completed`);
       } else if (data.status === "subagent_error") {
         setStatus(`Sub-agent "${data.label}" failed: ${data.error}`);
+      // ─── Realtime Agent status ───
+      } else if (data.status === "realtime_agent_ready") {
+        setIsLoading(true);
+        setStatus(`Agent "${data.label}" (${data.role}) ready`);
+      } else if (data.status === "realtime_agent_working") {
+        setIsLoading(true);
+        setStatus(`Agent "${data.label}" working — ${(data.task || "").slice(0, 80)}`);
+      } else if (data.status === "realtime_agent_tool") {
+        setIsLoading(true);
+        const label = data.tool === "error_recovery"
+          ? "recovering from error"
+          : toolLabels[data.tool] || data.tool;
+        setStatus(`Agent "${data.label}": ${label}...`);
+      } else if (data.status === "realtime_agent_tool_done") {
+        // silent — keep current status
+      } else if (data.status === "realtime_agent_done") {
+        setStatus(`Agent "${data.label}" completed`);
+      } else if (data.status === "retrying") {
+        setIsLoading(true);
+        setStatus(`Retrying (${data.attempt}/${data.maxRetries})...`);
+      } else if (data.status === "done") {
+        // Clear active dot for this session
+        if (data.sessionId) {
+          setActiveTaskSessions((prev) => {
+            const next = new Set(prev);
+            next.delete(data.sessionId);
+            return next;
+          });
+        }
+        setIsLoading(false);
+        setStatus("");
       } else {
         setStatus("");
       }
@@ -525,6 +571,7 @@ export default function ChatPage() {
 
     setInput("");
     setAttachedFiles([]);
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     if (!activeSession) {
       const title = input.trim().slice(0, 50) || attachedFiles[0]?.name || "File upload";
@@ -726,7 +773,12 @@ export default function ChatPage() {
               className="chat-input"
               placeholder="Message Tiger Cowork..."
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                const el = e.target;
+                el.style.height = "auto";
+                el.style.height = Math.min(el.scrollHeight, 200) + "px";
+              }}
               onKeyDown={handleKeyDown}
               rows={1}
               disabled={isLoading}
