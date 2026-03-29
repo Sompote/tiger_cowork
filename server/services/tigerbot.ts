@@ -12,7 +12,7 @@ interface ChatMessage {
 /**
  * Estimate the total character size of a messages array.
  */
-function estimateMessagesChars(messages: Array<{ content: any; tool_calls?: any[]; [k: string]: any }>): number {
+export function estimateMessagesChars(messages: Array<{ content: any; tool_calls?: any[]; [k: string]: any }>): number {
   let total = 0;
   for (const m of messages) {
     if (typeof m.content === "string") total += m.content.length;
@@ -191,7 +191,7 @@ function compressToolResult(toolName: string, result: any, maxLen: number): stri
  * Compress older messages in the context into a summary using a fast LLM call.
  * Keeps system prompt + recent messages, replaces older messages with a compressed summary.
  */
-async function compressOlderMessages(
+export async function compressOlderMessages(
   allMessages: ChatMessage[],
   windowSize: number = 10,
   model?: string
@@ -446,14 +446,25 @@ function sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
     return true;
   });
 
-  // Ensure a user message exists before the first assistant message
-  // Some APIs (zAi/GLM) reject system→assistant without a user message in between
-  let firstNonSystem = filtered.findIndex((m) => m.role !== "system");
-  if (firstNonSystem >= 0 && filtered[firstNonSystem].role !== "user") {
-    filtered.splice(firstNonSystem, 0, { role: "user", content: "Continue with the task." });
+  // Merge consecutive system messages into one — some APIs (MiniMax) only allow a single system message
+  const merged: ChatMessage[] = [];
+  for (const msg of filtered) {
+    const last = merged[merged.length - 1];
+    if (msg.role === "system" && last?.role === "system") {
+      last.content = (last.content || "") + "\n\n" + (msg.content || "");
+    } else {
+      merged.push(msg);
+    }
   }
 
-  return filtered;
+  // Ensure a user message exists before the first assistant message
+  // Some APIs (zAi/GLM) reject system→assistant without a user message in between
+  let firstNonSystem = merged.findIndex((m) => m.role !== "system");
+  if (firstNonSystem >= 0 && merged[firstNonSystem].role !== "user") {
+    merged.splice(firstNonSystem, 0, { role: "user", content: "Continue with the task." });
+  }
+
+  return merged;
 }
 
 // Convert OpenAI-format messages to Anthropic format
@@ -687,8 +698,8 @@ export async function callTigerBotWithTools(
   }
 
   const settings = await getSettings();
-  const maxToolRounds = settings.agentMaxToolRounds || 8;
-  const maxToolCalls = settings.agentMaxToolCalls || 12;
+  const maxToolRounds = settings.agentMaxToolRounds || 15;
+  const maxToolCalls = settings.agentMaxToolCalls || 25;
   const compressionInterval = settings.agentCompressionInterval || 5;
   const compressionWindowSize = settings.agentCompressionWindowSize || 10;
   const checkpointInterval = settings.agentCheckpointInterval || 5;
@@ -728,7 +739,7 @@ export async function callTigerBotWithTools(
   let usesSkill = false;
   let lastUsage: any = undefined;
   let errorRecoveryAttempts = 0;
-  const maxErrorRecoveries = settings.agentMaxErrorRecoveries ?? 2; // allow up to 2 self-recovery attempts
+  const maxErrorRecoveries = settings.agentMaxErrorRecoveries ?? 5; // allow up to 5 self-recovery attempts for resilience
   let noChoicesRetries = 0; // track retries for API returning no choices
 
   if (modelOverride) {
@@ -886,14 +897,31 @@ export async function callTigerBotWithTools(
       tool_calls: truncatedToolCalls,
     });
 
-    // If no tool calls, save the content and break to allow reflection check
+    // If no tool calls, check if the LLM is giving up after errors — nudge it to retry
     if (!toolCalls.length) {
+      const lastToolFailed = toolResults.length > 0 && (toolResults[toolResults.length - 1]?.result?.ok === false || toolResults[toolResults.length - 1]?.result?.exitCode === 1);
+      const contentLooksLikeGivingUp = /\b(error|fail|unable|cannot|couldn'?t|sorry|unfortunately|issue|problem)\b/i.test(message.content || "");
+
+      if (lastToolFailed && contentLooksLikeGivingUp && errorRecoveryAttempts < maxErrorRecoveries && round < maxToolRounds - 1) {
+        errorRecoveryAttempts++;
+        console.log(`[ToolLoop] LLM tried to stop after error. Nudging to retry (attempt ${errorRecoveryAttempts}/${maxErrorRecoveries})...`);
+        allMessages.push({
+          role: "user" as const,
+          content: `⚠️ SYSTEM: Do NOT stop or explain the error to the user. You MUST fix the problem and complete the task. Analyze what went wrong, try a different approach, and call the appropriate tool again. Common fixes:\n- Wrong file path? Use list_files to find the correct path\n- Missing package? Install it with run_python: import subprocess; subprocess.run(['pip', 'install', 'PACKAGE'], check=True)\n- Syntax error? Fix the code and retry\n- File not found? Check if it's in a different directory (uploads/, data/, etc.)\nDo NOT respond with text — call a tool to fix and retry.`,
+        });
+        consecutiveErrors = 0;
+        continue;
+      }
+
       earlyContent = message.content || "No response generated.";
       break;
     }
 
     // Loop detection: same tools with same args called 3 rounds in a row → stop
     // Use tool names + truncated args hash to distinguish explore vs chart vs fix
+    // Skip loop detection for agent coordination tools — send_task/wait_result naturally repeat
+    const agentCoordTools = new Set(["send_task", "wait_result", "check_agents"]);
+    const hasNonAgentTool = toolCalls.some((tc: any) => !agentCoordTools.has(tc.function?.name || ""));
     const currentSignature = toolCalls.map((tc: any) => {
       const name = tc.function?.name || "";
       const args = tc.function?.arguments || "";
@@ -901,7 +929,7 @@ export async function callTigerBotWithTools(
       return `${name}:${argSnippet}`;
     }).sort().join("|");
     toolCallHistory.push(currentSignature);
-    if (toolCallHistory.length >= 3) {
+    if (toolCallHistory.length >= 3 && hasNonAgentTool) {
       const last3 = toolCallHistory.slice(-3);
       if (last3[0] === last3[1] && last3[1] === last3[2]) {
         console.log(`[ToolLoop] Loop detected: same tools+args 3 rounds. Breaking.`);
@@ -985,9 +1013,16 @@ export async function callTigerBotWithTools(
         result = { ok: false, error: err.message };
       }
 
-      if (result?.ok === false || result?.exitCode === 1) {
+      // Don't count wait_result/send_task timeouts as consecutive errors —
+      // sub-agents may legitimately take a long time for complex tasks
+      const isAgentTimeout = (fnName === "wait_result" || fnName === "send_task") &&
+        typeof result?.error === "string" && result.error.toLowerCase().includes("timeout");
+      if ((result?.ok === false || result?.exitCode === 1) && !isAgentTimeout) {
         consecutiveErrors++;
         console.log(`[Tool ${fnName}] Failed (${consecutiveErrors} consecutive errors):`, result?.error || result?.stderr || "");
+      } else if (isAgentTimeout) {
+        console.log(`[Tool ${fnName}] Agent timeout (not counted as error):`, result?.error);
+        // Don't reset consecutiveErrors either — just ignore for error counting
       } else {
         consecutiveErrors = 0;
       }
@@ -1000,7 +1035,14 @@ export async function callTigerBotWithTools(
       const HARD_MAX = 100_000;
       const baseMaxLen = Math.min(settings.agentToolResultMaxLen || 6000, HARD_MAX);
       const maxLen = fnName === "load_skill" ? Math.min(3000, baseMaxLen) : baseMaxLen;
-      const resultStr = compressToolResult(fnName, result, maxLen);
+      let resultStr = compressToolResult(fnName, result, maxLen);
+
+      // If run_python returned warnings (exitCode 0 but stderr has actionable warnings),
+      // append a nudge so the LLM knows to fix the issue instead of ignoring it
+      if (fnName === "run_python" && result?.warnings && result?.exitCode === 0) {
+        resultStr += `\n\n⚠️ IMPORTANT: The code ran but produced warnings that may affect output quality:\n${result.warnings}\nYou should fix the underlying issue and re-run the code to ensure complete, correct output.`;
+      }
+
       return { tc, resultStr };
     };
 
@@ -1020,14 +1062,27 @@ export async function callTigerBotWithTools(
         if (errorRecoveryAttempts < maxErrorRecoveries) {
           errorRecoveryAttempts++;
           console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors. Attempting recovery (${errorRecoveryAttempts}/${maxErrorRecoveries})...`);
+
+          // Escalating recovery prompts - get more aggressive with each attempt
+          const recoveryStrategies = errorRecoveryAttempts <= 2
+            ? `⚠️ SYSTEM: You have had ${maxConsecutiveErrors} consecutive tool errors (recovery attempt ${errorRecoveryAttempts}/${maxErrorRecoveries}). Do NOT give up. Do NOT stop. You MUST complete the task. Analyze the errors above carefully and try a DIFFERENT approach:\n- If a Python package is missing, install it first with: run_python with code "import subprocess; subprocess.run(['pip', 'install', 'PACKAGE_NAME'], check=True)"\n- If a file path is wrong, list files to find the correct path\n- If syntax is wrong, carefully fix the syntax\n- If the approach is fundamentally broken, try an alternative method\n- Simplify your code if it's too complex\n- Break complex operations into smaller steps\n- Add try/except blocks to handle specific errors gracefully\nReset and try again with a corrected approach. You MUST NOT stop until the task is complete.`
+            : `🔴 SYSTEM CRITICAL: Recovery attempt ${errorRecoveryAttempts}/${maxErrorRecoveries}. You have failed ${maxConsecutiveErrors} times in a row AGAIN. This is NOT acceptable - you MUST complete the task. Take a completely different strategy:\n- STOP repeating the same approach that keeps failing\n- Strip the code down to the absolute minimum that could work\n- If a library doesn't work, use a completely different library or pure Python\n- If file operations fail, verify paths exist first with os.path.exists()\n- If network requests fail, add proper error handling and retries\n- If data processing fails, print intermediate results to debug\n- Write the code step-by-step: first verify inputs, then process, then output\n- If ALL else fails, break the task into tiny sub-tasks and solve each one separately\nDo NOT apologize. Do NOT explain why you failed. Just FIX IT and CONTINUE.`;
+
           allMessages.push({
             role: "user" as const,
-            content: `⚠️ SYSTEM: You have had ${maxConsecutiveErrors} consecutive tool errors. Do NOT give up. Analyze the errors above carefully and try a DIFFERENT approach:\n- If a Python package is missing, install it first (pip install)\n- If a file path is wrong, list files to find the correct path\n- If syntax is wrong, fix the syntax\n- If the approach is fundamentally broken, try an alternative method\n- Simplify your code if it's too complex\nReset and try again with a corrected approach.`,
+            content: recoveryStrategies,
           });
           consecutiveErrors = 0; // Reset to give the LLM another chance
         } else {
-          console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors after ${maxErrorRecoveries} recovery attempts. Breaking.`);
-          break;
+          // Even after max recoveries, give one final chance with a hard reset prompt instead of breaking
+          console.log(`[ToolLoop] ${maxConsecutiveErrors} consecutive errors after ${maxErrorRecoveries} recovery attempts. Injecting final fallback...`);
+          allMessages.push({
+            role: "user" as const,
+            content: `🚨 SYSTEM FINAL FALLBACK: All ${maxErrorRecoveries} recovery attempts exhausted. You MUST now provide a final answer with whatever partial results you have. If you have any output files or partial results from earlier successful steps, summarize them. If you can try ONE more simplified approach, do it now. Otherwise, report what you accomplished and what failed.`,
+          });
+          consecutiveErrors = 0;
+          errorRecoveryAttempts = 0; // Reset to allow one more cycle
+          // Do NOT break - let the agent try one more time
         }
       }
       if (totalToolCalls >= maxToolCalls) break;
@@ -1052,7 +1107,15 @@ export async function callTigerBotWithTools(
       console.log(`[ToolLoop] All ${subagentCalls.length} sub-agent(s) completed in parallel.`);
     }
 
-    if (totalToolCalls >= maxToolCalls || (consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3) && errorRecoveryAttempts >= maxErrorRecoveries)) break;
+    if (totalToolCalls >= maxToolCalls) {
+      console.log(`[ToolLoop] Reached max tool calls (${maxToolCalls}). Ending loop.`);
+      break;
+    }
+    // Only break on errors if we've gone through recovery AND the final fallback cycle
+    if (consecutiveErrors >= (settings.agentMaxConsecutiveErrors || 3) && errorRecoveryAttempts >= maxErrorRecoveries * 2) {
+      console.log(`[ToolLoop] Persistent errors after all recovery cycles. Ending loop.`);
+      break;
+    }
   }
 
   console.log(`[ToolLoop] Ended after ${totalToolCalls} tool calls.`);

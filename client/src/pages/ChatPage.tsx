@@ -281,6 +281,7 @@ export default function ChatPage() {
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [activeTaskSessions, setActiveTaskSessions] = useState<Set<string>>(new Set());
+  const [outputRefreshKey, setOutputRefreshKey] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -329,6 +330,7 @@ export default function ChatPage() {
   // Restore in-progress state on mount, reconnect, or session switch
   // Track whether we previously saw an active task so we can detect completion
   const wasLoadingRef = useRef(false);
+  const missCountRef = useRef(0); // require multiple consecutive misses before treating as done
   useEffect(() => {
     if (!activeSession) return;
     let cancelled = false;
@@ -337,10 +339,21 @@ export default function ChatPage() {
       api.getActiveTasks().then((tasks: any[]) => {
         if (cancelled) return;
         // Track all sessions with active tasks for sidebar indicators
-        setActiveTaskSessions(new Set(tasks.map((t: any) => t.sessionId).filter(Boolean)));
+        // Use API as additive source — only "done" status events should remove sessions.
+        // This prevents a race where the HTTP poll response arrives after a WebSocket
+        // status event, overwriting sessions that were just added by real-time events.
+        const apiSessions = new Set(tasks.map((t: any) => t.sessionId).filter(Boolean));
+        setActiveTaskSessions((prev) => {
+          const merged = new Set(prev);
+          for (const s of apiSessions) merged.add(s);
+          // If identical, skip re-render
+          if (merged.size === prev.size) return prev;
+          return merged;
+        });
         const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
         if (activeTask) {
           wasLoadingRef.current = true;
+          missCountRef.current = 0;
           setIsLoading(true);
           if (activeTask.status.startsWith("Running:")) {
             const rawTool = activeTask.status.replace("Running: ", "");
@@ -354,21 +367,27 @@ export default function ChatPage() {
               const label = toolLabels[tool] || tool;
               setStatus(`${label}...`);
             }
-          } else if (activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
+          } else if (activeTask.status.startsWith("Waiting for ") || activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
             setStatus(activeTask.status);
           } else {
             setStatus("Thinking...");
           }
         } else if (wasLoadingRef.current) {
-          // Task was active before but is now gone — the chat:response event was likely missed
-          // Reset loading state and refresh messages to show the result
-          wasLoadingRef.current = false;
-          setIsLoading(false);
-          setStreaming("");
-          setStatus("");
-          api.getSession(activeSession).then((session: any) => {
-            if (!cancelled) setMessages(session.messages || []);
-          });
+          // Task was active before but is now gone — require 2 consecutive misses
+          // to avoid clearing state on transient network blips
+          missCountRef.current++;
+          if (missCountRef.current >= 2) {
+            // Task is truly done — the chat:response event was likely missed
+            // Reset loading state and refresh messages to show the result
+            wasLoadingRef.current = false;
+            missCountRef.current = 0;
+            setIsLoading(false);
+            setStreaming("");
+            setStatus("");
+            api.getSession(activeSession).then((session: any) => {
+              if (!cancelled) setMessages(session.messages || []);
+            });
+          }
         }
       }).catch(() => {});
     };
@@ -394,19 +413,15 @@ export default function ChatPage() {
       }
     });
     const unsub2 = onResponse((data) => {
-      // Remove completed task from sidebar indicators
-      if (data.sessionId) {
-        setActiveTaskSessions((prev) => {
-          const next = new Set(prev);
-          next.delete(data.sessionId);
-          return next;
-        });
-      }
+      // Don't clear activeTaskSessions here — let the "done" status handle it
+      // to avoid premature green dot removal while the task is still cleaning up
       if (data.sessionId === activeSession) {
         // Refresh messages from server to get the complete history including the new response
         wasLoadingRef.current = false;
         api.getSession(activeSession).then((session: any) => {
           setMessages(session.messages || []);
+          // Force output panel refresh so new files (images, PDFs) render immediately
+          setOutputRefreshKey((k) => k + 1);
         });
         setStreaming("");
         setIsLoading(false);
@@ -415,7 +430,7 @@ export default function ChatPage() {
     });
     const unsub3 = onStatus((data: any) => {
       // Track active task sessions for sidebar indicators
-      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call" || data.status === "realtime_agent_working" || data.status === "realtime_agent_tool")) {
+      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call" || data.status === "running_python" || data.status === "retrying" || data.status === "realtime_agent_working" || data.status === "realtime_agent_tool")) {
         setActiveTaskSessions((prev) => {
           if (prev.has(data.sessionId)) return prev;
           const next = new Set(prev);
@@ -488,6 +503,18 @@ export default function ChatPage() {
       } else if (data.status === "retrying") {
         setIsLoading(true);
         setStatus(`Retrying (${data.attempt}/${data.maxRetries})...`);
+      } else if (data.status === "job_complete") {
+        // Orchestrator finished — refresh messages and output files
+        if (data.sessionId === activeSession && activeSession) {
+          api.getSession(activeSession).then((session: any) => {
+            setMessages(session.messages || []);
+            setOutputRefreshKey((k) => k + 1); // force output panel re-render
+            setOutputPanelOpen(true); // auto-open output panel if files exist
+          });
+          setIsLoading(false);
+          setStatus("Job complete");
+          setTimeout(() => setStatus(""), 3000);
+        }
       } else if (data.status === "done") {
         // Clear active dot for this session
         if (data.sessionId) {
@@ -810,7 +837,7 @@ export default function ChatPage() {
           </div>
           <div className="output-panel-content">
             {allOutputFiles.map((group, gi) => (
-              <OutputCanvas key={gi} files={group.files} />
+              <OutputCanvas key={`${gi}-${outputRefreshKey}`} files={group.files} />
             ))}
           </div>
         </div>

@@ -467,6 +467,16 @@ export default function SettingsPage() {
             <input type="number" value={settings.agentTemperature ?? 0.7} onChange={(e) => setSettings({ ...settings, agentTemperature: Math.min(2, Math.max(0, parseFloat(e.target.value) || 0)) })} min={0} max={2} step={0.1} />
             <p className="hint">LLM temperature (0 = deterministic, 2 = very creative, default: 0.7)</p>
           </div>
+          <div className="form-group">
+            <label>Context Compression Interval</label>
+            <input type="number" value={settings.agentCompressionInterval || 5} onChange={(e) => setSettings({ ...settings, agentCompressionInterval: Math.max(1, parseInt(e.target.value) || 5) })} min={1} max={20} />
+            <p className="hint">Compress older messages every N tool rounds during agent runs (default: 5)</p>
+          </div>
+          <div className="form-group">
+            <label>Compression Window Size</label>
+            <input type="number" value={settings.agentCompressionWindowSize || 10} onChange={(e) => setSettings({ ...settings, agentCompressionWindowSize: Math.max(4, parseInt(e.target.value) || 10) })} min={4} max={30} />
+            <p className="hint">Number of recent messages to keep uncompressed (default: 10)</p>
+          </div>
         </section>
 
         <section className="card">
@@ -603,6 +613,41 @@ export default function SettingsPage() {
                       Design agents visually with the Swarm Creator, or upload an existing .yaml architecture file.
                     </p>
                   </div>
+
+                  {/* Sub-Agent Parameters for manual/realtime mode */}
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                    <label style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, display: "block" }}>Sub-Agent Parameters</label>
+                    <p className="hint" style={{ marginBottom: 12 }}>
+                      Controls timeout, error recovery, and context management for each agent in the swarm.
+                    </p>
+                    <div className="form-group">
+                      <label>Agent Timeout (seconds)</label>
+                      <input type="number" value={settings.subAgentTimeout ?? 600} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(1800, Math.max(30, parseInt(e.target.value) || 600)) })} min={30} max={1800} step={30} />
+                      <p className="hint">Max time to wait for each agent to complete a task before timeout (default: 600s). Increase for complex multi-step tasks.</p>
+                    </div>
+                    <div className="form-group">
+                      <label>Max Error Recoveries</label>
+                      <input type="number" value={settings.agentMaxErrorRecoveries ?? 5} onChange={(e) => setSettings({ ...settings, agentMaxErrorRecoveries: Math.min(20, Math.max(1, parseInt(e.target.value) || 5)) })} min={1} max={20} />
+                      <p className="hint">How many times agents attempt self-recovery after consecutive errors before stopping (default: 5)</p>
+                    </div>
+                    <div className="form-group">
+                      <label>Context Compression Interval</label>
+                      <input type="number" value={settings.agentCompressionInterval || 5} onChange={(e) => setSettings({ ...settings, agentCompressionInterval: Math.max(1, parseInt(e.target.value) || 5) })} min={1} max={30} />
+                      <p className="hint">Compress older agent messages every N tool rounds to save context (default: 5)</p>
+                    </div>
+                    <div className="form-group">
+                      <label>Checkpoint Interval</label>
+                      <input type="number" value={settings.agentCheckpointInterval || 5} onChange={(e) => setSettings({ ...settings, agentCheckpointInterval: Math.max(1, parseInt(e.target.value) || 5) })} min={1} max={30} />
+                      <p className="hint">Auto-save agent progress every N rounds for crash recovery (default: 5)</p>
+                    </div>
+                    <div className="form-group">
+                      <label className="toggle-label">
+                        <input type="checkbox" checked={settings.agentCheckpointEnabled !== false} onChange={(e) => setSettings({ ...settings, agentCheckpointEnabled: e.target.checked })} />
+                        <span>Enable Checkpoints</span>
+                      </label>
+                      <p className="hint">Save agent state periodically so tasks can resume after interruption</p>
+                    </div>
+                  </div>
                 </>
               ) : (
                 <>
@@ -623,8 +668,13 @@ export default function SettingsPage() {
                   </div>
                   <div className="form-group">
                     <label>Timeout (seconds)</label>
-                    <input type="number" value={settings.subAgentTimeout ?? 120} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(600, Math.max(30, parseInt(e.target.value) || 120)) })} min={30} max={600} step={10} />
-                    <p className="hint">Max time per sub-agent before timeout (default: 120s, max: 600s)</p>
+                    <input type="number" value={settings.subAgentTimeout ?? 120} onChange={(e) => setSettings({ ...settings, subAgentTimeout: Math.min(1800, Math.max(30, parseInt(e.target.value) || 120)) })} min={30} max={1800} step={10} />
+                    <p className="hint">Max time per sub-agent before timeout (default: 120s, max: 1800s)</p>
+                  </div>
+                  <div className="form-group">
+                    <label>Max Error Recoveries</label>
+                    <input type="number" value={settings.agentMaxErrorRecoveries ?? 5} onChange={(e) => setSettings({ ...settings, agentMaxErrorRecoveries: Math.min(20, Math.max(1, parseInt(e.target.value) || 5)) })} min={1} max={20} />
+                    <p className="hint">How many self-recovery attempts before giving up (default: 5)</p>
                   </div>
                 </>
               )}

@@ -321,7 +321,14 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     const checkActiveTasks = () => {
       api.getActiveTasks().then((tasks: any[]) => {
         if (cancelled) return;
-        setActiveTaskSessions(new Set(tasks.map((t: any) => t.sessionId).filter(Boolean)));
+        // Use API as additive source — only "done" status events should remove sessions
+        const apiSessions = new Set(tasks.map((t: any) => t.sessionId).filter(Boolean));
+        setActiveTaskSessions((prev) => {
+          const merged = new Set(prev);
+          for (const s of apiSessions) merged.add(s);
+          if (merged.size === prev.size) return prev;
+          return merged;
+        });
         const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
         if (activeTask) {
           setIsLoading(true);
@@ -361,13 +368,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       }
     });
     const unsub2 = onResponse((data) => {
-      if (data.sessionId) {
-        setActiveTaskSessions((prev) => {
-          const next = new Set(prev);
-          next.delete(data.sessionId);
-          return next;
-        });
-      }
+      // Don't clear activeTaskSessions here — let the "done" status handle it
       if (data.sessionId === activeSession) {
         api.getSession(activeSession).then((session: any) => {
           setMessages(session.messages || []);
@@ -378,7 +379,16 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       }
     });
     const unsub3 = onStatus((data: any) => {
-      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call")) {
+      // Clear active dot on "done" status
+      if (data.status === "done" && data.sessionId) {
+        setActiveTaskSessions((prev) => {
+          const next = new Set(prev);
+          next.delete(data.sessionId);
+          if (next.size === prev.size) return prev;
+          return next;
+        });
+      }
+      if (data.sessionId && (data.status === "thinking" || data.status === "tool_call" || data.status === "running_python" || data.status === "retrying")) {
         setActiveTaskSessions((prev) => {
           if (prev.has(data.sessionId)) return prev;
           const next = new Set(prev);

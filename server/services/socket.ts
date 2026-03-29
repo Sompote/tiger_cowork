@@ -1,15 +1,18 @@
 import { Server, Socket } from "socket.io";
 import { v4 as uuid } from "uuid";
-import { callTigerBotWithTools, callTigerBot, trimConversationContext } from "./tigerbot";
+import { callTigerBotWithTools, callTigerBot, trimConversationContext, compressOlderMessages, estimateMessagesChars } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
-import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent } from "./toolbox";
+import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent, collectPendingResults, getWorkingAgents } from "./toolbox";
+import { busSubscribe } from "./protocols";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
 
 // ─── Scan output_file/ for newly created files ───
 const OUTPUT_EXTS = [".pdf", ".docx", ".doc", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".svg", ".html", ".gif", ".webp", ".txt", ".md"];
+const COMPRESS_MSG_THRESHOLD = 20;      // compress when more than 20 messages
+const COMPRESS_CHAR_THRESHOLD = 200_000; // or when total content exceeds 200K chars (~50K tokens)
 
 function scanOutputFiles(sandboxDir: string, sinceMs: number): string[] {
   const outputDir = path.join(sandboxDir, "output_file");
@@ -184,17 +187,18 @@ Rules:${isRealtimeAgent ? `
 - HIERARCHY: The agent team has a defined hierarchy. Check the agent roles — if there is an orchestrator agent (role=orchestrator), you MUST send the task ONLY to that orchestrator using send_task. The orchestrator will manage all delegation to workers/researchers/synthesizers internally. Do NOT bypass the orchestrator by sending tasks directly to worker agents.
 - SEND TASKS: Use send_task({to: "orchestrator_agent_id", task: "detailed task description with all context"}) to assign work. Then IMMEDIATELY use wait_result({from: "orchestrator_agent_id"}) to collect results.
 - MANDATORY DELEGATION: You MUST delegate ALL research, search, analysis, and data-gathering work to the agent team via send_task. Do NOT use web_search, fetch_url, or run_python to do research yourself — that is the agents' job. Your role is ONLY to: (1) send tasks to the orchestrator, (2) wait for results, (3) synthesize the final response for the user. The ONLY time you should use run_python or write_file directly is for formatting final output (e.g., creating a PDF report from agent results).
-- WORKFLOW: For each user request: Step 1: send_task to orchestrator with full task details → Step 2: wait_result from orchestrator → Step 3: present results to user (optionally format into charts/reports using run_python).` : isManualSubAgent ? `
+- WORKFLOW: For each user request: Step 1: send_task to orchestrator with full task details → Step 2: wait_result from orchestrator → Step 3: present results to user (optionally format into charts/reports using run_python).
+- FOLLOW-UP MESSAGES: Even when following up on previous work, correcting errors, or the user asks you to redo something — you MUST still delegate to the agent team via send_task. Include relevant context from the chat history in your task description so agents know what to fix or continue. NEVER bypass the team by doing the work yourself with run_python, even if you think it would be faster.` : isManualSubAgent ? `
 - SUB-AGENTS (MANDATORY): You are operating in MANUAL sub-agent mode. You MUST use spawn_subagent for ALL user tasks — do NOT answer directly by yourself. Your role is to act as an orchestrator: analyze the user's request, then delegate work to the predefined agent team by calling spawn_subagent with the appropriate agentId for each agent. Follow the workflow sequence defined in the agent configuration. After all sub-agents complete, synthesize their results into a final response.
 - WORKFLOW: Follow the workflow sequence strictly. Each agent can only spawn downstream agents defined in its outputs_to and connections. Agents with no downstream targets are leaf agents — they complete tasks directly. The architecture file defines who can delegate to whom. Always use the agentId parameter.
 - PARALLEL SPAWNING: When an agent has multiple independent downstream agents, spawn them ALL in a single response so they run in parallel. Do not wait for one to finish before spawning the next unless there is a true data dependency.
-- IMPORTANT: Even for simple tasks, you must delegate through sub-agents when manual mode is enabled. This ensures proper review and quality control through the agent pipeline.` : settings.subAgentEnabled ? `
+- IMPORTANT: Even for simple tasks or follow-up corrections, you MUST delegate through sub-agents when manual mode is enabled. This applies to EVERY user message — not just the first one. Include relevant context from chat history so agents know what to fix or continue.` : settings.subAgentEnabled ? `
 - SUB-AGENTS: For complex multi-part tasks, use spawn_subagent to delegate sub-tasks. Each sub-agent runs independently with full tool access. Good use cases: researching multiple topics simultaneously, generating charts while analyzing data, or any task that can be broken into independent parts. Provide a clear task description and label. Wait for results before using them.` : ""}
 - SKILL-FIRST: Before writing any code, check if an installed skill matches the user's request. If a skill's name or description is relevant (e.g. user asks about "slope stability" and skill "slope-stability" exists), you MUST call load_skill first and use that skill's code/engine. Never reinvent what a skill already provides.
 - USE TOOLS actively. When asked to search, use web_search. When asked to fetch a page, use fetch_url.
-- IMPORTANT: Do NOT call the same tool repeatedly with the same arguments. If a tool returns a result, use that result — do not call it again.
-- IMPORTANT: If a tool (especially run_shell) returns an error like "command not found", do NOT retry it. Tell the user what needs to be installed and how.
-- When using skills (after load_skill), you may need several tool calls to complete the workflow — that's OK. But if a command fails, explain the error to the user instead of retrying. If the skill has supporting files (e.g. gle_engine.py), read them with read_file and use them in your run_python code.
+- IMPORTANT: Do NOT call the same tool repeatedly with the exact same arguments expecting different results. If a tool returns a result, use that result — do not call it again unchanged.
+- ERROR RECOVERY (CRITICAL): When a tool call fails (Python error, missing package, file not found, wrong path, etc.), you MUST NOT stop or give up. Instead: (1) Analyze the error message carefully, (2) Fix the issue — install missing packages, correct file paths using list_files, fix syntax errors, (3) Retry with corrected code/arguments, (4) If the same approach fails twice, try a completely different method. NEVER stop working or apologize to the user due to a tool error — always find a way to complete the task. For "command not found" errors in run_shell, install the needed tool or use an alternative approach.
+- When using skills (after load_skill), you may need several tool calls to complete the workflow — that's OK. If a command fails, analyze the error, fix your approach, and retry. If the skill has supporting files (e.g. gle_engine.py), read them with read_file and use them in your run_python code.
 - For web search tasks: prefer using the installed duckduckgo-search skill via run_python (it gives better results than the basic web_search). Load the skill first with load_skill("duckduckgo-search") to see usage.
 - For coding tasks, use run_python, run_react, or run_shell to execute code directly.
 - For interactive UIs, dashboards, or React components, use run_react. It supports hooks, state, and CDN libraries like Recharts and Tailwind CSS.
@@ -517,10 +521,36 @@ export function setupSocket(io: Server): void {
       // Use tool-calling AI loop — build multimodal content for images
       const settings = await getSettings();
       const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-      const rawChatMessages = session.messages.map((m) => ({
+      let rawChatMessages = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
+
+      // Compact context: compress older messages when session grows large (by count or total size)
+      const chatChars = estimateMessagesChars(rawChatMessages);
+      if (rawChatMessages.length > COMPRESS_MSG_THRESHOLD || chatChars > COMPRESS_CHAR_THRESHOLD) {
+        try {
+          const compressed = await compressOlderMessages(
+            rawChatMessages as any,
+            settings.agentCompressionWindowSize || 10,
+            settings.agentCompressionModel
+          );
+          if (compressed.length < rawChatMessages.length) {
+            console.log(`[ChatCompress] Session ${sessionId}: ${rawChatMessages.length} msgs (${(chatChars/1000).toFixed(0)}K chars) → ${compressed.length} msgs`);
+            rawChatMessages = compressed as typeof rawChatMessages;
+            // Persist compressed messages back to session so it doesn't keep growing
+            session.messages = compressed.map((m: any) => ({
+              role: m.role,
+              content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+              timestamp: new Date().toISOString(),
+            }));
+            await saveChatHistory(sessions);
+          }
+        } catch (err: any) {
+          console.error(`[ChatCompress] Failed: ${err.message}, falling back to trim`);
+        }
+      }
+
       const chatMessages = trimConversationContext(rawChatMessages) as typeof rawChatMessages;
 
       // If the latest user message has images, convert to multimodal content
@@ -677,13 +707,33 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           },
         );
 
+        // Scan sandbox for any new output files generated during this job
+        const jobSandboxDir = settings.sandboxDir || path.resolve("sandbox");
+        const scannedFiles = scanOutputFiles(jobSandboxDir, activeTask.startedAt ? new Date(activeTask.startedAt).getTime() : Date.now() - 60000);
+        for (const sf of scannedFiles) {
+          if (!outputFiles.includes(sf)) outputFiles.push(sf);
+        }
+
+        // Collect any pending agent results that arrived after wait_result timed out
+        let pendingResultText = "";
+        if (realtimeTools) {
+          const pendingResults = collectPendingResults(sessionId);
+          if (pendingResults.length > 0) {
+            pendingResultText = "\n\n---\n**Agent Results:**\n";
+            for (const pr of pendingResults) {
+              pendingResultText += `\n**${pr.agentName}:**\n${pr.result}\n`;
+              if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+            }
+          }
+        }
+
         // Clear streaming progress and show final AI response
         socket.emit("chat:chunk", { sessionId, content: "", clear: true });
         if (result.content) {
           socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
         }
 
-        const fullResponse = result.content +
+        const fullResponse = result.content + pendingResultText +
           (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
 
         session.messages.push({
@@ -694,6 +744,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         });
         await saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+        // Notify client the job is complete with files to trigger UI refresh
+        broadcastStatus({ sessionId, status: "job_complete", files: outputFiles.length > 0 ? outputFiles : undefined } as any);
       } catch (err: any) {
         // If aborted, don't fallback — just report cancellation
         if (abortController.signal.aborted) {
@@ -708,10 +760,22 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           await saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         } else {
+          // Collect pending agent results even on error — agents may have finished
+          let pendingOnError = "";
+          if (realtimeTools) {
+            const pendingResults = collectPendingResults(sessionId);
+            if (pendingResults.length > 0) {
+              pendingOnError = "\n\n---\n**Agent Results (collected after error):**\n";
+              for (const pr of pendingResults) {
+                pendingOnError += `\n**${pr.agentName}:**\n${pr.result}\n`;
+                if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+              }
+            }
+          }
           // Fallback to simple call without tools — still include any outputFiles collected during tool calls
           try {
             const result = await callTigerBot(chatMessages, await buildSystemPrompt());
-            const fallbackContent = result.content +
+            const fallbackContent = result.content + pendingOnError +
               (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
               role: "assistant",
@@ -723,7 +787,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           } catch (fallbackErr: any) {
             const errMsg = `Error: ${fallbackErr.message || err.message}`;
-            const errorContent = errMsg +
+            const errorContent = errMsg + pendingOnError +
               (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
               role: "assistant",
@@ -736,17 +800,99 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
-        // Broadcast "done" so client clears active dot for this session
-        broadcastStatus({ sessionId, status: "done" });
-        // Shutdown realtime session when task completes — unless human node is present
-        // (human mode keeps the session alive for multi-turn interaction via /agent commands)
+        // Check if agents are still working — if so, keep monitor alive
         const rtSessionCheck = getRealtimeSession(sessionId);
         const hasHumanNode = rtSessionCheck?.systemConfig?.agents?.some((a: any) => a.role === "human");
-        if (!hasHumanNode) {
-          shutdownRealtimeSession(sessionId);
+        const stillWorking = getWorkingAgents(sessionId);
+
+        if (rtSessionCheck && stillWorking.length > 0) {
+          const agentNames = stillWorking.map((a: any) => a.agentName).join(", ");
+          console.log(`[Realtime] ${stillWorking.length} agent(s) still working after main loop ended: ${agentNames}`);
+
+          // Update task status so monitor stays visible with meaningful status
+          const activeTask = activeTasks.get(taskId);
+          if (activeTask) {
+            activeTask.status = `Waiting for ${agentNames}...`;
+            activeTask.lastUpdate = new Date().toISOString();
+          }
+          broadcastStatus({ sessionId, status: `Waiting for ${agentNames}...` });
+
+          // Track how many agents still need to report back
+          let pendingCount = stillWorking.length;
+
+          const cleanupWhenDone = () => {
+            pendingCount--;
+            if (pendingCount <= 0) {
+              clearTimeout(lateTimeout);
+              // All agents finished — now broadcast done and clean up
+              broadcastStatus({ sessionId, status: "done" });
+              activeTasks.delete(taskId);
+              taskAbortControllers.delete(taskId);
+            } else {
+              // Update status with remaining agents
+              const remaining = getWorkingAgents(sessionId);
+              const remainingNames = remaining.map((a: any) => a.agentName).join(", ") || "agents";
+              if (activeTask) {
+                activeTask.status = `Waiting for ${remainingNames}...`;
+                activeTask.lastUpdate = new Date().toISOString();
+              }
+              broadcastStatus({ sessionId, status: `Waiting for ${remainingNames}...` });
+            }
+          };
+
+          // Max timeout — clean up even if agents never respond
+          const lateTimeout = setTimeout(() => {
+            console.log(`[Realtime] Late-result timeout (5min) for ${sessionId}, cleaning up`);
+            broadcastStatus({ sessionId, status: "done" });
+            activeTasks.delete(taskId);
+            taskAbortControllers.delete(taskId);
+          }, 5 * 60 * 1000);
+
+          for (const agent of stillWorking) {
+            const unsub = busSubscribe(sessionId, `result:${agent.agentId}`, async (msg) => {
+              unsub();
+              const lateResult = msg.payload?.result || "(no result)";
+              const lateFiles = msg.payload?.outputFiles || [];
+              console.log(`[Realtime] Late result from ${agent.agentName}: ${lateResult.slice(0, 200)}`);
+
+              // Stream the late result to the client
+              const lateContent = `\n\n---\n**Late Result from ${agent.agentName}:**\n${lateResult}` +
+                (lateFiles.length > 0 ? `\n\nGenerated files: ${lateFiles.join(", ")}` : "");
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              socket.emit("chat:chunk", { sessionId, content: lateContent });
+
+              // Save to chat history
+              try {
+                const lateSessions = await getChatHistory();
+                const lateSess = lateSessions.find(s => s.id === sessionId);
+                if (lateSess) {
+                  lateSess.messages.push({
+                    role: "assistant",
+                    content: lateContent.trim(),
+                    timestamp: new Date().toISOString(),
+                    files: lateFiles.length > 0 ? lateFiles : undefined,
+                  });
+                  await saveChatHistory(lateSessions);
+                }
+              } catch (e: any) {
+                console.error(`[Realtime] Failed to save late result:`, e.message);
+              }
+
+              // Emit response event so client refreshes messages
+              socket.emit("chat:response", { sessionId, content: lateContent.trim(), done: true, files: lateFiles.length > 0 ? lateFiles : undefined, lateResult: true });
+              broadcastStatus({ sessionId, status: "job_complete", files: lateFiles.length > 0 ? lateFiles : undefined } as any);
+
+              cleanupWhenDone();
+            });
+          }
+        } else {
+          // No agents still working — broadcast done and clean up immediately
+          broadcastStatus({ sessionId, status: "done" });
+          activeTasks.delete(taskId);
+          taskAbortControllers.delete(taskId);
         }
-        activeTasks.delete(taskId);
-        taskAbortControllers.delete(taskId);
+        // Keep realtime session alive between messages so agents retain context
+        // for follow-up user requests. Session will be cleaned up on disconnect.
       }
     });
 
@@ -974,11 +1120,36 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       }
 
       const settings = await getSettings();
-      const rawChatMessages = session.messages.map((m) => ({
+      let rawChatMessages2 = session.messages.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       }));
-      const chatMessages = trimConversationContext(rawChatMessages) as typeof rawChatMessages;
+
+      // Compact context: compress older messages when session grows large (by count or total size)
+      const chatChars2 = estimateMessagesChars(rawChatMessages2);
+      if (rawChatMessages2.length > COMPRESS_MSG_THRESHOLD || chatChars2 > COMPRESS_CHAR_THRESHOLD) {
+        try {
+          const compressed = await compressOlderMessages(
+            rawChatMessages2 as any,
+            settings.agentCompressionWindowSize || 10,
+            settings.agentCompressionModel
+          );
+          if (compressed.length < rawChatMessages2.length) {
+            console.log(`[ChatCompress] Project session ${sessionId}: ${rawChatMessages2.length} msgs (${(chatChars2/1000).toFixed(0)}K chars) → ${compressed.length} msgs`);
+            rawChatMessages2 = compressed as typeof rawChatMessages2;
+            session.messages = compressed.map((m: any) => ({
+              role: m.role,
+              content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+              timestamp: new Date().toISOString(),
+            }));
+            await saveChatHistory(sessions);
+          }
+        } catch (err: any) {
+          console.error(`[ChatCompress] Failed: ${err.message}, falling back to trim`);
+        }
+      }
+
+      const chatMessages = trimConversationContext(rawChatMessages2) as typeof rawChatMessages2;
 
       // Handle images same as regular chat
       if (images && images.length > 0) {
@@ -1116,13 +1287,33 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           },
         );
 
+        // Scan sandbox for any new output files generated during this job
+        const projJobSandboxDir = settings.sandboxDir || path.resolve("sandbox");
+        const projScannedFiles = scanOutputFiles(projJobSandboxDir, activeTask.startedAt ? new Date(activeTask.startedAt).getTime() : Date.now() - 60000);
+        for (const sf of projScannedFiles) {
+          if (!outputFiles.includes(sf)) outputFiles.push(sf);
+        }
+
+        // Collect any pending agent results that arrived after wait_result timed out
+        let projPendingText = "";
+        if (realtimeTools) {
+          const pendingResults = collectPendingResults(sessionId);
+          if (pendingResults.length > 0) {
+            projPendingText = "\n\n---\n**Agent Results:**\n";
+            for (const pr of pendingResults) {
+              projPendingText += `\n**${pr.agentName}:**\n${pr.result}\n`;
+              if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+            }
+          }
+        }
+
         // Clear streaming progress and show final AI response
         socket.emit("chat:chunk", { sessionId, content: "", clear: true });
         if (result.content) {
           socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
         }
 
-        const fullResponse = result.content +
+        const fullResponse = result.content + projPendingText +
           (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
 
         session.messages.push({
@@ -1133,6 +1324,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         });
         await saveChatHistory(sessions);
         socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+        // Notify client the job is complete with files to trigger UI refresh
+        broadcastStatus({ sessionId, status: "job_complete", files: outputFiles.length > 0 ? outputFiles : undefined } as any);
       } catch (err: any) {
         if (abortController.signal.aborted) {
           const cancelMsg = "Task was cancelled." +
@@ -1146,9 +1339,21 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           await saveChatHistory(sessions);
           socket.emit("chat:response", { sessionId, content: cancelMsg, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
         } else {
+          // Collect pending agent results even on error
+          let projPendingOnError = "";
+          if (realtimeTools) {
+            const pendingResults = collectPendingResults(sessionId);
+            if (pendingResults.length > 0) {
+              projPendingOnError = "\n\n---\n**Agent Results (collected after error):**\n";
+              for (const pr of pendingResults) {
+                projPendingOnError += `\n**${pr.agentName}:**\n${pr.result}\n`;
+                if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+              }
+            }
+          }
           try {
             const result = await callTigerBot(chatMessages, projectPrompt);
-            const fallbackContent = result.content +
+            const fallbackContent = result.content + projPendingOnError +
               (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
               role: "assistant",
@@ -1160,24 +1365,72 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             socket.emit("chat:response", { sessionId, content: fallbackContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           } catch (fallbackErr: any) {
             const errMsg = `Error: ${fallbackErr.message || err.message}`;
+            const errorContent = errMsg + projPendingOnError +
+              (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
               role: "assistant",
-              content: errMsg,
+              content: errorContent,
               timestamp: new Date().toISOString(),
+              files: outputFiles.length > 0 ? outputFiles : undefined,
             });
             await saveChatHistory(sessions);
-            socket.emit("chat:response", { sessionId, content: errMsg, done: true });
+            socket.emit("chat:response", { sessionId, content: errorContent, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
           }
         }
       } finally {
         // Broadcast "done" so client clears active dot for this session
         broadcastStatus({ sessionId, status: "done" });
-        // Keep session alive if human node is present
+
+        // Check if agents are still working — set up late-result listeners
         const rtSessionCheck2 = getRealtimeSession(sessionId);
         const hasHumanNode2 = rtSessionCheck2?.systemConfig?.agents?.some((a: any) => a.role === "human");
-        if (!hasHumanNode2) {
-          shutdownRealtimeSession(sessionId);
+        const stillWorking2 = getWorkingAgents(sessionId);
+
+        if (rtSessionCheck2 && stillWorking2.length > 0) {
+          console.log(`[Realtime] ${stillWorking2.length} agent(s) still working after project chat ended, setting up late-result listeners`);
+
+          const lateTimeout2 = setTimeout(() => {
+            console.log(`[Realtime] Late-result timeout (5min) for project ${sessionId}`);
+            // Don't shutdown — keep agents alive for follow-up messages
+          }, 5 * 60 * 1000);
+
+          for (const agent of stillWorking2) {
+            const unsub = busSubscribe(sessionId, `result:${agent.agentId}`, async (msg) => {
+              unsub();
+              const lateResult = msg.payload?.result || "(no result)";
+              const lateFiles = msg.payload?.outputFiles || [];
+              console.log(`[Realtime] Late result from ${agent.agentName}: ${lateResult.slice(0, 200)}`);
+
+              const lateContent = `\n\n---\n**Late Result from ${agent.agentName}:**\n${lateResult}` +
+                (lateFiles.length > 0 ? `\n\nGenerated files: ${lateFiles.join(", ")}` : "");
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              socket.emit("chat:chunk", { sessionId, content: lateContent });
+
+              try {
+                const lateSessions = await getChatHistory();
+                const lateSess = lateSessions.find(s => s.id === sessionId);
+                if (lateSess) {
+                  lateSess.messages.push({
+                    role: "assistant",
+                    content: lateContent.trim(),
+                    timestamp: new Date().toISOString(),
+                    files: lateFiles.length > 0 ? lateFiles : undefined,
+                  });
+                  await saveChatHistory(lateSessions);
+                }
+              } catch (e: any) {
+                console.error(`[Realtime] Failed to save late result:`, e.message);
+              }
+
+              socket.emit("chat:response", { sessionId, content: lateContent.trim(), done: true, files: lateFiles.length > 0 ? lateFiles : undefined, lateResult: true });
+              broadcastStatus({ sessionId, status: "job_complete", files: lateFiles.length > 0 ? lateFiles : undefined } as any);
+
+              clearTimeout(lateTimeout2);
+            });
+          }
         }
+        // Keep realtime session alive between messages for follow-up delegation
+
         activeTasks.delete(taskId);
         taskAbortControllers.delete(taskId);
       }

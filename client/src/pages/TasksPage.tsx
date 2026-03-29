@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../utils/api";
+import { useSocket } from "../hooks/useSocket";
 import "./PageStyles.css";
 
 interface Task {
@@ -57,6 +58,7 @@ export default function TasksPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
   const [refreshing, setRefreshing] = useState(false);
+  const { onStatus } = useSocket();
 
   const killTask = async (taskId: string) => {
     try {
@@ -84,12 +86,21 @@ export default function TasksPage() {
     loadActiveTasks();
   }, [loadActiveTasks]);
 
-  // Auto-refresh active tasks every 5 seconds when there are active tasks
+  // Auto-refresh active tasks every 5 seconds (always poll so we catch new tasks)
   useEffect(() => {
-    if (activeTasks.length === 0) return;
     const interval = setInterval(loadActiveTasks, 5000);
     return () => clearInterval(interval);
-  }, [activeTasks.length, loadActiveTasks]);
+  }, [loadActiveTasks]);
+
+  // Real-time socket updates: refresh immediately on task start/finish events
+  useEffect(() => {
+    const unsub = onStatus((data: any) => {
+      if (data.status === "thinking" || data.status === "done" || data.status === "job_complete") {
+        loadActiveTasks();
+      }
+    });
+    return unsub;
+  }, [onStatus, loadActiveTasks]);
 
   const createTask = async () => {
     const task = await api.createTask(form);

@@ -597,11 +597,67 @@ async function fetchUrl(args: { url: string; method?: string }): Promise<any> {
 async function runPythonTool(args: { code: string }): Promise<any> {
   const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-  const result = await runPython(args.code, sandboxDir, 60000, _currentProjectWorkingFolder);
+  const timeout = settings.pythonTimeout || 120000; // Increased default timeout to 2 minutes
+  const result = await runPython(args.code, sandboxDir, timeout, _currentProjectWorkingFolder);
+
+  // If Python errored, provide structured error info to help the LLM fix the code
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.slice(0, 8000);
+    // Extract the most relevant error line (usually the last line of traceback)
+    const errorLines = stderr.split("\n").filter(l => l.trim());
+    const lastErrorLine = errorLines[errorLines.length - 1] || "";
+    // Detect common error categories for better recovery hints
+    let errorHint = "";
+    if (/ModuleNotFoundError|ImportError|No module named/.test(stderr)) {
+      const moduleMatch = stderr.match(/No module named '([^']+)'/);
+      errorHint = `\n💡 HINT: Missing Python module${moduleMatch ? ` '${moduleMatch[1]}'` : ""}. Install it first with: import subprocess; subprocess.run(['pip', 'install', '${moduleMatch?.[1] || "MODULE_NAME"}'], check=True)`;
+    } else if (/FileNotFoundError/.test(stderr)) {
+      errorHint = "\n💡 HINT: File not found. Use os.listdir() or os.path.exists() to verify paths before accessing files.";
+    } else if (/SyntaxError/.test(stderr)) {
+      errorHint = "\n💡 HINT: Python syntax error. Check for missing colons, brackets, quotes, or indentation issues.";
+    } else if (/TypeError/.test(stderr)) {
+      errorHint = "\n💡 HINT: Type error. Check argument types and function signatures. Print type(variable) to debug.";
+    } else if (/PermissionError/.test(stderr)) {
+      errorHint = "\n💡 HINT: Permission denied. Try writing to the output directory or /tmp instead.";
+    } else if (/MemoryError|Killed/.test(stderr)) {
+      errorHint = "\n💡 HINT: Out of memory. Process data in smaller chunks or reduce data size.";
+    } else if (/TimeoutError|Timed out/.test(stderr)) {
+      errorHint = "\n💡 HINT: Operation timed out. Try with smaller data or add timeout handling.";
+    }
+
+    return {
+      exitCode: result.exitCode,
+      ok: false,
+      error: `Python execution failed: ${lastErrorLine}`,
+      stdout: result.stdout.slice(0, 20000),
+      stderr: stderr + errorHint,
+      outputFiles: result.outputFiles,
+    };
+  }
+
+  // Even on success (exitCode 0), check stderr for important warnings that indicate
+  // partial failures — e.g. failed imports that silently degrade output quality
+  const stderr0 = result.stderr.slice(0, 5000);
+  let warningHint = "";
+  if (stderr0) {
+    const warningPatterns = [
+      { pattern: /Unable to import|ImportError|ModuleNotFoundError|No module named/i, hint: "A Python module failed to import. The output may be incomplete or missing charts/features. Fix the import issue and retry." },
+      { pattern: /UserWarning.*(?:Axes3D|mplot3d)/i, hint: "Axes3D/3D plotting failed. Try: import subprocess; subprocess.run(['pip', 'install', '--upgrade', '--break-system-packages', 'matplotlib'], check=True), then retry. Or use 2D plots as alternative." },
+      { pattern: /DeprecationWarning.*removed/i, hint: "A deprecated feature was used that may not work. Update the code to use the recommended alternative." },
+      { pattern: /RuntimeWarning.*(?:overflow|divide|invalid)/i, hint: "Numerical computation produced warnings (overflow/divide-by-zero). Check your calculations." },
+    ];
+    for (const wp of warningPatterns) {
+      if (wp.pattern.test(stderr0)) {
+        warningHint += `\n⚠️ WARNING: ${wp.hint}`;
+      }
+    }
+  }
+
   return {
     exitCode: result.exitCode,
     stdout: result.stdout.slice(0, 20000),
-    stderr: result.stderr.slice(0, 5000),
+    stderr: stderr0 + warningHint,
+    warnings: warningHint ? warningHint.trim() : undefined,
     outputFiles: result.outputFiles,
   };
 }
@@ -2088,7 +2144,17 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
         outputFiles: resultMsg.payload?.outputFiles || [],
       };
     } catch (err: any) {
-      return { ok: false, error: `Timeout waiting for ${args.to}: ${err.message}` };
+      const agentStatus = targetAgent.status;
+      const stillWorking = agentStatus === "working";
+      return {
+        ok: false,
+        error: `Timeout waiting for ${args.to}: ${err.message}`,
+        agentStatus,
+        stillWorking,
+        hint: stillWorking
+          ? `Agent "${targetAgent.agentDef.name}" is still working. The result will be automatically forwarded to the user when it arrives.`
+          : `Agent "${targetAgent.agentDef.name}" status: "${agentStatus}".`,
+      };
     }
   }
 
@@ -2138,7 +2204,17 @@ async function realtimeWaitResult(args: { from: string; timeout?: number }, sign
       outputFiles: resultMsg.payload?.outputFiles || [],
     };
   } catch (err: any) {
-    return { ok: false, error: `Timeout waiting for result from ${args.from}: ${err.message}` };
+    const agentStatus = targetAgent.status;
+    const stillWorking = agentStatus === "working";
+    return {
+      ok: false,
+      error: `Timeout waiting for result from ${args.from}: ${err.message}`,
+      agentStatus,
+      stillWorking,
+      hint: stillWorking
+        ? `Agent "${targetAgent.agentDef.name}" is still working. The result will be automatically forwarded to the user when it arrives.`
+        : `Agent "${targetAgent.agentDef.name}" status: "${agentStatus}".`,
+    };
   }
 }
 
@@ -2158,6 +2234,62 @@ function realtimeCheckAgents(): any {
   }));
 
   return { ok: true, agents, total: agents.length };
+}
+
+// --- Collect pending results from agents that finished ---
+
+export function collectPendingResults(sessionId: string): Array<{ agentId: string; agentName: string; result: string; outputFiles?: string[] }> {
+  const session = realtimeSessions.get(sessionId);
+  if (!session) return [];
+
+  const results: Array<{ agentId: string; agentName: string; result: string; outputFiles?: string[] }> = [];
+
+  // First check handle.lastResult (set when agent finishes)
+  for (const [id, handle] of session.agents.entries()) {
+    if (handle.agentDef.role === "human") continue;
+    if (handle.lastResult) {
+      results.push({
+        agentId: id,
+        agentName: handle.agentDef.name,
+        result: handle.lastResult,
+      });
+      handle.lastResult = undefined; // consume it
+    }
+  }
+
+  // Fallback: scan bus history for result messages if handle had no cached result
+  if (results.length === 0) {
+    for (const [agentId, handle] of session.agents.entries()) {
+      if (handle.agentDef.role === "human") continue;
+      const history = busHistory(sessionId, `result:${agentId}`);
+      if (history.length > 0) {
+        const last = history[history.length - 1];
+        results.push({
+          agentId,
+          agentName: handle.agentDef.name,
+          result: last.payload?.result || "(no result)",
+          outputFiles: last.payload?.outputFiles,
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+// --- Get working agents ---
+
+export function getWorkingAgents(sessionId: string): Array<{ agentId: string; agentName: string }> {
+  const session = realtimeSessions.get(sessionId);
+  if (!session) return [];
+  const working: Array<{ agentId: string; agentName: string }> = [];
+  for (const [id, handle] of session.agents.entries()) {
+    if (handle.agentDef.role === "human") continue;
+    if (handle.status === "working") {
+      working.push({ agentId: id, agentName: handle.agentDef.name });
+    }
+  }
+  return working;
 }
 
 // --- Get tools for realtime orchestrator ---
