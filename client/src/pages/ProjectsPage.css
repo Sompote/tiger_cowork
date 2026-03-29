@@ -1213,3 +1213,52 @@
 .access-label {
   font-size: 11px;
 }
+
+/* ─── Agent/Swarm Tags (for rich HTML in chat messages) ─── */
+
+.swarm-tag {
+  display: inline-block;
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #000;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  margin: 8px 0;
+  animation: swarmPulse 2s ease-in-out infinite;
+}
+
+@keyframes swarmPulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(245, 158, 11, 0.4); }
+  50% { box-shadow: 0 0 16px rgba(245, 158, 11, 0.7); }
+}
+
+.proto-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.proto-tcp { background: #4285f4; color: #fff; }
+.proto-bus { background: #34a853; color: #fff; }
+.proto-queue { background: #ea8600; color: #fff; }
+
+.agent-response-tag {
+  display: inline-block;
+  background: linear-gradient(135deg, #e91e63, #c2185b);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+
+.agent-response-tag strong { color: #fff; }

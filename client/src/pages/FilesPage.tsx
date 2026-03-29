@@ -26,10 +26,44 @@ export default function FilesPage() {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [richPreview, setRichPreview] = useState<{ type: string; html: string } | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const toggleSelect = (path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    if (selectedFiles.size === files.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(files.map((f) => f.path)));
+    }
+  };
+
+  const deleteSelected = async () => {
+    if (selectedFiles.size === 0) return;
+    if (!confirm(`Delete ${selectedFiles.size} item(s)?`)) return;
+    for (const path of selectedFiles) {
+      try { await api.deleteFile(path); } catch {}
+    }
+    if (selectedFile && selectedFiles.has(selectedFile)) {
+      setSelectedFile(null);
+      setFileContent("");
+    }
+    setSelectedFiles(new Set());
+    loadFiles(currentPath);
+  };
 
   useEffect(() => {
     loadFiles(currentPath);
+    setSelectedFiles(new Set());
   }, [currentPath]);
 
   const loadFiles = async (path: string) => {
@@ -38,6 +72,7 @@ export default function FilesPage() {
   };
 
   const richPreviewExts = [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".md"];
+  const codePreviewExts = [".py", ".json", ".csv", ".js", ".ts", ".tsx", ".jsx", ".yaml", ".yml", ".sh", ".bash", ".sql", ".r", ".m"];
   const imageExts = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"];
   const mediaExts = [".mp4", ".webm", ".mp3", ".wav", ".ogg"];
 
@@ -75,6 +110,12 @@ export default function FilesPage() {
         setEditing(false);
         const isVideo = [".mp4", ".webm"].includes(ext);
         setRichPreview({ type: isVideo ? "video" : "audio", html: "" });
+      } else if (codePreviewExts.includes(ext)) {
+        const data = await api.readFile(file.path);
+        setSelectedFile(file.path);
+        setFileContent(data.content);
+        setEditing(false);
+        setRichPreview({ type: ext === ".csv" ? "csv" : "code", html: ext });
       } else {
         const data = await api.readFile(file.path);
         setSelectedFile(file.path);
@@ -193,6 +234,22 @@ export default function FilesPage() {
               style={{ display: "none" }}
               onChange={handleFileSelect}
             />
+            {files.length > 0 && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 13, opacity: 0.8 }}>
+                <input
+                  type="checkbox"
+                  checked={selectedFiles.size === files.length && files.length > 0}
+                  onChange={selectAll}
+                  style={{ cursor: "pointer" }}
+                />
+                All
+              </label>
+            )}
+            {selectedFiles.size > 0 && (
+              <button className="btn btn-secondary" onClick={deleteSelected} style={{ color: "#e57373" }}>
+                Delete ({selectedFiles.size})
+              </button>
+            )}
             <button
               className="btn btn-secondary"
               onClick={() => fileInputRef.current?.click()}
@@ -243,6 +300,13 @@ export default function FilesPage() {
         <div className="file-list">
           {files.map((file) => (
             <div key={file.name} className={`file-item ${selectedFile === file.path ? "active" : ""}`} onClick={() => openFile(file)}>
+              <input
+                type="checkbox"
+                checked={selectedFiles.has(file.path)}
+                onClick={(e) => toggleSelect(file.path, e)}
+                onChange={() => {}}
+                style={{ cursor: "pointer", marginRight: 4, flexShrink: 0 }}
+              />
               <span className="file-icon">{file.isDirectory ? "📁" : "📄"}</span>
               <span className="file-name">{file.name}</span>
               <span className="file-size">{formatSize(file.size)}</span>
@@ -273,13 +337,13 @@ export default function FilesPage() {
           <div className="panel-header">
             <h3>{selectedFile}</h3>
             <div className="panel-actions">
-              {richPreview ? null : editing ? (
+              {richPreview && richPreview.type !== "code" && richPreview.type !== "csv" ? null : editing ? (
                 <>
                   <button className="btn btn-primary" onClick={saveFile}>Save</button>
-                  <button className="btn btn-ghost" onClick={() => setEditing(false)}>Cancel</button>
+                  <button className="btn btn-ghost" onClick={() => { setEditing(false); if (richPreview) setRichPreview({ ...richPreview }); }}>Cancel</button>
                 </>
               ) : (
-                <button className="btn btn-secondary" onClick={() => setEditing(true)}>Edit</button>
+                <button className="btn btn-secondary" onClick={() => { setRichPreview(null); setEditing(true); }}>Edit</button>
               )}
             </div>
           </div>
@@ -301,6 +365,33 @@ export default function FilesPage() {
             ) : richPreview.type === "markdown" ? (
               <div className="file-preview rich-preview markdown-preview">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{richPreview.html}</ReactMarkdown>
+              </div>
+            ) : richPreview.type === "csv" ? (
+              <div className="file-preview rich-preview" style={{ overflow: "auto" }}>
+                <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+                  {fileContent.split("\n").filter(Boolean).map((row, ri) => {
+                    const cells = row.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+                    return (
+                      <tr key={ri} style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                        {cells.map((cell, ci) => ri === 0 ? (
+                          <th key={ci} style={{ padding: "6px 10px", textAlign: "left", background: "rgba(255,255,255,0.05)", fontWeight: 600, position: "sticky", top: 0 }}>{cell}</th>
+                        ) : (
+                          <td key={ci} style={{ padding: "4px 10px" }}>{cell}</td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </table>
+              </div>
+            ) : richPreview.type === "code" ? (
+              <div className="file-preview rich-preview" style={{ overflow: "auto", position: "relative" }}>
+                <div style={{ position: "absolute", top: 6, right: 10, fontSize: 11, opacity: 0.4 }}>{richPreview.html}</div>
+                <pre style={{ margin: 0, padding: "8px 0", counterReset: "line" }}>{fileContent.split("\n").map((line, i) => (
+                  <div key={i} style={{ display: "flex", minHeight: 20 }}>
+                    <span style={{ display: "inline-block", width: 45, textAlign: "right", paddingRight: 12, color: "rgba(255,255,255,0.25)", userSelect: "none", flexShrink: 0, fontSize: 12 }}>{i + 1}</span>
+                    <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{line}</span>
+                  </div>
+                ))}</pre>
               </div>
             ) : richPreview.type === "error" ? (
               <div className="file-preview rich-preview" style={{ color: "#e57373", padding: 24, textAlign: "center" }}>{richPreview.html}</div>

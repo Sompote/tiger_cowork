@@ -118,6 +118,71 @@ function MarkdownPreview({ file }: { file: string }) {
   );
 }
 
+const codeExts = ["py", "json", "csv", "js", "ts", "tsx", "jsx", "yaml", "yml", "sh", "bash", "sql", "r", "m", "txt", "log", "cfg", "ini", "toml", "xml", "env", "gitignore"];
+
+function TextFilePreview({ file }: { file: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const ext = getFileExt(file);
+
+  useEffect(() => {
+    setContent(null);
+    setError("");
+    api.readFile(file).then((data: any) => {
+      setContent(data.content || "");
+    }).catch((err: any) => {
+      setError(err.message || "Failed to load file");
+    });
+  }, [file]);
+
+  if (error) return <div style={{ color: "#e57373", padding: 16 }}>{error}</div>;
+  if (content === null) return <div style={{ padding: 16, opacity: 0.5 }}>Loading...</div>;
+
+  if (ext === "csv") {
+    const rows = content.split("\n").filter(Boolean);
+    return (
+      <div style={{ overflow: "auto", maxHeight: 500 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+          <tbody>
+            {rows.map((row, ri) => {
+              const cells = row.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+              return (
+                <tr key={ri} style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                  {cells.map((cell, ci) => ri === 0 ? (
+                    <th key={ci} style={{ padding: "6px 10px", textAlign: "left", background: "rgba(255,255,255,0.05)", fontWeight: 600, position: "sticky", top: 0 }}>{cell}</th>
+                  ) : (
+                    <td key={ci} style={{ padding: "4px 10px" }}>{cell}</td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if (ext === "json") {
+    try {
+      const formatted = JSON.stringify(JSON.parse(content), null, 2);
+      return (
+        <pre style={{ margin: 0, padding: 12, overflow: "auto", maxHeight: 500, fontSize: 13 }}>{formatted}</pre>
+      );
+    } catch { /* fall through to plain display */ }
+  }
+
+  return (
+    <div style={{ overflow: "auto", maxHeight: 500 }}>
+      <pre style={{ margin: 0, padding: "8px 0", fontSize: 13 }}>{content.split("\n").map((line, i) => (
+        <div key={i} style={{ display: "flex", minHeight: 20 }}>
+          <span style={{ display: "inline-block", width: 45, textAlign: "right", paddingRight: 12, color: "rgba(255,255,255,0.25)", userSelect: "none", flexShrink: 0, fontSize: 12 }}>{i + 1}</span>
+          <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{line}</span>
+        </div>
+      ))}</pre>
+    </div>
+  );
+}
+
 function OutputCanvas({ files }: { files: string[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -128,7 +193,8 @@ function OutputCanvas({ files }: { files: string[] }) {
   const docFiles = files.filter((f) => ["doc", "docx"].includes(getFileExt(f)));
   const excelFiles = files.filter((f) => ["xls", "xlsx"].includes(getFileExt(f)));
   const mdFiles = files.filter((f) => getFileExt(f) === "md");
-  const otherFiles = files.filter((f) => !images.includes(f) && !reactFiles.includes(f) && !htmlFiles.includes(f) && !pdfFiles.includes(f) && !docFiles.includes(f) && !excelFiles.includes(f) && !mdFiles.includes(f));
+  const textFiles = files.filter((f) => codeExts.includes(getFileExt(f)));
+  const otherFiles = files.filter((f) => !images.includes(f) && !reactFiles.includes(f) && !htmlFiles.includes(f) && !pdfFiles.includes(f) && !docFiles.includes(f) && !excelFiles.includes(f) && !mdFiles.includes(f) && !textFiles.includes(f));
 
   return (
     <div className="output-canvas">
@@ -246,6 +312,21 @@ function OutputCanvas({ files }: { files: string[] }) {
             </div>
           </div>
           <MarkdownPreview file={f} />
+        </div>
+      ))}
+
+      {textFiles.map((f) => (
+        <div key={f} className="canvas-doc-wrap">
+          <div className="canvas-doc-header">
+            <div className="canvas-doc-icon" style={{ background: "#546e7a" }}>{getFileExt(f).toUpperCase()}</div>
+            <span>{f.split("/").pop()}</span>
+            <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+              <a href={api.downloadUrl(f)} download className="canvas-dl-btn" title="Download">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              </a>
+            </div>
+          </div>
+          <TextFilePreview file={f} />
         </div>
       ))}
 
@@ -532,7 +613,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
                   <div className="message-avatar">{msg.role === "user" ? "U" : "C"}</div>
                   <div className="message-content">
                     {msg.role === "assistant" ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown>
                     ) : (
                       <p>{msg.content}</p>
                     )}
@@ -549,7 +630,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
                 <div className="message assistant">
                   <div className="message-avatar">C</div>
                   <div className="message-content">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{streaming}</ReactMarkdown>
                   </div>
                 </div>
               )}
@@ -756,11 +837,12 @@ export default function ProjectsPage() {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [mkdirName, setMkdirName] = useState("");
+  const [selectedProjFiles, setSelectedProjFiles] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const navigateFile = (entry: FileEntry) => {
     if (!activeProject) return;
-    if (entry.isDirectory) { setFilePath(entry.path); loadFiles(activeProject, entry.path); setPreviewFile(null); }
+    if (entry.isDirectory) { setFilePath(entry.path); loadFiles(activeProject, entry.path); setPreviewFile(null); setSelectedProjFiles(new Set()); }
   };
 
   const clickFile = async (entry: FileEntry) => {
@@ -780,6 +862,7 @@ export default function ProjectsPage() {
     setFilePath(parent);
     loadFiles(activeProject, parent);
     setPreviewFile(null);
+    setSelectedProjFiles(new Set());
   };
 
   const handleProjectUpload = async (files: FileList | null) => {
@@ -803,6 +886,34 @@ export default function ProjectsPage() {
     if (!confirm(`Delete "${entry.name}"?`)) return;
     await api.projectDeleteFile(activeProject.id, entry.path);
     if (previewFile) setPreviewFile(null);
+    loadFiles(activeProject, filePath);
+  };
+
+  const toggleProjFileSelect = (path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedProjFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+
+  const selectAllProjFiles = () => {
+    if (selectedProjFiles.size === projectFiles.length) {
+      setSelectedProjFiles(new Set());
+    } else {
+      setSelectedProjFiles(new Set(projectFiles.map((f) => f.path)));
+    }
+  };
+
+  const deleteSelectedProjFiles = async () => {
+    if (!activeProject || selectedProjFiles.size === 0) return;
+    if (!confirm(`Delete ${selectedProjFiles.size} item(s)?`)) return;
+    for (const p of selectedProjFiles) {
+      try { await api.projectDeleteFile(activeProject.id, p); } catch {}
+    }
+    if (previewFile) setPreviewFile(null);
+    setSelectedProjFiles(new Set());
     loadFiles(activeProject, filePath);
   };
 
@@ -1088,6 +1199,22 @@ export default function ProjectsPage() {
                             <span className="files-path-label">/{filePath || ""}</span>
                           </div>
                           <div className="files-toolbar-right">
+                            {projectFiles.length > 0 && (
+                              <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 13, opacity: 0.8 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedProjFiles.size === projectFiles.length && projectFiles.length > 0}
+                                  onChange={selectAllProjFiles}
+                                  style={{ cursor: "pointer" }}
+                                />
+                                All
+                              </label>
+                            )}
+                            {selectedProjFiles.size > 0 && (
+                              <button className="btn btn-ghost btn-sm" onClick={deleteSelectedProjFiles} style={{ color: "#e57373" }}>
+                                Delete ({selectedProjFiles.size})
+                              </button>
+                            )}
                             <button className="btn btn-ghost btn-sm" onClick={() => setMkdirOpen(!mkdirOpen)} title="New folder">
                               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm0 12H4V8h16v10zM11 13h2v-2h2v2h2v2h-2v2h-2v-2h-2z"/></svg>
                               New Folder
@@ -1129,6 +1256,13 @@ export default function ProjectsPage() {
                               className={`project-file-item ${!f.isDirectory && previewFile ? "clickable" : ""}`}
                               onClick={() => f.isDirectory ? navigateFile(f) : clickFile(f)}
                             >
+                              <input
+                                type="checkbox"
+                                checked={selectedProjFiles.has(f.path)}
+                                onClick={(e) => toggleProjFileSelect(f.path, e)}
+                                onChange={() => {}}
+                                style={{ cursor: "pointer", marginRight: 4, flexShrink: 0 }}
+                              />
                               <span className="file-icon">{f.isDirectory ? "📁" : "📄"}</span>
                               <span className="file-name">{f.name}</span>
                               {!f.isDirectory && <span className="file-size">{formatSize(f.size)}</span>}

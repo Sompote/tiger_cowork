@@ -792,6 +792,31 @@ export async function callTigerBotWithTools(
         if (err.name === "AbortError") {
           return { content: earlyContent || "Task was cancelled.", toolResults };
         }
+        // Detect context overflow errors and compress before retrying
+        const errMsg = err.message || "";
+        const isContextOverflow = errMsg.includes("context window exceeds") ||
+          errMsg.includes("context_length_exceeded") ||
+          errMsg.includes("maximum context length") ||
+          errMsg.includes("too many tokens") ||
+          (errMsg.includes("invalid params") && errMsg.includes("2013"));
+        if (isContextOverflow && allMessages.length > 3) {
+          console.log(`[ToolLoop] Context overflow detected — compressing before retry (attempt ${llmRetry + 1}/${llmMaxRetries})...`);
+          // First try LLM-based compression
+          const compressed = await compressOlderMessages(allMessages, Math.min(compressionWindowSize, 6), settings.agentCompressionModel);
+          if (compressed.length < allMessages.length) {
+            allMessages.length = 0;
+            allMessages.push(...(compressed as ChatMessage[]));
+            console.log(`[ToolLoop] Compressed to ${allMessages.length} messages. Retrying...`);
+          } else {
+            // Fallback: aggressive naive trim (halve the char budget)
+            const currentChars = estimateMessagesChars(allMessages);
+            const trimmed = trimConversationContext(allMessages, Math.floor(currentChars * 0.5)) as ChatMessage[];
+            allMessages.length = 0;
+            allMessages.push(...trimmed);
+            console.log(`[ToolLoop] Trimmed to ${allMessages.length} messages (${estimateMessagesChars(allMessages)} chars). Retrying...`);
+          }
+          continue; // retry immediately after compression
+        }
         if (llmRetry < llmMaxRetries - 1) {
           const delay = (llmRetry + 1) * 2000; // 2s, 4s backoff
           console.log(`[ToolLoop] LLM call failed (attempt ${llmRetry + 1}/${llmMaxRetries}): ${err.message}. Retrying in ${delay}ms...`);
@@ -842,6 +867,27 @@ export async function callTigerBotWithTools(
         const trimmed = trimConversationContext(allMessages) as ChatMessage[];
         allMessages.length = 0;
         allMessages.push(...trimmed);
+        continue; // retry this round
+      }
+
+      // Context overflow or invalid function arguments (often due to oversized context) — compress and retry
+      const isCtxOverflow = apiError.includes("context window exceeds") ||
+        apiError.includes("context_length_exceeded") ||
+        apiError.includes("maximum context length") ||
+        apiError.includes("invalid function arguments json string") ||
+        (apiError.includes("2013") && (apiError.includes("invalid params") || apiError.includes("exceeds")));
+      if (isCtxOverflow && allMessages.length > 3) {
+        console.log(`[ToolLoop] Context/args overflow in API response — compressing and retrying...`);
+        const compressed = await compressOlderMessages(allMessages, Math.min(compressionWindowSize, 6), settings.agentCompressionModel);
+        if (compressed.length < allMessages.length) {
+          allMessages.length = 0;
+          allMessages.push(...(compressed as ChatMessage[]));
+        } else {
+          const currentChars = estimateMessagesChars(allMessages);
+          const trimmed = trimConversationContext(allMessages, Math.floor(currentChars * 0.5)) as ChatMessage[];
+          allMessages.length = 0;
+          allMessages.push(...trimmed);
+        }
         continue; // retry this round
       }
 
