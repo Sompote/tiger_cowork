@@ -44,6 +44,7 @@ export interface ActiveTask {
   toolCalls: string[];
   activeAgent?: string;          // last active agent (for backward compat)
   activeAgents: Set<string>;     // all currently working agents
+  doneAgents: Set<string>;       // agents that have finished
   agentTools: Record<string, string[]>; // agent name → tools used
   startedAt: string;
   lastUpdate: string;
@@ -52,10 +53,11 @@ export interface ActiveTask {
 const activeTasks = new Map<string, ActiveTask>();
 const taskAbortControllers = new Map<string, AbortController>();
 
-export function getActiveTasks(): (Omit<ActiveTask, 'activeAgents'> & { activeAgents: string[] })[] {
+export function getActiveTasks(): (Omit<ActiveTask, 'activeAgents' | 'doneAgents'> & { activeAgents: string[]; doneAgents: string[] })[] {
   return Array.from(activeTasks.values()).map(t => ({
     ...t,
     activeAgents: Array.from(t.activeAgents),
+    doneAgents: Array.from(t.doneAgents),
     activeAgent: t.activeAgents.size > 0 ? Array.from(t.activeAgents).join(", ") : t.activeAgent,
   }));
 }
@@ -261,8 +263,9 @@ export function setupSocket(io: Server): void {
           task.agentTools[agentLabel].push(data.tool);
           task.toolCalls.push(data.tool);
         } else if (data.status === "subagent_done" || data.status === "realtime_agent_done") {
-          // Agent finished — remove from active set
+          // Agent finished — remove from active set, add to done set
           task.activeAgents.delete(agentLabel);
+          task.doneAgents.add(agentLabel);
           // Show remaining active agents or fall back to Orchestrator
           if (task.activeAgents.size > 0) {
             task.activeAgent = Array.from(task.activeAgents).join(", ");
@@ -653,6 +656,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         toolCalls: [],
         activeAgent: undefined,
         activeAgents: new Set(),
+        doneAgents: new Set(),
         agentTools: {},
         startedAt: new Date().toISOString(),
         lastUpdate: new Date().toISOString(),
@@ -898,7 +902,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         } else {
           // Collect pending agent results even on error — agents may have finished
           let pendingOnError = "";
-          if (realtimeTools) {
+          {
             const pendingResults = collectPendingResults(sessionId);
             if (pendingResults.length > 0) {
               pendingOnError = "\n\n---\n**Agent Results (collected after error):**\n";
@@ -1343,6 +1347,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         toolCalls: [],
         activeAgent: undefined,
         activeAgents: new Set(),
+        doneAgents: new Set(),
         agentTools: {},
         startedAt: new Date().toISOString(),
         lastUpdate: new Date().toISOString(),
@@ -1570,7 +1575,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         } else {
           // Collect pending agent results even on error
           let projPendingOnError = "";
-          if (realtimeTools) {
+          {
             const pendingResults = collectPendingResults(sessionId);
             if (pendingResults.length > 0) {
               projPendingOnError = "\n\n---\n**Agent Results (collected after error):**\n";

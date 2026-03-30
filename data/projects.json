@@ -134,5 +134,15 @@
     ],
     "createdAt": "2026-03-28T12:21:37.640Z",
     "updatedAt": "2026-03-28T12:27:52.740Z"
+  },
+  {
+    "id": "df12f538-30f8-4f04-9d7c-f2954ea719f3",
+    "name": "SASW",
+    "description": "",
+    "workingFolder": "",
+    "memory": "",
+    "skills": [],
+    "createdAt": "2026-03-30T03:40:57.615Z",
+    "updatedAt": "2026-03-30T03:40:57.615Z"
   }
 ]

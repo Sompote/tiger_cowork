@@ -477,6 +477,11 @@ export default function SettingsPage() {
             <input type="number" value={settings.agentCompressionWindowSize || 10} onChange={(e) => setSettings({ ...settings, agentCompressionWindowSize: Math.max(4, parseInt(e.target.value) || 10) })} min={4} max={30} />
             <p className="hint">Number of recent messages to keep uncompressed (default: 10)</p>
           </div>
+          <div className="form-group">
+            <label>Max Context Tokens</label>
+            <input type="number" value={settings.agentMaxContextTokens || 100000} onChange={(e) => setSettings({ ...settings, agentMaxContextTokens: Math.max(10000, parseInt(e.target.value) || 100000) })} min={10000} max={2000000} step={10000} />
+            <p className="hint">Auto-compact context when estimated tokens exceed this limit (default: 100,000)</p>
+          </div>
         </section>
 
         <section className="card">
@@ -646,6 +651,11 @@ export default function SettingsPage() {
                         <span>Enable Checkpoints</span>
                       </label>
                       <p className="hint">Save agent state periodically so tasks can resume after interruption</p>
+                    </div>
+                    <div className="form-group">
+                      <label>Max Context Tokens</label>
+                      <input type="number" value={settings.agentMaxContextTokens || 100000} onChange={(e) => setSettings({ ...settings, agentMaxContextTokens: Math.max(10000, parseInt(e.target.value) || 100000) })} min={10000} max={2000000} step={10000} />
+                      <p className="hint">Auto-compact context when estimated tokens exceed this limit (default: 100,000)</p>
                     </div>
                   </div>
                 </>

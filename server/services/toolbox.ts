@@ -594,10 +594,10 @@ async function fetchUrl(args: { url: string; method?: string }): Promise<any> {
   }
 }
 
-async function runPythonTool(args: { code: string }): Promise<any> {
+async function runPythonTool(args: { code: string }, _retryCount: number = 0): Promise<any> {
   const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-  const timeout = settings.pythonTimeout || 120000; // Increased default timeout to 2 minutes
+  const timeout = settings.pythonTimeout || 300000; // 5 minutes default
   const result = await runPython(args.code, sandboxDir, timeout, _currentProjectWorkingFolder);
 
   // If Python errored, provide structured error info to help the LLM fix the code
@@ -606,6 +606,67 @@ async function runPythonTool(args: { code: string }): Promise<any> {
     // Extract the most relevant error line (usually the last line of traceback)
     const errorLines = stderr.split("\n").filter(l => l.trim());
     const lastErrorLine = errorLines[errorLines.length - 1] || "";
+
+    // Auto-retry for SyntaxError: attempt automatic fixes before returning error to LLM
+    if (/SyntaxError/.test(stderr) && _retryCount < 2) {
+      let fixedCode = args.code;
+      let didFix = false;
+
+      // Fix 1: Missing closing parentheses — count and append if unbalanced
+      const openParens = (fixedCode.match(/\(/g) || []).length;
+      const closeParens = (fixedCode.match(/\)/g) || []).length;
+      if (openParens > closeParens) {
+        fixedCode += ")".repeat(openParens - closeParens);
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed ${openParens - closeParens} unclosed parentheses`);
+      }
+
+      // Fix 2: Missing closing brackets
+      const openBrackets = (fixedCode.match(/\[/g) || []).length;
+      const closeBrackets = (fixedCode.match(/\]/g) || []).length;
+      if (openBrackets > closeBrackets) {
+        fixedCode += "]".repeat(openBrackets - closeBrackets);
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed ${openBrackets - closeBrackets} unclosed brackets`);
+      }
+
+      // Fix 3: Missing closing braces
+      const openBraces = (fixedCode.match(/\{/g) || []).length;
+      const closeBraces = (fixedCode.match(/\}/g) || []).length;
+      if (openBraces > closeBraces) {
+        fixedCode += "}".repeat(openBraces - closeBraces);
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed ${openBraces - closeBraces} unclosed braces`);
+      }
+
+      // Fix 4: Unterminated triple-quoted string
+      const tripleDoubleCount = (fixedCode.match(/"""/g) || []).length;
+      if (tripleDoubleCount % 2 !== 0) {
+        fixedCode += '\n"""';
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed unterminated triple-double-quoted string`);
+      }
+      const tripleSingleCount = (fixedCode.match(/'''/g) || []).length;
+      if (tripleSingleCount % 2 !== 0) {
+        fixedCode += "\n'''";
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed unterminated triple-single-quoted string`);
+      }
+
+      // Fix 5: Python 2-style print statements → print()
+      const printFix = fixedCode.replace(/^(\s*)print\s+(?!\()(.*?)$/gm, "$1print($2)");
+      if (printFix !== fixedCode) {
+        fixedCode = printFix;
+        didFix = true;
+        console.log(`[PythonAutoRetry] Fixed Python 2-style print statements`);
+      }
+
+      if (didFix && fixedCode !== args.code) {
+        console.log(`[PythonAutoRetry] Attempting auto-fix retry (attempt ${_retryCount + 1}/2)...`);
+        return runPythonTool({ code: fixedCode }, _retryCount + 1);
+      }
+    }
+
     // Detect common error categories for better recovery hints
     let errorHint = "";
     if (/ModuleNotFoundError|ImportError|No module named/.test(stderr)) {
@@ -614,7 +675,9 @@ async function runPythonTool(args: { code: string }): Promise<any> {
     } else if (/FileNotFoundError/.test(stderr)) {
       errorHint = "\n💡 HINT: File not found. Use os.listdir() or os.path.exists() to verify paths before accessing files.";
     } else if (/SyntaxError/.test(stderr)) {
-      errorHint = "\n💡 HINT: Python syntax error. Check for missing colons, brackets, quotes, or indentation issues.";
+      errorHint = _retryCount > 0
+        ? "\n💡 HINT: Python syntax error (auto-fix was attempted but didn't resolve it). Carefully review the code for missing colons, brackets, quotes, or indentation issues."
+        : "\n💡 HINT: Python syntax error. Check for missing colons, brackets, quotes, or indentation issues.";
     } else if (/TypeError/.test(stderr)) {
       errorHint = "\n💡 HINT: Type error. Check argument types and function signatures. Print type(variable) to debug.";
     } else if (/PermissionError/.test(stderr)) {

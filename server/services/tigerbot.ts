@@ -1,5 +1,5 @@
 import { getSettings, getCheckpointDir } from "./data";
-import { getTools, callTool } from "./toolbox";
+import { getTools, callTool, getWorkingAgents, collectPendingResults } from "./toolbox";
 import fs from "fs/promises";
 
 interface ChatMessage {
@@ -966,12 +966,49 @@ export async function callTigerBotWithTools(
       const lastToolFailed = toolResults.length > 0 && (toolResults[toolResults.length - 1]?.result?.ok === false || toolResults[toolResults.length - 1]?.result?.exitCode === 1);
       const contentLooksLikeGivingUp = /\b(error|fail|unable|cannot|couldn'?t|sorry|unfortunately|issue|problem)\b/i.test(message.content || "");
 
+      // Check if sub-agents are still working — do NOT stop if work is pending
+      if (sessionId) {
+        const workingAgents = getWorkingAgents(sessionId);
+        const pendingResults = collectPendingResults(sessionId);
+        if (workingAgents.length > 0 || pendingResults.length > 0) {
+          const agentNames = workingAgents.map(a => a.agentName).join(", ");
+          const pendingNames = pendingResults.map(r => r.agentName).join(", ");
+          console.log(`[ToolLoop] LLM tried to stop but agents still working: [${agentNames}], pending results: [${pendingNames}]`);
+
+          // Inject pending results if available
+          let pendingInfo = "";
+          if (pendingResults.length > 0) {
+            pendingInfo = "\n\nResults just arrived from your agents:\n" + pendingResults.map(r => `**${r.agentName}**: ${r.result.slice(0, 3000)}`).join("\n\n");
+          }
+
+          allMessages.push({
+            role: "user" as const,
+            content: `⚠️ SYSTEM: Do NOT stop yet — you have ${workingAgents.length} agent(s) still working${agentNames ? ` (${agentNames})` : ""} and ${pendingResults.length} pending result(s). You MUST:\n1. Use check_agents or wait_result to collect their results\n2. Integrate ALL agent results into your final answer\n3. Only finish AFTER all agents have reported back\nDo NOT give a partial answer. Do NOT abandon pending work.${pendingInfo}`,
+          });
+          consecutiveErrors = 0;
+          continue;
+        }
+      }
+
       if (lastToolFailed && contentLooksLikeGivingUp && errorRecoveryAttempts < maxErrorRecoveries && round < maxToolRounds - 1) {
         errorRecoveryAttempts++;
         console.log(`[ToolLoop] LLM tried to stop after error. Nudging to retry (attempt ${errorRecoveryAttempts}/${maxErrorRecoveries})...`);
         allMessages.push({
           role: "user" as const,
           content: `⚠️ SYSTEM: Do NOT stop or explain the error to the user. You MUST fix the problem and complete the task. Analyze what went wrong, try a different approach, and call the appropriate tool again. Common fixes:\n- Wrong file path? Use list_files to find the correct path\n- Missing package? Install it with run_python: import subprocess; subprocess.run(['pip', 'install', 'PACKAGE'], check=True)\n- Syntax error? Fix the code and retry\n- File not found? Check if it's in a different directory (uploads/, data/, etc.)\nDo NOT respond with text — call a tool to fix and retry.`,
+        });
+        consecutiveErrors = 0;
+        continue;
+      }
+
+      // Also nudge if the LLM stops with incomplete-sounding content (even without explicit errors)
+      const contentLooksIncomplete = /\b(will now|next step|let me|i('ll| will)|working on|in progress|wait for)\b/i.test(message.content || "");
+      if (contentLooksIncomplete && errorRecoveryAttempts < maxErrorRecoveries && round < maxToolRounds - 1) {
+        errorRecoveryAttempts++;
+        console.log(`[ToolLoop] LLM stopped with incomplete-sounding response. Nudging to continue (attempt ${errorRecoveryAttempts}/${maxErrorRecoveries})...`);
+        allMessages.push({
+          role: "user" as const,
+          content: `⚠️ SYSTEM: Your response indicates you have more work to do but you stopped without calling any tools. Do NOT describe what you plan to do — actually DO it by calling the appropriate tools now. Continue working until the task is fully complete.`,
         });
         consecutiveErrors = 0;
         continue;

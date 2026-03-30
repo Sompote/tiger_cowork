@@ -25,6 +25,7 @@ interface ActiveTask {
   toolCalls: string[];
   activeAgent?: string;
   activeAgents?: string[];
+  doneAgents?: string[];
   agentTools: Record<string, string[]>;
   startedAt: string;
   lastUpdate: string;
@@ -195,34 +196,56 @@ export default function TasksPage() {
                   <strong>Status:</strong> <span className="active-task-status">{task.status}</span>
                 </div>
 
-                {/* Active agents pills */}
-                {(task.activeAgents && task.activeAgents.length > 0) && (
-                  <div className="card-detail">
-                    <strong>Working now:</strong>
-                    <div className="active-agents-row">
-                      {task.activeAgents.map((agent, i) => (
-                        <span key={i} className={`active-agent-badge agent-color-${agentColorIndex(agent)}`}>
-                          <span className="agent-dot" />
-                          {agent}
-                        </span>
-                      ))}
+                {/* Active & waiting agents pills */}
+                {task.agentTools && Object.keys(task.agentTools).length > 0 && (() => {
+                  const running = (task.activeAgents || []);
+                  const done = new Set(task.doneAgents || []);
+                  const waiting = Object.keys(task.agentTools).filter(a => !running.includes(a) && !done.has(a));
+                  return (running.length > 0 || waiting.length > 0) ? (
+                    <div className="card-detail">
+                      {running.length > 0 && (<>
+                        <strong>Running:</strong>
+                        <div className="active-agents-row">
+                          {running.map((agent, i) => (
+                            <span key={i} className={`active-agent-badge agent-color-${agentColorIndex(agent)}`}>
+                              <span className="agent-dot" />
+                              {agent}
+                            </span>
+                          ))}
+                        </div>
+                      </>)}
+                      {waiting.length > 0 && (<>
+                        <strong style={{ marginLeft: running.length > 0 ? 12 : 0 }}>Waiting:</strong>
+                        <div className="active-agents-row">
+                          {waiting.map((agent, i) => (
+                            <span key={i} className={`active-agent-badge agent-waiting-badge agent-color-${agentColorIndex(agent)}`}>
+                              <span className="agent-dot agent-dot-waiting" />
+                              {agent}
+                            </span>
+                          ))}
+                        </div>
+                      </>)}
                     </div>
-                  </div>
-                )}
+                  ) : null;
+                })()}
 
                 {/* Agent tools breakdown with colors */}
                 {task.agentTools && Object.keys(task.agentTools).length > 0 ? (
                   <div className="agent-tools-breakdown">
                     {Object.entries(task.agentTools).map(([agent, tools]) => {
                       const isActive = (task.activeAgents || []).includes(agent);
+                      const isDone = (task.doneAgents || []).includes(agent);
+                      const isWaiting = !isActive && !isDone;
                       const colorIdx = agentColorIndex(agent);
+                      const stateClass = isActive ? "agent-active" : isWaiting ? "agent-waiting" : "agent-done";
+                      const stateIcon = isActive ? "\u25B6" : isWaiting ? "\u23F3" : "\u2713";
                       return (
                         <div
                           key={agent}
-                          className={`agent-tools-row agent-color-${colorIdx}${isActive ? " agent-row-active" : ""}`}
+                          className={`agent-tools-row agent-color-${colorIdx}${isActive ? " agent-row-active" : isWaiting ? " agent-row-waiting" : ""}`}
                         >
-                          <span className={`agent-name-label agent-color-${colorIdx}${isActive ? " agent-active" : " agent-done"}`}>
-                            <span className="agent-status-icon">{isActive ? "\u25B6" : "\u2713"}</span>
+                          <span className={`agent-name-label agent-color-${colorIdx} ${stateClass}`}>
+                            <span className="agent-status-icon">{stateIcon}</span>
                             {agent}
                           </span>
                           <span className="active-task-tools">

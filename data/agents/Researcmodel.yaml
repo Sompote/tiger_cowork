@@ -57,6 +57,7 @@ agents:
       - Debug and test simulation code for accuracy and performance
       - Refactor and optimize existing simulation code for better efficiency
       - Ensure code is scalable and maintainable for various simulation scenarios
+      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
   - id: coding_engineer_2
     name: Simulation Engineer
     role: worker
@@ -71,6 +72,7 @@ agents:
       - Develop analysis code for data processing and visualization
       - Optimize simulation performance and numerical accuracy
       - Validate simulation results against theoretical expectations
+      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
   - id: quality_checker
     name: Quality Checker
     role: checker
@@ -99,6 +101,22 @@ agents:
       - Ensure narrative coherence and citation accuracy
     bus:
       enabled: true
+  - id: agent_8
+    name: Python Model Optimizer
+    role: worker
+    persona: >-
+      You are an expert in optimizing machine learning models in Python with deep knowledge of PyTorch, TensorFlow, and
+      various optimization techniques. You specialize in improving model performance, reducing memory footprint, and
+      accelerating training and inference times.
+    responsibilities:
+      - Analyze and optimize model architecture for better performance
+      - Implement techniques like quantization, pruning, and knowledge distillation
+      - Reduce memory usage and improve computational efficiency
+      - Profile code to identify bottlenecks and optimization opportunities
+      - Apply framework-specific optimizations for PyTorch and TensorFlow models
+      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
+    bus:
+      enabled: true
 workflow:
   sequence:
     - step: 1
@@ -110,6 +128,7 @@ workflow:
         - coding_engineer_2
         - quality_checker
         - report_creator
+        - agent_8
       communication:
         enabled: true
         protocols:
@@ -121,6 +140,7 @@ workflow:
           - coding_engineer_2
           - quality_checker
           - report_creator
+          - agent_8
         permitted_topics: []
       peer_socket:
         enabled: true
@@ -132,6 +152,7 @@ workflow:
           - coding_engineer_2
           - quality_checker
           - report_creator
+          - agent_8
         permitted_topics: []
     - step: 2
       agent: literature_researcher
@@ -174,14 +195,48 @@ workflow:
     - step: 5
       agent: coding_engineer_1
       action: Develop simulation code for mathematical and computational models
+      outputs_to:
+        - agent_8
+        - coding_engineer_2
       communication:
         enabled: true
         protocols:
           - queue
+          - tcp
         participants:
           - coding_engineer_1
+          - agent_8
+          - coding_engineer_2
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - coding_engineer_1
+          - agent_8
+          - coding_engineer_2
         permitted_topics: []
     - step: 6
+      agent: agent_8
+      action: Analyze and optimize model architecture for better performance
+      outputs_to:
+        - coding_engineer_2
+      communication:
+        enabled: true
+        protocols:
+          - tcp
+        participants:
+          - agent_8
+          - coding_engineer_2
+        permitted_topics: []
+      peer_socket:
+        enabled: true
+        protocol: bidirectional_async
+        participants:
+          - agent_8
+          - coding_engineer_2
+        permitted_topics: []
+    - step: 7
       agent: coding_engineer_2
       action: Design and implement numerical simulations using Python
       communication:
@@ -191,7 +246,7 @@ workflow:
         participants:
           - coding_engineer_2
         permitted_topics: []
-    - step: 7
+    - step: 8
       agent: human
       action: Provide research topic
       communication:
@@ -266,6 +321,22 @@ connections:
     to: report_creator
     label: provide_tools
     protocol: queue
+  - from: research_orchestrator
+    to: agent_8
+    label: connection
+    protocol: tcp
+  - from: agent_8
+    to: coding_engineer_2
+    label: connection
+    protocol: tcp
+  - from: coding_engineer_1
+    to: agent_8
+    label: connection
+    protocol: tcp
+  - from: coding_engineer_1
+    to: coding_engineer_2
+    label: connection
+    protocol: tcp
 communication:
   format: structured_json_in_yaml_envelope
   context_inheritance:

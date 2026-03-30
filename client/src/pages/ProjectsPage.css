@@ -587,7 +587,8 @@
   flex-direction: column;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow-y: auto;
+  max-height: 60vh;
 }
 
 .project-file-item {

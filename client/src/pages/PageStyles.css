@@ -629,9 +629,28 @@
   color: var(--agent-color, var(--accent));
 }
 
+.agent-name-label.agent-waiting {
+  color: var(--agent-color, var(--text-secondary));
+  opacity: 0.75;
+}
+
 .agent-name-label.agent-done {
   color: var(--text-tertiary);
   opacity: 0.6;
+}
+
+.agent-tools-row.agent-row-waiting {
+  background: var(--agent-bg, rgba(99,102,241,0.04));
+  opacity: 0.85;
+}
+
+.agent-waiting-badge {
+  opacity: 0.7;
+}
+
+.agent-dot-waiting {
+  animation: none !important;
+  opacity: 0.5;
 }
 
 .agent-tool-count {
