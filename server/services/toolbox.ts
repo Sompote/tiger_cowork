@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { exec } from "child_process";
+import { exec, spawn as spawnChild } from "child_process";
 import { promisify } from "util";
 import yaml from "js-yaml";
 import { runPython } from "./python";
@@ -1144,6 +1144,170 @@ interface AgentSystemConfig {
   communication?: any;
 }
 
+// --- Claude Code CLI Agent ---
+
+/** Check if a model string indicates Claude Code CLI should be used */
+export function isClaudeCodeModel(model?: string): boolean {
+  if (!model) return false;
+  const m = model.toLowerCase().trim();
+  return m === "claude-code" || m === "claude_code" || m === "claude-code-cli" || m.startsWith("claude-code:");
+}
+
+/**
+ * Run a task using Claude Code CLI (`claude -p`).
+ * Claude Code is a full autonomous agent with its own tool loop —
+ * it handles Read, Edit, Bash, Glob, Grep, etc. internally.
+ * No API key needed — uses the local OAuth login.
+ */
+export async function runClaudeCodeAgent(
+  task: string,
+  opts: {
+    workingDir?: string;
+    systemPrompt?: string;
+    signal?: AbortSignal;
+    timeout?: number;  // ms, default 5 minutes
+    onToolCall?: (name: string, args: any) => void;
+    onText?: (text: string) => void;
+    maxTurns?: number;
+  } = {},
+): Promise<{ content: string; toolResults?: any[]; toolCalls?: string[] }> {
+  const settings = await getSettings();
+  const workDir = opts.workingDir || _currentProjectWorkingFolder || settings.sandboxDir || process.cwd();
+  const timeout = opts.timeout || 300_000; // 5 min default
+  const maxTurns = opts.maxTurns || 25;
+
+  // Build the prompt: include system prompt context if provided
+  let fullPrompt = task;
+  if (opts.systemPrompt) {
+    fullPrompt = `${opts.systemPrompt}\n\n---\n\nTASK:\n${task}`;
+  }
+
+  // Build CLI args
+  const cliArgs: string[] = [
+    "-p", fullPrompt,
+    "--output-format", "stream-json",
+    "--max-turns", String(maxTurns),
+    "--allowedTools", "Read,Edit,Write,Bash,Glob,Grep",
+    "--verbose",
+  ];
+
+  console.log(`[ClaudeCode] Spawning claude CLI in ${workDir} (timeout: ${timeout}ms, maxTurns: ${maxTurns})`);
+
+  return new Promise((resolve, reject) => {
+    const child = spawnChild("claude", cliArgs, {
+      cwd: workDir,
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let resultText = "";
+    let stderrText = "";
+    const toolCalls: string[] = [];
+    let settled = false;
+
+    // Timeout handler
+    const timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGTERM");
+        console.log(`[ClaudeCode] Timeout after ${timeout}ms`);
+        resolve({
+          content: resultText || `Claude Code timed out after ${timeout / 1000}s. Partial output may be available.`,
+          toolCalls,
+        });
+      }
+    }, timeout);
+
+    // Abort signal handler
+    if (opts.signal) {
+      const onAbort = () => {
+        if (!settled) {
+          settled = true;
+          child.kill("SIGTERM");
+          clearTimeout(timeoutId);
+          resolve({ content: resultText || "Task was cancelled.", toolCalls });
+        }
+      };
+      if (opts.signal.aborted) {
+        child.kill("SIGTERM");
+        clearTimeout(timeoutId);
+        return resolve({ content: "Task was cancelled.", toolCalls });
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    // Parse streaming JSON output line by line
+    let buffer = "";
+    child.stdout.on("data", (data: Buffer) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // keep incomplete last line in buffer
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          // Handle different event types from Claude Code stream-json
+          if (event.type === "assistant" && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === "text" && block.text) {
+                resultText += block.text;
+                if (opts.onText) opts.onText(block.text);
+              }
+              if (block.type === "tool_use" && block.name) {
+                toolCalls.push(block.name);
+                if (opts.onToolCall) {
+                  opts.onToolCall(block.name, block.input || {});
+                }
+              }
+            }
+          } else if (event.type === "result") {
+            // Final result event
+            if (event.result) {
+              resultText = event.result;
+            }
+          }
+        } catch {
+          // Non-JSON line or partial — ignore
+        }
+      }
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderrText += data.toString();
+    });
+
+    child.on("close", (code: number | null) => {
+      clearTimeout(timeoutId);
+      if (settled) return;
+      settled = true;
+
+      if (code !== 0 && !resultText) {
+        console.error(`[ClaudeCode] Exited with code ${code}. stderr: ${stderrText.slice(0, 500)}`);
+        resolve({
+          content: `Claude Code exited with code ${code}. Error: ${stderrText.slice(0, 2000)}`,
+          toolCalls,
+        });
+      } else {
+        console.log(`[ClaudeCode] Completed. Tools used: ${toolCalls.length}, result length: ${resultText.length}`);
+        resolve({
+          content: resultText || "(no output)",
+          toolCalls,
+        });
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timeoutId);
+      if (settled) return;
+      settled = true;
+      console.error(`[ClaudeCode] Spawn error:`, err.message);
+      reject(new Error(`Failed to spawn Claude Code CLI: ${err.message}. Is 'claude' installed and in PATH?`));
+    });
+  });
+}
+
 export function loadAgentConfig(filename: string): AgentSystemConfig | null {
   const agentsDir = path.resolve("data/agents");
   const fp = path.join(agentsDir, filename);
@@ -1447,39 +1611,67 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     // Use agent-specific model if defined, fall back to system sub-agent model override
     const agentModel = resolvedAgentDef?.model || subModel || undefined;
 
-    const result = await callAgent(
-      [{ role: "user" as const, content: args.task }],
-      subPrompt,
-      // onToolCall
-      (name: string, toolArgs: any) => {
-        run.toolCalls.push(name);
-        console.log(`[SubAgent:${label}] Tool: ${name}`);
-        if (subagentStatusCallback) {
-          subagentStatusCallback({
-            sessionId: parentSessionId,
-            status: "subagent_tool",
-            subagentId,
-            label,
-            tool: name,
-          });
-        }
-      },
-      // onToolResult
-      (name: string, toolResult: any) => {
-        if (subagentStatusCallback) {
-          subagentStatusCallback({
-            sessionId: parentSessionId,
-            status: "subagent_tool_done",
-            subagentId,
-            label,
-            tool: name,
-          });
-        }
-      },
-      combinedSignal,
-      subagentTools,
-      agentModel,
-    );
+    let result: any;
+
+    if (isClaudeCodeModel(agentModel)) {
+      // --- Claude Code CLI agent: bypass LLM tool loop, delegate entirely to claude CLI ---
+      console.log(`[SubAgent:${label}] Using Claude Code CLI as agent backend`);
+      result = await runClaudeCodeAgent(args.task, {
+        workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
+        systemPrompt: subPrompt,
+        signal: combinedSignal,
+        timeout,
+        maxTurns: settings.agentMaxToolRounds || 15,
+        onToolCall: (name: string, toolArgs: any) => {
+          run.toolCalls.push(name);
+          console.log(`[SubAgent:${label}] ClaudeCode Tool: ${name}`);
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId: parentSessionId,
+              status: "subagent_tool",
+              subagentId,
+              label,
+              tool: name,
+            });
+          }
+        },
+      });
+    } else {
+      // --- Standard LLM API agent ---
+      result = await callAgent(
+        [{ role: "user" as const, content: args.task }],
+        subPrompt,
+        // onToolCall
+        (name: string, toolArgs: any) => {
+          run.toolCalls.push(name);
+          console.log(`[SubAgent:${label}] Tool: ${name}`);
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId: parentSessionId,
+              status: "subagent_tool",
+              subagentId,
+              label,
+              tool: name,
+            });
+          }
+        },
+        // onToolResult
+        (name: string, toolResult: any) => {
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId: parentSessionId,
+              status: "subagent_tool_done",
+              subagentId,
+              label,
+              tool: name,
+            });
+          }
+        },
+        combinedSignal,
+        subagentTools,
+        agentModel,
+      );
+    }
 
     clearTimeout(timeoutId);
     clearCallContext(subTaskId);
@@ -1877,45 +2069,70 @@ async function realtimeAgentLoop(
       const rtTaskId = `realtime-${agentId}-${Date.now()}`;
       setCallContext(rtTaskId, sessionId, 0, agentId, _currentProjectWorkingFolder);
 
-      // Get the tool-calling function
-      const callAgent = await getSubagentCaller();
-
       // Run LLM tool loop for this task
       const taskPrompt = `${systemPrompt}\n\nYOUR TASK:\n${msg.payload.task}${msg.payload.context ? `\n\nADDITIONAL CONTEXT:\n${msg.payload.context}` : ""}`;
 
       // Use agent-specific model from YAML definition if set
       const realtimeAgentModel = agentDef.model || undefined;
 
-      const result = await callAgent(
-        [{ role: "user" as const, content: msg.payload.task }],
-        taskPrompt,
-        (name: string, toolArgs: any) => {
-          console.log(`[Realtime:${agentDef.name}] Tool: ${name}`);
-          if (subagentStatusCallback) {
-            subagentStatusCallback({
-              sessionId,
-              status: "realtime_agent_tool",
-              agentId,
-              label: agentDef.name,
-              tool: name,
-            });
-          }
-        },
-        (name: string, toolResult: any) => {
-          if (subagentStatusCallback) {
-            subagentStatusCallback({
-              sessionId,
-              status: "realtime_agent_tool_done",
-              agentId,
-              label: agentDef.name,
-              tool: name,
-            });
-          }
-        },
-        signal,
-        finalTools,
-        realtimeAgentModel,
-      );
+      let result: any;
+
+      if (isClaudeCodeModel(realtimeAgentModel)) {
+        // --- Claude Code CLI: autonomous agent with its own tool loop ---
+        console.log(`[Realtime:${agentDef.name}] Using Claude Code CLI as agent backend`);
+        result = await runClaudeCodeAgent(msg.payload.task, {
+          workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
+          systemPrompt: taskPrompt,
+          signal,
+          timeout: (settings.subAgentTimeout || 120) * 1000,
+          maxTurns: settings.agentMaxToolRounds || 15,
+          onToolCall: (name: string, toolArgs: any) => {
+            console.log(`[Realtime:${agentDef.name}] ClaudeCode Tool: ${name}`);
+            if (subagentStatusCallback) {
+              subagentStatusCallback({
+                sessionId,
+                status: "realtime_agent_tool",
+                agentId,
+                label: agentDef.name,
+                tool: name,
+              });
+            }
+          },
+        });
+      } else {
+        // --- Standard LLM API agent ---
+        const callAgent = await getSubagentCaller();
+        result = await callAgent(
+          [{ role: "user" as const, content: msg.payload.task }],
+          taskPrompt,
+          (name: string, toolArgs: any) => {
+            console.log(`[Realtime:${agentDef.name}] Tool: ${name}`);
+            if (subagentStatusCallback) {
+              subagentStatusCallback({
+                sessionId,
+                status: "realtime_agent_tool",
+                agentId,
+                label: agentDef.name,
+                tool: name,
+              });
+            }
+          },
+          (name: string, toolResult: any) => {
+            if (subagentStatusCallback) {
+              subagentStatusCallback({
+                sessionId,
+                status: "realtime_agent_tool_done",
+                agentId,
+                label: agentDef.name,
+                tool: name,
+              });
+            }
+          },
+          signal,
+          finalTools,
+          realtimeAgentModel,
+        );
+      }
 
       // Restore context
       clearCallContext(rtTaskId);

@@ -1,5 +1,5 @@
 import { getSettings, getCheckpointDir } from "./data";
-import { getTools, callTool, getWorkingAgents, collectPendingResults } from "./toolbox";
+import { getTools, callTool, getWorkingAgents, collectPendingResults, isClaudeCodeModel, runClaudeCodeAgent } from "./toolbox";
 import fs from "fs/promises";
 
 interface ChatMessage {
@@ -693,6 +693,24 @@ export async function callTigerBotWithTools(
   onRetry?: (attempt: number, maxRetries: number, error: string) => void,
   taskId?: string,
 ): Promise<TigerBotResponse> {
+  // --- Claude Code CLI shortcut: delegate entirely to claude CLI ---
+  if (isClaudeCodeModel(modelOverride)) {
+    console.log(`[ToolLoop] Delegating to Claude Code CLI (model: ${modelOverride})`);
+    const settings = await getSettings();
+    // Extract the user's task from messages (last user message)
+    const userMsg = [...messages].reverse().find(m => m.role === "user");
+    const task = typeof userMsg?.content === "string" ? userMsg.content : "(no task)";
+    const result = await runClaudeCodeAgent(task, {
+      workingDir: settings.sandboxDir || process.cwd(),
+      systemPrompt,
+      signal,
+      timeout: (settings.subAgentTimeout || 120) * 1000,
+      maxTurns: settings.agentMaxToolRounds || 15,
+      onToolCall: onToolCall || undefined,
+    });
+    return { content: result.content, toolResults: result.toolCalls?.map(t => ({ tool: t, result: { ok: true } })) };
+  }
+
   const { apiKey } = await getApiConfig();
   if (!apiKey) {
     return { content: "API key not configured. Go to Settings to add your API key." };

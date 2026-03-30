@@ -199,35 +199,65 @@ function AgentDefPanel({
                 {showModelInput && (
                   <>
                     <div className="model-input-row">
-                      <input
-                        value={agent.model}
+                      <select
+                        value={agent.model === "claude-code" ? "claude-code" : "__custom__"}
                         onChange={(e) => {
-                          onUpdate({ ...agent, model: e.target.value });
-                          setModelValid(null);
-                        }}
-                        placeholder="e.g. claude-opus-4-6, gpt-4o, gemini-pro"
-                      />
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={async () => {
-                          setModelValidating(true);
-                          try {
-                            const res = await api.validateModel(agent.model);
-                            setModelValid(res.available);
-                          } catch {
-                            setModelValid(false);
+                          const val = e.target.value;
+                          if (val === "claude-code") {
+                            onUpdate({ ...agent, model: "claude-code" });
+                            setModelValid(true);
+                          } else {
+                            // Switch to custom — keep current value if not claude-code
+                            if (agent.model === "claude-code") {
+                              onUpdate({ ...agent, model: "" });
+                            }
+                            setModelValid(null);
                           }
-                          setModelValidating(false);
                         }}
-                        disabled={modelValidating || !agent.model.trim()}
+                        style={{ width: "auto", minWidth: 160 }}
                       >
-                        {modelValidating ? "..." : "Validate"}
-                      </button>
+                        <option value="__custom__">API Model</option>
+                        <option value="claude-code">Claude Code (Local CLI)</option>
+                      </select>
+                      {agent.model !== "claude-code" && (
+                        <>
+                          <input
+                            value={agent.model}
+                            onChange={(e) => {
+                              onUpdate({ ...agent, model: e.target.value });
+                              setModelValid(null);
+                            }}
+                            placeholder="e.g. claude-opus-4-6, gpt-4o, gemini-pro"
+                            style={{ flex: 1 }}
+                          />
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={async () => {
+                              setModelValidating(true);
+                              try {
+                                const res = await api.validateModel(agent.model);
+                                setModelValid(res.available);
+                              } catch {
+                                setModelValid(false);
+                              }
+                              setModelValidating(false);
+                            }}
+                            disabled={modelValidating || !agent.model.trim()}
+                          >
+                            {modelValidating ? "..." : "Validate"}
+                          </button>
+                        </>
+                      )}
                     </div>
-                    {modelValid === true && (
+                    {agent.model === "claude-code" && (
+                      <span className="model-valid-msg" style={{ display: "block", marginTop: 4 }}>
+                        Uses locally installed Claude Code CLI — no API key needed (OAuth login)
+                      </span>
+                    )}
+                    {agent.model !== "claude-code" && modelValid === true && (
                       <span className="model-valid-msg">Model available</span>
                     )}
-                    {modelValid === false && (
+                    {agent.model !== "claude-code" && modelValid === false && (
                       <span className="model-invalid-msg">Model not found — you can still use it</span>
                     )}
                   </>
