@@ -1,4 +1,4 @@
-![Tiger Cowork Banner](picture/banner2.png)
+![Tiger Cowork Banner](picture/banner2.jpg)
 
 # Tiger Cowork v0.4.0
 
@@ -8,11 +8,11 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 ## Screenshots
 
-![Tiger Cowork — AI chat with output panel](picture/screen3.png)
+![Tiger Cowork — AI chat with output panel](picture/screen3.jpg)
 
 *AI Chat with tool-calling — reads data, generates React/Recharts visualizations, renders them in the output panel.*
 
-![Tiger Cowork — Agent System Editor](picture/agent2.png)
+![Tiger Cowork — Agent System Editor](picture/agent2.jpg)
 
 *Visual Agent Editor — drag-and-drop multi-agent design with mesh networking, bus communication, and YAML export.*
 
