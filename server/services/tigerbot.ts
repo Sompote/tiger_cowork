@@ -690,7 +690,8 @@ export async function callTigerBotWithTools(
   toolsOverride?: any[],
   modelOverride?: string,
   sessionId?: string,
-  onRetry?: (attempt: number, maxRetries: number, error: string) => void
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void,
+  taskId?: string,
 ): Promise<TigerBotResponse> {
   const { apiKey } = await getApiConfig();
   if (!apiKey) {
@@ -704,6 +705,7 @@ export async function callTigerBotWithTools(
   const compressionWindowSize = settings.agentCompressionWindowSize || 10;
   const checkpointInterval = settings.agentCheckpointInterval || 5;
   const checkpointEnabled = settings.agentCheckpointEnabled !== false; // default true
+  const maxContextTokens = settings.agentMaxContextTokens || 100_000; // trigger compaction when context exceeds this token estimate
 
   // Try to resume from checkpoint
   let allMessages: ChatMessage[] = [];
@@ -767,6 +769,18 @@ export async function callTigerBotWithTools(
       }
     }
 
+    // Proactive compaction: estimate tokens (~4 chars/token) and compress if over budget
+    const estimatedTokens = Math.ceil(estimateMessagesChars(allMessages) / 4);
+    if (estimatedTokens > maxContextTokens) {
+      console.log(`[ToolLoop] Context ~${estimatedTokens} tokens exceeds limit ${maxContextTokens} — compacting...`);
+      const compressed = await compressOlderMessages(allMessages, Math.min(compressionWindowSize, 6), settings.agentCompressionModel);
+      if (compressed.length < allMessages.length) {
+        allMessages.length = 0;
+        allMessages.push(...(compressed as ChatMessage[]));
+        console.log(`[ToolLoop] Compacted to ~${Math.ceil(estimateMessagesChars(allMessages) / 4)} tokens (${allMessages.length} messages)`);
+      }
+    }
+
     // Safety fallback: naive trim if still over budget after compression
     const trimmed = trimConversationContext(allMessages) as ChatMessage[];
     if (trimmed.length < allMessages.length) {
@@ -814,6 +828,10 @@ export async function callTigerBotWithTools(
             allMessages.length = 0;
             allMessages.push(...trimmed);
             console.log(`[ToolLoop] Trimmed to ${allMessages.length} messages (${estimateMessagesChars(allMessages)} chars). Retrying...`);
+          }
+          if (llmRetry >= llmMaxRetries - 1) {
+            console.error(`[ToolLoop] Context overflow persists after ${llmMaxRetries} compression attempts.`);
+            return { content: `Context overflow after ${llmMaxRetries} compression retries: ${errMsg.slice(0, 200)}`, toolResults };
           }
           continue; // retry immediately after compression
         }
@@ -1037,8 +1055,8 @@ export async function callTigerBotWithTools(
       parsedToolCalls.push({ tc, fnName, fnArgs });
     }
 
-    // Separate parallelizable calls (spawn_subagent, send_task) from sequential ones
-    const parallelToolNames = new Set(["spawn_subagent", "send_task"]);
+    // Separate parallelizable calls (spawn_subagent, send_task, wait_result) from sequential ones
+    const parallelToolNames = new Set(["spawn_subagent", "send_task", "wait_result"]);
     const subagentCalls = parsedToolCalls.filter(p => parallelToolNames.has(p.fnName));
     const otherCalls = parsedToolCalls.filter(p => !parallelToolNames.has(p.fnName));
 
@@ -1054,7 +1072,7 @@ export async function callTigerBotWithTools(
 
       let result: any;
       try {
-        result = await callTool(fnName, fnArgs, signal);
+        result = await callTool(fnName, fnArgs, signal, taskId);
       } catch (err: any) {
         result = { ok: false, error: err.message };
       }
@@ -1300,7 +1318,7 @@ Scoring guide:
             try { fnArgs = JSON.parse(tc.function?.arguments || "{}"); } catch { fnArgs = {}; }
             if (onToolCall) onToolCall(fnName, fnArgs);
             let result: any;
-            try { result = await callTool(fnName, fnArgs); } catch (err: any) { result = { ok: false, error: err.message }; }
+            try { result = await callTool(fnName, fnArgs, undefined, taskId); } catch (err: any) { result = { ok: false, error: err.message }; }
             if (onToolResult) onToolResult(fnName, result);
             toolResults.push({ tool: fnName, result });
             totalToolCalls++;
@@ -1379,7 +1397,7 @@ Scoring guide:
           try { fnArgs = JSON.parse(tc.function?.arguments || "{}"); } catch { fnArgs = {}; }
           if (onToolCall) onToolCall(fnName, fnArgs);
           let result: any;
-          try { result = await callTool(fnName, fnArgs); } catch (err: any) { result = { ok: false, error: err.message }; }
+          try { result = await callTool(fnName, fnArgs, undefined, taskId); } catch (err: any) { result = { ok: false, error: err.message }; }
           if (onToolResult) onToolResult(fnName, result);
           toolResults.push({ tool: fnName, result });
           totalToolCalls++;

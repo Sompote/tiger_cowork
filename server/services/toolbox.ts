@@ -1363,7 +1363,8 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
   // Set agent context so protocol tools know who we are — preserve project folder
   const prevAgentId = _currentAgentId;
   const prevProjectFolder = _currentProjectWorkingFolder;
-  setCallContext(parentSessionId, currentDepth + 1, agentId, _currentProjectWorkingFolder);
+  const subTaskId = `subagent-${agentId}-${Date.now()}`;
+  setCallContext(subTaskId, parentSessionId, currentDepth + 1, agentId, _currentProjectWorkingFolder);
 
   try {
     const callAgent = await getSubagentCaller();
@@ -1418,8 +1419,11 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     );
 
     clearTimeout(timeoutId);
-    // Restore parent agent context
-    setCallContext(parentSessionId, currentDepth, prevAgentId, prevProjectFolder);
+    clearCallContext(subTaskId);
+    // Restore parent agent context globals
+    _currentAgentId = prevAgentId;
+    _currentProjectWorkingFolder = prevProjectFolder;
+    _currentSubagentDepth = currentDepth;
 
     run.status = "completed";
     run.completedAt = new Date().toISOString();
@@ -1457,8 +1461,11 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       outputFiles: result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []) || [],
     };
   } catch (err: any) {
-    // Restore parent agent context
-    setCallContext(parentSessionId, currentDepth, prevAgentId, prevProjectFolder);
+    clearCallContext(subTaskId);
+    // Restore parent agent context globals
+    _currentAgentId = prevAgentId;
+    _currentProjectWorkingFolder = prevProjectFolder;
+    _currentSubagentDepth = currentDepth;
     run.status = "error";
     run.completedAt = new Date().toISOString();
 
@@ -1804,7 +1811,8 @@ async function realtimeAgentLoop(
       // Set call context so protocol tools know who we are — preserve project folder
       const prevAgentId = _currentAgentId;
       const prevProjectFolder = _currentProjectWorkingFolder;
-      setCallContext(sessionId, 0, agentId, _currentProjectWorkingFolder);
+      const rtTaskId = `realtime-${agentId}-${Date.now()}`;
+      setCallContext(rtTaskId, sessionId, 0, agentId, _currentProjectWorkingFolder);
 
       // Get the tool-calling function
       const callAgent = await getSubagentCaller();
@@ -1847,7 +1855,9 @@ async function realtimeAgentLoop(
       );
 
       // Restore context
-      setCallContext(sessionId, 0, prevAgentId, prevProjectFolder);
+      clearCallContext(rtTaskId);
+      _currentAgentId = prevAgentId;
+      _currentProjectWorkingFolder = prevProjectFolder;
 
       const resultContent = result.content || "(no result)";
       handle.lastResult = resultContent.slice(0, 5000);
@@ -2407,20 +2417,49 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
 
 // --- Dispatcher ---
 
-// Track parent session ID, depth, agent ID, and project working folder for context
+// Per-task call context (supports parallel tasks without global state corruption)
+interface CallContext {
+  parentSessionId?: string;
+  subagentDepth: number;
+  agentId: string;
+  projectWorkingFolder?: string;
+}
+
+const callContexts = new Map<string, CallContext>();
+
+// Global fallback context — used by helper functions (runPython, spawnSubagent, etc.)
+// that don't yet receive a taskId. Updated on every setCallContext call.
 let _currentParentSessionId: string | undefined;
 let _currentSubagentDepth: number = 0;
 let _currentAgentId: string = "main";
 let _currentProjectWorkingFolder: string | undefined;
 
-export function setCallContext(sessionId?: string, depth?: number, agentId?: string, projectWorkingFolder?: string) {
+export function setCallContext(taskId: string, sessionId?: string, depth?: number, agentId?: string, projectWorkingFolder?: string) {
+  const ctx: CallContext = {
+    parentSessionId: sessionId,
+    subagentDepth: depth || 0,
+    agentId: agentId || "main",
+    projectWorkingFolder,
+  };
+  callContexts.set(taskId, ctx);
+  // Update globals as fallback for functions that don't have taskId
   _currentParentSessionId = sessionId;
   _currentSubagentDepth = depth || 0;
   _currentAgentId = agentId || "main";
   _currentProjectWorkingFolder = projectWorkingFolder;
 }
 
-export async function callTool(name: string, args: any, signal?: AbortSignal): Promise<any> {
+export function clearCallContext(taskId: string) {
+  callContexts.delete(taskId);
+}
+
+export async function callTool(name: string, args: any, signal?: AbortSignal, taskId?: string): Promise<any> {
+  const ctx = taskId ? callContexts.get(taskId) : undefined;
+  const _currentParentSessionId = ctx?.parentSessionId;
+  const _currentSubagentDepth = ctx?.subagentDepth || 0;
+  const _currentAgentId = ctx?.agentId || "main";
+  const _currentProjectWorkingFolder = ctx?.projectWorkingFolder;
+
   switch (name) {
     case "web_search": return webSearch(args);
     case "openrouter_web_search": return openRouterWebSearch(args);

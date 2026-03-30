@@ -541,6 +541,106 @@
   font-size: 11px;
 }
 
+/* ─── Agent color palette (8 distinct colors) ─── */
+.agent-color-0 { --agent-color: #3b82f6; --agent-bg: rgba(59,130,246,0.12); }
+.agent-color-1 { --agent-color: #10b981; --agent-bg: rgba(16,185,129,0.12); }
+.agent-color-2 { --agent-color: #f59e0b; --agent-bg: rgba(245,158,11,0.12); }
+.agent-color-3 { --agent-color: #ef4444; --agent-bg: rgba(239,68,68,0.12); }
+.agent-color-4 { --agent-color: #8b5cf6; --agent-bg: rgba(139,92,246,0.12); }
+.agent-color-5 { --agent-color: #ec4899; --agent-bg: rgba(236,72,153,0.12); }
+.agent-color-6 { --agent-color: #14b8a6; --agent-bg: rgba(20,184,166,0.12); }
+.agent-color-7 { --agent-color: #f97316; --agent-bg: rgba(249,115,22,0.12); }
+
+.active-agents-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.active-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--agent-color, var(--accent));
+  background: var(--agent-bg, rgba(99,102,241,0.12));
+  border: 1px solid var(--agent-color, var(--accent));
+  white-space: nowrap;
+}
+
+.active-agent-badge .agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--agent-color, var(--accent));
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.active-agent-badge.agent-idle {
+  opacity: 0.5;
+  border-style: dashed;
+}
+.active-agent-badge.agent-idle .agent-dot {
+  animation: none;
+}
+
+.agent-tools-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.agent-tools-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--agent-bg, transparent);
+  border-left: 3px solid var(--agent-color, var(--border));
+  transition: background 0.2s;
+}
+
+.agent-tools-row.agent-row-active {
+  background: var(--agent-bg, rgba(99,102,241,0.08));
+}
+
+.agent-name-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--agent-color, var(--text-secondary));
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 120px;
+}
+
+.agent-name-label .agent-status-icon {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 10px;
+}
+
+.agent-name-label.agent-active {
+  color: var(--agent-color, var(--accent));
+}
+
+.agent-name-label.agent-done {
+  color: var(--text-tertiary);
+  opacity: 0.6;
+}
+
+.agent-tool-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .spin-btn {
   opacity: 0.7;
 }

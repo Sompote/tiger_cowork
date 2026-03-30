@@ -1,8 +1,8 @@
 ![Tiger Cowork Banner](picture/banner2.png)
 
-# Tiger Cowork v0.3.3
+# Tiger Cowork v0.4.0
 
-A self-hosted AI workspace that brings chat, code execution, multi-agent orchestration, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) and let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
+A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) and let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -30,14 +30,23 @@ A self-hosted AI workspace that brings chat, code execution, multi-agent orchest
 
 *Auto-generated agent architecture — AI creates a complete multi-agent system with roles, connections, and communication protocols from a single prompt.*
 
+## What's New in v0.4.0 — Full Parallel Agent Execution
+
+- **True parallel agents** — Multiple agents now work simultaneously instead of one-at-a-time. `wait_result` calls execute in parallel via `Promise.all`, so the orchestrator waits for all agents at once instead of sequentially.
+- **Parallel task support** — Send multiple chat messages while agents are working. Per-task context isolation prevents concurrent tasks from corrupting each other's state.
+- **Direct orchestrator bypass** — When a realtime agent config has an orchestrator role, user messages route directly to it via bus — skipping the redundant main LLM call entirely. Saves one API call per message.
+- **Live task monitor** — Color-coded agent activity with 8 distinct colors, animated working indicators, per-agent tool call counts, and 2-second live refresh. Task page links directly to the associated chat session.
+
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
+- **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
 - **Long-Running Session Stability** — Three layers of protection for extended conversations:
   - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
   - **Smart Tool Result Compression** — Intelligently compresses tool outputs by type (first/last lines for code output, titles+URLs for search, structure preview for fetched pages) instead of raw truncation
   - **Checkpoint & Resume** — Automatically saves session state every N rounds; recovers from crashes or aborts without losing progress
-- **Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
+- **Direct Orchestrator Bypass** — In realtime mode with a hierarchical agent config, user messages skip the main LLM and go directly to the orchestrator agent — eliminating redundant API calls
+- **Live Task Monitor** — Real-time dashboard showing all active agents with distinct colors, tool call breakdowns, parallel execution indicators, and one-click navigation to the chat session
 - **Projects** — Dedicated workspaces with memory, skill selection, file browser, and sandboxed or external working folders
 - **Reflection Loop** — Optional self-evaluation that scores and retries incomplete work
 - **Output Panel** — Renders React components, charts, HTML, PDF, Word, Excel, images, and Markdown inline

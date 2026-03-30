@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.0 (2026-03-30)
+**Major release: Full Parallel Agent Execution**
+
+- **Parallel agent execution** — `wait_result` added to `parallelToolNames` so multiple agent results are awaited simultaneously via `Promise.all` instead of sequentially. Agents that previously appeared to run one-at-a-time now truly work in parallel.
+- **Per-task context isolation** — Replaced global `_currentParentSessionId`/`_currentAgentId`/`_currentSubagentDepth`/`_currentProjectWorkingFolder` with a `Map<string, CallContext>` keyed by taskId. `callTool()` accepts optional `taskId` to read from the correct context. Concurrent tasks no longer corrupt each other's state.
+- **Parallel task UI** — Removed `isLoading` send-blocking guard from ChatPage. Users can now send multiple messages while agents are working. Input, textarea, and attach button remain enabled during task execution. Status bar shows running task count.
+- **Direct orchestrator bypass** — When realtime mode is active and the YAML config has an orchestrator role agent, user messages are published directly to the orchestrator via bus, skipping the main LLM `callTigerBotWithTools` call entirely. Falls back to normal flow on timeout. Saves one full LLM API call per user message.
+- **Live task monitor redesign** — 8-color agent palette with stable hash-based assignment. Active agents shown as colored pills with animated pulsing dots. Agent tool rows have colored left borders, background highlights when active, play/checkmark status icons, and per-agent tool call counts. Polling reduced from 5s to 2s with socket-driven instant refresh on tool calls and agent events.
+- **Multi-agent tracking** — `activeAgent` (single string) replaced with `activeAgents` (Set) on the server. Multiple agents working simultaneously are now properly tracked and displayed. Finished agents are removed from the active set instead of resetting to "Orchestrator".
+- **Task-to-chat navigation** — Task page cards now include a "Chat" button that navigates to `/?session=<id>`. ChatPage reads `?session=` query param to auto-select the corresponding chat session.
+- **`callTigerBotWithTools` taskId parameter** — New optional `taskId` parameter threaded through `callTigerBotWithTools` → `callTool` for per-task context resolution. Both `chat:send` and `project:chat:send` handlers pass taskId and call `clearCallContext(taskId)` in finally blocks.
+
 ## v0.3.2 (2026-03-23)
 - Add **per-agent Mesh checkbox** — individual agents can be marked as "mesh enabled" to freely send tasks to any other agent without needing connection lines, similar to the Bus checkbox for broadcast data sharing
 - Add **Hybrid architecture mode** — combines an orchestrator (controls flow via TCP connections) with mesh-enabled workers (collaborate freely as peers); orchestrator auto-receives bus tools to monitor all agent activity and prevent infinite loops

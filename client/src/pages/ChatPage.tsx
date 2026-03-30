@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -269,12 +270,14 @@ function OutputCanvas({ files }: { files: string[] }) {
 }
 
 export default function ChatPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [runningTaskIds, setRunningTaskIds] = useState<Set<string>>(new Set());
+  const isLoading = runningTaskIds.size > 0;
   const [status, setStatus] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -296,8 +299,16 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    api.getSessions().then(setSessions);
-  }, []);
+    api.getSessions().then((s: Session[]) => {
+      setSessions(s);
+      // Auto-select session from URL ?session=<id>
+      const sessionParam = searchParams.get("session");
+      if (sessionParam && s.some((sess: Session) => sess.id === sessionParam)) {
+        setActiveSession(sessionParam);
+        setSearchParams({}, { replace: true }); // clean URL
+      }
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (activeSession) {
@@ -350,11 +361,14 @@ export default function ChatPage() {
           if (merged.size === prev.size) return prev;
           return merged;
         });
-        const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
+        // Track running tasks by ID for this session
+        const sessionTasks = tasks.filter((t: any) => t.sessionId === activeSession);
+        const sessionTaskIds = new Set(sessionTasks.map((t: any) => t.id as string));
+        setRunningTaskIds(sessionTaskIds);
+        const activeTask = sessionTasks[sessionTasks.length - 1]; // show status of most recent task
         if (activeTask) {
           wasLoadingRef.current = true;
           missCountRef.current = 0;
-          setIsLoading(true);
           if (activeTask.status.startsWith("Running:")) {
             const rawTool = activeTask.status.replace("Running: ", "");
             const tool = rawTool.split(" — ")[0]; // extract tool name before description
@@ -381,7 +395,7 @@ export default function ChatPage() {
             // Reset loading state and refresh messages to show the result
             wasLoadingRef.current = false;
             missCountRef.current = 0;
-            setIsLoading(false);
+            setRunningTaskIds(new Set());
             setStreaming("");
             setStatus("");
             api.getSession(activeSession).then((session: any) => {
@@ -424,7 +438,14 @@ export default function ChatPage() {
           setOutputRefreshKey((k) => k + 1);
         });
         setStreaming("");
-        setIsLoading(false);
+        // Remove completed task from running set (will be refreshed by polling)
+        setRunningTaskIds((prev) => {
+          if (prev.size === 0) return prev;
+          // We don't know the exact taskId here, so let polling clean up.
+          // But if only 1 task was running, clear it.
+          if (prev.size === 1) return new Set();
+          return prev;
+        });
         setStatus("");
       }
     });
@@ -443,13 +464,10 @@ export default function ChatPage() {
       if (data.sessionId && data.sessionId !== activeSession) return;
 
       if (data.status === "thinking") {
-        setIsLoading(true);
         setStatus("Thinking...");
       } else if (data.status === "running_python") {
-        setIsLoading(true);
         setStatus("Running Python...");
       } else if (data.status === "tool_call") {
-        setIsLoading(true);
         const label = toolLabels[data.tool] || data.tool;
         if (data.tool === "send_task" && data.args) {
           const target = data.args.to || "agent";
@@ -470,10 +488,8 @@ export default function ChatPage() {
           setStatus(`${label} done, thinking...`);
         }
       } else if (data.status === "subagent_spawn") {
-        setIsLoading(true);
         setStatus(`Sub-agent "${data.label}" spawned...`);
       } else if (data.status === "subagent_tool") {
-        setIsLoading(true);
         const label = toolLabels[data.tool] || data.tool;
         setStatus(`Sub-agent "${data.label}": ${label}...`);
       } else if (data.status === "subagent_tool_done") {
@@ -485,13 +501,10 @@ export default function ChatPage() {
         setStatus(`Sub-agent "${data.label}" failed: ${data.error}`);
       // ─── Realtime Agent status ───
       } else if (data.status === "realtime_agent_ready") {
-        setIsLoading(true);
         setStatus(`Agent "${data.label}" (${data.role}) ready`);
       } else if (data.status === "realtime_agent_working") {
-        setIsLoading(true);
         setStatus(`Agent "${data.label}" working — ${(data.task || "").slice(0, 80)}`);
       } else if (data.status === "realtime_agent_tool") {
-        setIsLoading(true);
         const label = data.tool === "error_recovery"
           ? "recovering from error"
           : toolLabels[data.tool] || data.tool;
@@ -501,7 +514,6 @@ export default function ChatPage() {
       } else if (data.status === "realtime_agent_done") {
         setStatus(`Agent "${data.label}" completed`);
       } else if (data.status === "retrying") {
-        setIsLoading(true);
         setStatus(`Retrying (${data.attempt}/${data.maxRetries})...`);
       } else if (data.status === "job_complete") {
         // Orchestrator finished — refresh messages and output files
@@ -511,7 +523,6 @@ export default function ChatPage() {
             setOutputRefreshKey((k) => k + 1); // force output panel re-render
             setOutputPanelOpen(true); // auto-open output panel if files exist
           });
-          setIsLoading(false);
           setStatus("Job complete");
           setTimeout(() => setStatus(""), 3000);
         }
@@ -524,7 +535,7 @@ export default function ChatPage() {
             return next;
           });
         }
-        setIsLoading(false);
+        setRunningTaskIds(new Set());
         setStatus("");
       } else {
         setStatus("");
@@ -567,7 +578,7 @@ export default function ChatPage() {
   };
 
   const handleSend = useCallback(() => {
-    if ((!input.trim() && attachedFiles.length === 0) || isLoading) return;
+    if (!input.trim() && attachedFiles.length === 0) return;
 
     // Separate image attachments for multimodal API payload
     const imageExts = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
@@ -606,15 +617,15 @@ export default function ChatPage() {
         setSessions((prev) => [session, ...prev]);
         setActiveSession(session.id);
         setMessages([userMessage]);
-        setIsLoading(true);
+        setRunningTaskIds((prev) => new Set([...prev, "pending-" + Date.now()]));
         sendMessage(session.id, msg, images.length > 0 ? images : undefined);
       });
     } else {
       setMessages((prev) => [...prev, userMessage]);
-      setIsLoading(true);
+      setRunningTaskIds((prev) => new Set([...prev, "pending-" + Date.now()]));
       sendMessage(activeSession, msg, images.length > 0 ? images : undefined);
     }
-  }, [input, activeSession, isLoading, sendMessage, attachedFiles]);
+  }, [input, activeSession, sendMessage, attachedFiles]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -782,7 +793,7 @@ export default function ChatPage() {
             <button
               className="attach-btn"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isLoading || uploading}
+              disabled={uploading}
               title="Attach files (PDF, images, documents, code)"
             >
               {uploading ? (
@@ -808,12 +819,12 @@ export default function ChatPage() {
               }}
               onKeyDown={handleKeyDown}
               rows={1}
-              disabled={isLoading}
+              disabled={false}
             />
             <button
               className={`send-btn ${input.trim() || attachedFiles.length > 0 ? "active" : ""}`}
               onClick={handleSend}
-              disabled={(!input.trim() && attachedFiles.length === 0) || isLoading}
+              disabled={!input.trim() && attachedFiles.length === 0}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
@@ -821,7 +832,7 @@ export default function ChatPage() {
             </button>
           </div>
           <div className="chat-input-hint">
-            {connected ? "Connected" : "Disconnected"} · Attach files with the clip icon or drag & drop · Press Enter to send
+            {connected ? "Connected" : "Disconnected"}{runningTaskIds.size > 1 ? ` · ${runningTaskIds.size} tasks running` : runningTaskIds.size === 1 ? " · 1 task running" : ""} · Attach files with the clip icon or drag & drop · Press Enter to send
           </div>
         </div>
       </div>

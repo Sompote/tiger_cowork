@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import "./PageStyles.css";
@@ -22,6 +23,9 @@ interface ActiveTask {
   title: string;
   status: string;
   toolCalls: string[];
+  activeAgent?: string;
+  activeAgents?: string[];
+  agentTools: Record<string, string[]>;
   startedAt: string;
   lastUpdate: string;
 }
@@ -43,6 +47,21 @@ function timeAgo(dateStr: string): string {
   return `${hours}h ${minutes % 60}m ago`;
 }
 
+function dedupTools(tools: string[]): { name: string; count: number }[] {
+  const map = new Map<string, number>();
+  for (const t of tools) map.set(t, (map.get(t) || 0) + 1);
+  return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+}
+
+// Stable color assignment: hash agent name to a color index (0-7)
+function agentColorIndex(name: string): number {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 8;
+}
+
 function elapsed(startStr: string): string {
   const seconds = Math.floor((Date.now() - new Date(startStr).getTime()) / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -53,6 +72,7 @@ function elapsed(startStr: string): string {
 }
 
 export default function TasksPage() {
+  const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -86,16 +106,20 @@ export default function TasksPage() {
     loadActiveTasks();
   }, [loadActiveTasks]);
 
-  // Auto-refresh active tasks every 5 seconds (always poll so we catch new tasks)
+  // Auto-refresh active tasks every 2 seconds for live tool updates
   useEffect(() => {
-    const interval = setInterval(loadActiveTasks, 5000);
+    const interval = setInterval(loadActiveTasks, 2000);
     return () => clearInterval(interval);
   }, [loadActiveTasks]);
 
-  // Real-time socket updates: refresh immediately on task start/finish events
+  // Real-time socket updates: refresh on agent activity events
   useEffect(() => {
     const unsub = onStatus((data: any) => {
-      if (data.status === "thinking" || data.status === "done" || data.status === "job_complete") {
+      if (data.status === "thinking" || data.status === "done" || data.status === "job_complete" ||
+          data.status === "tool_call" || data.status === "tool_result" ||
+          data.status === "realtime_agent_working" || data.status === "realtime_agent_tool" ||
+          data.status === "realtime_agent_done" || data.status === "subagent_spawn" ||
+          data.status === "subagent_tool" || data.status === "subagent_done") {
         loadActiveTasks();
       }
     });
@@ -151,6 +175,16 @@ export default function TasksPage() {
                 </div>
                 <div className="active-task-actions">
                   <span className="active-task-elapsed">{elapsed(task.startedAt)}</span>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => navigate(`/?session=${task.sessionId}`)}
+                    title="Go to chat session"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 4 }}>
+                      <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+                    </svg>
+                    Chat
+                  </button>
                   <button className="btn btn-danger btn-sm" onClick={() => killTask(task.id)} title="Kill task">
                     Kill
                   </button>
@@ -160,7 +194,48 @@ export default function TasksPage() {
                 <div className="card-detail">
                   <strong>Status:</strong> <span className="active-task-status">{task.status}</span>
                 </div>
-                {task.toolCalls.length > 0 && (
+
+                {/* Active agents pills */}
+                {(task.activeAgents && task.activeAgents.length > 0) && (
+                  <div className="card-detail">
+                    <strong>Working now:</strong>
+                    <div className="active-agents-row">
+                      {task.activeAgents.map((agent, i) => (
+                        <span key={i} className={`active-agent-badge agent-color-${agentColorIndex(agent)}`}>
+                          <span className="agent-dot" />
+                          {agent}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Agent tools breakdown with colors */}
+                {task.agentTools && Object.keys(task.agentTools).length > 0 ? (
+                  <div className="agent-tools-breakdown">
+                    {Object.entries(task.agentTools).map(([agent, tools]) => {
+                      const isActive = (task.activeAgents || []).includes(agent);
+                      const colorIdx = agentColorIndex(agent);
+                      return (
+                        <div
+                          key={agent}
+                          className={`agent-tools-row agent-color-${colorIdx}${isActive ? " agent-row-active" : ""}`}
+                        >
+                          <span className={`agent-name-label agent-color-${colorIdx}${isActive ? " agent-active" : " agent-done"}`}>
+                            <span className="agent-status-icon">{isActive ? "\u25B6" : "\u2713"}</span>
+                            {agent}
+                          </span>
+                          <span className="active-task-tools">
+                            {dedupTools(tools).map((t, i) => (
+                              <code key={i}>{t.name}{t.count > 1 ? ` \u00D7${t.count}` : ""}</code>
+                            ))}
+                          </span>
+                          <span className="agent-tool-count">{tools.length} call{tools.length !== 1 ? "s" : ""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : task.toolCalls.length > 0 ? (
                   <div className="card-detail">
                     <strong>Tools used:</strong>{" "}
                     <span className="active-task-tools">
@@ -169,10 +244,10 @@ export default function TasksPage() {
                       ))}
                     </span>
                   </div>
-                )}
-                <div className="card-detail">
+                ) : null}
+                <div className="card-detail" style={{ marginTop: 4 }}>
                   <strong>Started:</strong> {new Date(task.startedAt).toLocaleTimeString()}
-                  {" · "}
+                  {" \u00B7 "}
                   <strong>Last update:</strong> {timeAgo(task.lastUpdate)}
                 </div>
               </div>

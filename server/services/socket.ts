@@ -3,8 +3,8 @@ import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot, trimConversationContext, compressOlderMessages, estimateMessagesChars } from "./tigerbot";
 import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills } from "./data";
 import { runPython } from "./python";
-import { setSubagentStatusCallback, setCallContext, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent, collectPendingResults, getWorkingAgents } from "./toolbox";
-import { busSubscribe } from "./protocols";
+import { setSubagentStatusCallback, setCallContext, clearCallContext, loadAgentConfig, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent, collectPendingResults, getWorkingAgents } from "./toolbox";
+import { busSubscribe, busPublish, busWaitForMessage } from "./protocols";
 import path from "path";
 import { execSync } from "child_process";
 import fs from "fs";
@@ -42,6 +42,9 @@ export interface ActiveTask {
   title: string;
   status: string;
   toolCalls: string[];
+  activeAgent?: string;          // last active agent (for backward compat)
+  activeAgents: Set<string>;     // all currently working agents
+  agentTools: Record<string, string[]>; // agent name → tools used
   startedAt: string;
   lastUpdate: string;
 }
@@ -49,8 +52,12 @@ export interface ActiveTask {
 const activeTasks = new Map<string, ActiveTask>();
 const taskAbortControllers = new Map<string, AbortController>();
 
-export function getActiveTasks(): ActiveTask[] {
-  return Array.from(activeTasks.values());
+export function getActiveTasks(): (Omit<ActiveTask, 'activeAgents'> & { activeAgents: string[] })[] {
+  return Array.from(activeTasks.values()).map(t => ({
+    ...t,
+    activeAgents: Array.from(t.activeAgents),
+    activeAgent: t.activeAgents.size > 0 ? Array.from(t.activeAgents).join(", ") : t.activeAgent,
+  }));
 }
 
 export function killActiveTask(taskId: string): boolean {
@@ -238,6 +245,34 @@ export function setupSocket(io: Server): void {
   // Wire up sub-agent status broadcasting — emit both status AND chat chunks for live progress
   setSubagentStatusCallback((data) => {
     broadcastStatus(data);
+    // Update active task agent tracking from subagent/realtime agent events
+    if (data.sessionId) {
+      const task = Array.from(activeTasks.values()).find(t => t.sessionId === data.sessionId);
+      if (task) {
+        const agentLabel = data.label || data.agentId || "Agent";
+        if (data.status === "subagent_spawn" || data.status === "realtime_agent_working") {
+          task.activeAgents.add(agentLabel);
+          task.activeAgent = agentLabel;
+          if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
+        } else if ((data.status === "subagent_tool" || data.status === "realtime_agent_tool") && data.tool) {
+          task.activeAgents.add(agentLabel);
+          task.activeAgent = agentLabel;
+          if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
+          task.agentTools[agentLabel].push(data.tool);
+          task.toolCalls.push(data.tool);
+        } else if (data.status === "subagent_done" || data.status === "realtime_agent_done") {
+          // Agent finished — remove from active set
+          task.activeAgents.delete(agentLabel);
+          // Show remaining active agents or fall back to Orchestrator
+          if (task.activeAgents.size > 0) {
+            task.activeAgent = Array.from(task.activeAgents).join(", ");
+          } else {
+            task.activeAgent = "Orchestrator";
+          }
+        }
+        task.lastUpdate = new Date().toISOString();
+      }
+    }
     // Stream sub-agent progress as chat chunks so user sees real-time updates in the chat
     if (data.sessionId && ioRef) {
       let progressText = "";
@@ -249,7 +284,7 @@ export function setupSocket(io: Server): void {
       }
 
       if (data.status === "subagent_spawn") {
-        progressText += `> **🔄 Sub-agent "${data.label}"** spawned (depth ${data.depth}) — _${(data.task || "").slice(0, 120)}_\n`;
+        progressText += `> **🔄 Sub-agent "${data.label}"** spawned (depth ${data.depth}) — _${(data.task || "").slice(0, 500)}_\n`;
       } else if (data.status === "subagent_tool") {
         // Tag protocol tool usage
         if (data.tool?.startsWith("proto_")) {
@@ -271,7 +306,7 @@ export function setupSocket(io: Server): void {
         }
         progressText += `> **🟢 ${data.label}** (${data.role}) is ready\n`;
       } else if (data.status === "realtime_agent_working") {
-        progressText = `> **🔄 ${data.label}** working — _${(data.task || "").slice(0, 120)}_\n`;
+        progressText = `> **🔄 ${data.label}** working — _${(data.task || "").slice(0, 500)}_\n`;
       } else if (data.status === "realtime_agent_tool") {
         if (data.tool === "error_recovery") {
           progressText = `> **🔄 ${data.label}** encountered an error — recovering and retrying...\n`;
@@ -404,7 +439,7 @@ export function setupSocket(io: Server): void {
           const agentStartTime = Date.now();
           socket.emit("chat:chunk", {
             sessionId,
-            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 500)}_\n`,
           });
 
           const result = humanSendToAgent(sessionId, targetId, prompt);
@@ -451,7 +486,7 @@ export function setupSocket(io: Server): void {
           });
           socket.emit("chat:chunk", {
             sessionId,
-            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 500)}_\n`,
           });
 
           const broadcastStartTime = Date.now();
@@ -616,6 +651,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         title: message.slice(0, 80),
         status: "Thinking...",
         toolCalls: [],
+        activeAgent: undefined,
+        activeAgents: new Set(),
+        agentTools: {},
         startedAt: new Date().toISOString(),
         lastUpdate: new Date().toISOString(),
       };
@@ -624,8 +662,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       taskAbortControllers.set(taskId, abortController);
 
       try {
-        // Set call context for sub-agent spawning
-        setCallContext(sessionId, 0);
+        // Set call context for sub-agent spawning (per-task, supports parallel execution)
+        setCallContext(taskId, sessionId, 0);
 
         // Boot realtime agents if in realtime mode
         const rtSettings = await getSettings();
@@ -640,6 +678,100 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               sessionId,
               content: `> **Realtime Agents Active:** ${agentNames.join(", ")}\n\n`,
             });
+          }
+        }
+
+        // ─── Direct Orchestrator Bypass ───
+        // When realtime mode is active and there's an orchestrator agent,
+        // skip the Main LLM call and send the user's message directly to the orchestrator.
+        // This eliminates the redundant Main LLM "thinking" step that just forwards to orchestrator anyway.
+        if (realtimeTools && rtSettings.subAgentConfigFile) {
+          const agentConfig = loadAgentConfig(rtSettings.subAgentConfigFile);
+          const orchestratorDef = agentConfig?.agents?.find((a: any) => a.role === "orchestrator");
+          const rtSession = getRealtimeSession(sessionId);
+          if (orchestratorDef && rtSession && rtSession.agents.has(orchestratorDef.id)) {
+            const orchId = orchestratorDef.id;
+            const orchName = orchestratorDef.name || orchId;
+
+            // Build context from recent chat history for the orchestrator
+            const recentContext = chatMessages
+              .slice(-6)
+              .filter((m: any) => typeof m.content === "string")
+              .map((m: any) => `[${m.role}]: ${(m.content as string).slice(0, 500)}`)
+              .join("\n");
+
+            activeTask.status = `Delegating directly to ${orchName}...`;
+            activeTask.activeAgent = orchName;
+            activeTask.lastUpdate = new Date().toISOString();
+            broadcastStatus({ sessionId, status: "tool_call", tool: "send_task", args: { to: orchId, task: message } });
+
+            socket.emit("chat:chunk", {
+              sessionId,
+              content: `> **Direct → ${orchName}** (skipping main LLM)\n\n`,
+            });
+
+            // Send task directly to orchestrator via bus
+            busPublish(sessionId, "main", `task:${orchId}`, {
+              task: message,
+              context: recentContext,
+              from: "main",
+            });
+
+            activeTask.status = `Waiting for ${orchName}...`;
+            activeTask.lastUpdate = new Date().toISOString();
+            broadcastStatus({ sessionId, status: "tool_call", tool: "wait_result", args: { from: orchId } });
+
+            // Wait for orchestrator result
+            const timeout = (rtSettings.subAgentTimeout || 300) * 1000;
+            try {
+              const resultMsg = await busWaitForMessage(sessionId, `result:${orchId}`, timeout, abortController.signal);
+              const orchResult = resultMsg.payload?.result || "(no result)";
+              const orchFiles = resultMsg.payload?.outputFiles || [];
+              if (orchFiles.length > 0) outputFiles.push(...orchFiles);
+
+              // Also collect pending results from other agents
+              const pendingResults = collectPendingResults(sessionId);
+              let pendingText = "";
+              if (pendingResults.length > 0) {
+                pendingText = "\n\n---\n**Agent Results:**\n";
+                for (const pr of pendingResults) {
+                  pendingText += `\n**${pr.agentName}:**\n${pr.result}\n`;
+                  if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+                }
+              }
+
+              // Scan sandbox for output files
+              const jobSandboxDir = rtSettings.sandboxDir || path.resolve("sandbox");
+              const scannedFiles = scanOutputFiles(jobSandboxDir, activeTask.startedAt ? new Date(activeTask.startedAt).getTime() : Date.now() - 60000);
+              for (const sf of scannedFiles) {
+                if (!outputFiles.includes(sf)) outputFiles.push(sf);
+              }
+
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              const fullResponse = orchResult + pendingText +
+                (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+
+              session.messages.push({
+                role: "assistant",
+                content: fullResponse,
+                timestamp: new Date().toISOString(),
+                files: outputFiles.length > 0 ? outputFiles : undefined,
+              });
+              await saveChatHistory(sessions);
+              socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+              broadcastStatus({ sessionId, status: "job_complete", files: outputFiles.length > 0 ? outputFiles : undefined } as any);
+
+              // Skip the main LLM call — go directly to finally block
+              return;
+            } catch (err: any) {
+              // If direct bypass fails (timeout, abort), fall through to normal LLM call
+              console.log(`[DirectBypass] Orchestrator bypass failed: ${err.message}, falling back to main LLM`);
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              socket.emit("chat:chunk", {
+                sessionId,
+                content: `> Direct bypass timed out, falling back to main LLM...\n\n`,
+              });
+            }
           }
         }
 
@@ -677,6 +809,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               activeTask.status = `Running: ${name}`;
             }
             activeTask.toolCalls.push(name);
+            activeTask.activeAgent = "Orchestrator";
+            if (!activeTask.agentTools["Orchestrator"]) activeTask.agentTools["Orchestrator"] = [];
+            activeTask.agentTools["Orchestrator"].push(name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           // onToolResult — collect output files, show status only
@@ -705,6 +840,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.status = `Retrying (${attempt}/${maxRetries})...`;
             activeTask.lastUpdate = new Date().toISOString();
           },
+          taskId, // per-task context for parallel execution
         );
 
         // Scan sandbox for any new output files generated during this job
@@ -800,6 +936,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        // Clean up per-task call context
+        clearCallContext(taskId);
+
         // Check if agents are still working — if so, keep monitor alive
         const rtSessionCheck = getRealtimeSession(sessionId);
         const hasHumanNode = rtSessionCheck?.systemConfig?.agents?.some((a: any) => a.role === "human");
@@ -1038,7 +1177,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           const projAgentStartTime = Date.now();
           socket.emit("chat:chunk", {
             sessionId,
-            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 120)}_\n`,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 500)}_\n`,
           });
 
           const result = humanSendToAgent(sessionId, targetId, prompt);
@@ -1080,7 +1219,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           const agentNames = connectedIds.map((id) => rtSession.agents.get(id)?.agentDef.name || id);
           socket.emit("chat:chunk", {
             sessionId,
-            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 120)}_\n`,
+            content: `> <span class="proto-tag proto-bus">HUMAN</span> → Broadcasting to **${agentNames.join(", ")}**: _${prompt.slice(0, 500)}_\n`,
           });
 
           const projBcStartTime = Date.now();
@@ -1202,6 +1341,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         title: message.slice(0, 80),
         status: "Thinking...",
         toolCalls: [],
+        activeAgent: undefined,
+        activeAgents: new Set(),
+        agentTools: {},
         startedAt: new Date().toISOString(),
         lastUpdate: new Date().toISOString(),
       };
@@ -1211,7 +1353,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
       try {
         // Set call context for sub-agent spawning — pass project working folder so output goes there
-        setCallContext(sessionId, 0, undefined, resolvedWorkingFolder || undefined);
+        setCallContext(taskId, sessionId, 0, undefined, resolvedWorkingFolder || undefined);
 
         // Boot realtime agents if in realtime mode
         const rtSettings = await getSettings();
@@ -1225,6 +1367,89 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               sessionId,
               content: `> **Realtime Agents Active:** ${agentNames.join(", ")}\n\n`,
             });
+          }
+        }
+
+        // ─── Direct Orchestrator Bypass (Project Chat) ───
+        if (realtimeTools && rtSettings.subAgentConfigFile) {
+          const agentConfig = loadAgentConfig(rtSettings.subAgentConfigFile);
+          const orchestratorDef = agentConfig?.agents?.find((a: any) => a.role === "orchestrator");
+          const rtSession = getRealtimeSession(sessionId);
+          if (orchestratorDef && rtSession && rtSession.agents.has(orchestratorDef.id)) {
+            const orchId = orchestratorDef.id;
+            const orchName = orchestratorDef.name || orchId;
+
+            const recentContext = chatMessages
+              .slice(-6)
+              .filter((m: any) => typeof m.content === "string")
+              .map((m: any) => `[${m.role}]: ${(m.content as string).slice(0, 500)}`)
+              .join("\n");
+
+            activeTask.status = `Delegating directly to ${orchName}...`;
+            activeTask.activeAgent = orchName;
+            activeTask.lastUpdate = new Date().toISOString();
+            broadcastStatus({ sessionId, status: "tool_call", tool: "send_task", args: { to: orchId, task: message } });
+
+            socket.emit("chat:chunk", {
+              sessionId,
+              content: `> **Direct → ${orchName}** (skipping main LLM)\n\n`,
+            });
+
+            busPublish(sessionId, "main", `task:${orchId}`, {
+              task: message,
+              context: recentContext,
+              from: "main",
+            });
+
+            activeTask.status = `Waiting for ${orchName}...`;
+            activeTask.lastUpdate = new Date().toISOString();
+            broadcastStatus({ sessionId, status: "tool_call", tool: "wait_result", args: { from: orchId } });
+
+            const timeout = (rtSettings.subAgentTimeout || 300) * 1000;
+            try {
+              const resultMsg = await busWaitForMessage(sessionId, `result:${orchId}`, timeout, abortController.signal);
+              const orchResult = resultMsg.payload?.result || "(no result)";
+              const orchFiles = resultMsg.payload?.outputFiles || [];
+              if (orchFiles.length > 0) outputFiles.push(...orchFiles);
+
+              const pendingResults = collectPendingResults(sessionId);
+              let pendingText = "";
+              if (pendingResults.length > 0) {
+                pendingText = "\n\n---\n**Agent Results:**\n";
+                for (const pr of pendingResults) {
+                  pendingText += `\n**${pr.agentName}:**\n${pr.result}\n`;
+                  if (pr.outputFiles) outputFiles.push(...pr.outputFiles);
+                }
+              }
+
+              const projJobSandboxDir = rtSettings.sandboxDir || path.resolve("sandbox");
+              const scannedFiles = scanOutputFiles(projJobSandboxDir, activeTask.startedAt ? new Date(activeTask.startedAt).getTime() : Date.now() - 60000);
+              for (const sf of scannedFiles) {
+                if (!outputFiles.includes(sf)) outputFiles.push(sf);
+              }
+
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              const fullResponse = orchResult + pendingText +
+                (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
+
+              session.messages.push({
+                role: "assistant",
+                content: fullResponse,
+                timestamp: new Date().toISOString(),
+                files: outputFiles.length > 0 ? outputFiles : undefined,
+              });
+              await saveChatHistory(sessions);
+              socket.emit("chat:response", { sessionId, content: fullResponse, done: true, files: outputFiles.length > 0 ? outputFiles : undefined });
+              broadcastStatus({ sessionId, status: "job_complete", files: outputFiles.length > 0 ? outputFiles : undefined } as any);
+              return;
+            } catch (err: any) {
+              console.log(`[DirectBypass] Project orchestrator bypass failed: ${err.message}, falling back to main LLM`);
+              socket.emit("chat:chunk", { sessionId, content: "", clear: true });
+              socket.emit("chat:chunk", {
+                sessionId,
+                content: `> Direct bypass timed out, falling back to main LLM...\n\n`,
+              });
+            }
           }
         }
 
@@ -1260,6 +1485,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               activeTask.status = `Running: ${name}`;
             }
             activeTask.toolCalls.push(name);
+            activeTask.activeAgent = "Orchestrator";
+            if (!activeTask.agentTools["Orchestrator"]) activeTask.agentTools["Orchestrator"] = [];
+            activeTask.agentTools["Orchestrator"].push(name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           (name, toolResult) => {
@@ -1285,6 +1513,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.status = `Retrying (${attempt}/${maxRetries})...`;
             activeTask.lastUpdate = new Date().toISOString();
           },
+          taskId, // per-task context for parallel execution
         );
 
         // Scan sandbox for any new output files generated during this job
@@ -1378,6 +1607,9 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
       } finally {
+        // Clean up per-task call context
+        clearCallContext(taskId);
+
         // Broadcast "done" so client clears active dot for this session
         broadcastStatus({ sessionId, status: "done" });
 
