@@ -73,7 +73,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 ### One-Click Installers (No coding required)
 
 **Mac:**
-1. Download [`TigerCowork.app.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+1. Download [`TigerCowork.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
 2. Unzip and double-click `TigerCowork.app` — it installs Docker, downloads the app, builds, and opens `http://localhost:3001`
 
 **Windows:**
