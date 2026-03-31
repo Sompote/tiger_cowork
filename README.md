@@ -2,7 +2,7 @@
 
 # Tiger Cowork v0.4.1
 
-A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) or use **Claude Code** / **Codex CLI** as autonomous agent backends — no API key needed. Let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
+A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. **Mix different AI providers in the same agent team** — assign any OpenAI-compatible API model (OpenRouter, Ollama, Gemini, GPT, etc.) to one agent, **Claude Code CLI** (OAuth) to another, and **Codex CLI** (OAuth) to a third. Each agent in your architecture can run on a different model or provider. **Connect external MCP servers** (Stdio, SSE, StreamableHTTP) to extend the AI's toolbox with any Model Context Protocol-compatible service. Built with 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -30,9 +30,10 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 *Auto-generated agent architecture — AI creates a complete multi-agent system with roles, connections, and communication protocols from a single prompt.*
 
-## What's New in v0.4.1 — Claude Code as Agent Backend
+## What's New in v0.4.1 — Per-Agent Model Selection & CLI Agent Backends
 
-- **Claude Code & Codex as agent backends** — Set any agent's model to "Claude Code (Local CLI)" or "Codex (Local CLI)" in the Agent Editor. The agent runs through your locally installed CLI — a full autonomous agent with its own tool loop. No API key needed — uses OAuth login. Mix API models and local CLI agents in the same multi-agent system.
+- **Per-agent model & provider selection** — Each agent in your architecture can run on a different model or backend. In the Agent Editor, check **"Specify model for this agent"** and pick any model — API-based or local CLI. One agent can use GPT-4o via API, another Claude Code via OAuth, and a third Codex CLI — all working together in the same multi-agent system.
+- **Claude Code & Codex as code agents (OAuth)** — Set any agent to "Claude Code (Local CLI)" or "Codex (Local CLI)". These run as fully autonomous coding agents with their own tool loops — reading files, editing code, running commands. No API key needed — they authenticate via OAuth (Claude Pro/Max/Team subscription or ChatGPT Plus/Pro plan).
 - **Agent waiting/done states** — Task monitor now shows running, waiting, and done agents with distinct visual states and icons.
 - **Anti-abandonment nudges** — Prevents the LLM from stopping while sub-agents are still working or when responses sound incomplete.
 - **Python auto-retry** — Automatically fixes common syntax errors (unclosed brackets, unterminated strings, Python 2 print statements) and retries.
@@ -48,7 +49,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
-- **Claude Code & Codex Agent Backends** — Use Claude Code or OpenAI Codex CLI as autonomous coding agents. Select per-agent in the visual editor — no API key required, uses OAuth login. Mix local CLI agents with API models in the same multi-agent system
+- **Mix Any Model per Agent** — Each agent in your architecture can use a different AI provider or model. Assign OpenAI-compatible API models (GPT, Gemini, Claude API, LLaMA via Ollama, etc.) to some agents, and use **Claude Code** or **Codex CLI** (OAuth, no API key) as autonomous coding agents for others — all in the same team
 - **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
 - **Long-Running Session Stability** — Three layers of protection for extended conversations:
   - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
@@ -60,7 +61,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 - **Reflection Loop** — Optional self-evaluation that scores and retries incomplete work
 - **Output Panel** — Renders React components, charts, HTML, PDF, Word, Excel, images, and Markdown inline
 - **Skills & ClawHub** — Install and manage AI skills from the marketplace or build your own
-- **MCP Integration** — Connect external MCP servers (Stdio, SSE, StreamableHTTP) to extend the AI's toolbox
+- **MCP Integration** — Connect any Model Context Protocol server to give the AI access to external tools and data sources. Supports **Stdio** (local CLI tools), **SSE** (Server-Sent Events), and **StreamableHTTP** transports. Configure in Settings with auto-discovery — connected tools appear alongside built-in tools automatically
 - **Scheduled Tasks** — Cron-based jobs with presets and a management UI
 
 ## Installation
@@ -162,10 +163,24 @@ codex exec "hello"
 
 1. Open the **Agent Editor**
 2. Select an agent → check **"Specify model for this agent"**
-3. Choose **"Claude Code (Local CLI)"** or **"Codex (Local CLI)"** from the dropdown
-4. Save — that agent now runs through the selected CLI
+3. Choose a model from the dropdown:
+   - **Claude Code (Local CLI)** — autonomous coding agent via OAuth (no API key)
+   - **Codex (Local CLI)** — autonomous coding agent via OAuth (no API key)
+   - **Any API model** — GPT-4o, Gemini, Claude API, LLaMA, etc. (uses your configured API)
+4. Save — each agent runs on its assigned backend
 
-You can mix providers: some agents use API models (GPT, Gemini, Claude API), others use Claude Code or Codex CLI — all in the same multi-agent system.
+**Example: Mixed-provider architecture**
+
+| Agent | Role | Model/Backend |
+|---|---|---|
+| Research Orchestrator | orchestrator | GPT-5.4 Pro (API) |
+| Literature Researcher | researcher | Gemini Flash (API) |
+| Simulation Engineer | worker | Claude Code (OAuth CLI) |
+| Code Optimizer | worker | Codex (OAuth CLI) |
+| Quality Checker | checker | Claude Code (OAuth CLI) |
+| Report Creator | reporter | Claude Opus (API) |
+
+All agents work in parallel, communicating via mesh/bus/TCP — regardless of which provider powers each one.
 
 ### Headless Server (no browser)
 
@@ -178,6 +193,47 @@ scp -r ~/.claude user@server:~/.claude
 # Codex
 scp -r ~/.codex user@server:~/.codex
 ```
+
+## MCP Server Setup (Optional)
+
+Connect external **Model Context Protocol** servers to extend the AI's toolbox with third-party tools and data sources. MCP tools become available to all agents automatically.
+
+### Supported Transports
+
+| Transport | Use Case | Example |
+|---|---|---|
+| **StreamableHTTP** | Cloud-hosted MCP services | `https://api.example.com/mcp` |
+| **SSE** | Server-Sent Events endpoints | `https://mcp.example.com/sse` |
+| **Stdio** | Local CLI tools / executables | `npx @modelcontextprotocol/server-filesystem /path` |
+
+### Configure in Settings
+
+1. Go to **Settings** → scroll to **MCP Servers**
+2. Add server configuration as JSON:
+
+```json
+{
+  "mcpServers": {
+    "web-search": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "Bearer your-token" },
+      "enabled": true
+    },
+    "local-files": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/folder"],
+      "enabled": true
+    }
+  }
+}
+```
+
+3. Click **Save & Connect All**
+4. Connected tools appear with a green status dot and tool count
+
+Once connected, MCP tools are automatically available to the AI alongside the 16 built-in tools. Tool names follow the pattern `mcp_{serverName}_{toolName}` — the AI can call them like any other tool.
 
 ## Context Management Settings
 
