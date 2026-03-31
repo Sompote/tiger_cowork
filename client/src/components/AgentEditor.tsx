@@ -200,15 +200,14 @@ function AgentDefPanel({
                   <>
                     <div className="model-input-row">
                       <select
-                        value={agent.model === "claude-code" ? "claude-code" : "__custom__"}
+                        value={agent.model?.startsWith("claude-code") ? "claude-code" : agent.model?.startsWith("codex") ? "codex" : "__custom__"}
                         onChange={(e) => {
                           const val = e.target.value;
-                          if (val === "claude-code") {
-                            onUpdate({ ...agent, model: "claude-code" });
+                          if (val === "claude-code" || val === "codex") {
+                            onUpdate({ ...agent, model: val });
                             setModelValid(true);
                           } else {
-                            // Switch to custom — keep current value if not claude-code
-                            if (agent.model === "claude-code") {
+                            if (agent.model?.startsWith("claude-code") || agent.model?.startsWith("codex")) {
                               onUpdate({ ...agent, model: "" });
                             }
                             setModelValid(null);
@@ -218,8 +217,31 @@ function AgentDefPanel({
                       >
                         <option value="__custom__">API Model</option>
                         <option value="claude-code">Claude Code (Local CLI)</option>
+                        <option value="codex">Codex (Local CLI)</option>
                       </select>
-                      {agent.model !== "claude-code" && (
+                      {agent.model?.startsWith("claude-code") && (
+                        <input
+                          value={agent.model.includes(":") ? agent.model.split(":").slice(1).join(":") : ""}
+                          onChange={(e) => {
+                            const sub = e.target.value.trim();
+                            onUpdate({ ...agent, model: sub ? `claude-code:${sub}` : "claude-code" });
+                          }}
+                          placeholder="model (e.g. sonnet, opus) — blank = default"
+                          style={{ flex: 1 }}
+                        />
+                      )}
+                      {agent.model?.startsWith("codex") && (
+                        <input
+                          value={agent.model.includes(":") ? agent.model.split(":").slice(1).join(":") : ""}
+                          onChange={(e) => {
+                            const sub = e.target.value.trim();
+                            onUpdate({ ...agent, model: sub ? `codex:${sub}` : "codex" });
+                          }}
+                          placeholder="model (e.g. o3, o4-mini, gpt-4.1) — blank = default"
+                          style={{ flex: 1 }}
+                        />
+                      )}
+                      {!agent.model?.startsWith("claude-code") && !agent.model?.startsWith("codex") && (
                         <>
                           <input
                             value={agent.model}
@@ -249,15 +271,20 @@ function AgentDefPanel({
                         </>
                       )}
                     </div>
-                    {agent.model === "claude-code" && (
+                    {agent.model?.startsWith("claude-code") && (
                       <span className="model-valid-msg" style={{ display: "block", marginTop: 4 }}>
                         Uses locally installed Claude Code CLI — no API key needed (OAuth login)
                       </span>
                     )}
-                    {agent.model !== "claude-code" && modelValid === true && (
+                    {agent.model?.startsWith("codex") && (
+                      <span className="model-valid-msg" style={{ display: "block", marginTop: 4 }}>
+                        Uses locally installed Codex CLI — requires ChatGPT Plus/Pro or CODEX_API_KEY
+                      </span>
+                    )}
+                    {!agent.model?.startsWith("claude-code") && !agent.model?.startsWith("codex") && modelValid === true && (
                       <span className="model-valid-msg">Model available</span>
                     )}
-                    {agent.model !== "claude-code" && modelValid === false && (
+                    {!agent.model?.startsWith("claude-code") && !agent.model?.startsWith("codex") && modelValid === false && (
                       <span className="model-invalid-msg">Model not found — you can still use it</span>
                     )}
                   </>

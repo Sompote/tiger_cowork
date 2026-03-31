@@ -2,7 +2,7 @@
 
 # Tiger Cowork v0.4.1
 
-A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) or use **Claude Code CLI** as an autonomous agent backend — no API key needed. Let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
+A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. Connect any **OpenAI-compatible API** (OpenRouter, Ollama, TigerBot, etc.) or use **Claude Code** / **Codex CLI** as autonomous agent backends — no API key needed. Let the AI use 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -32,7 +32,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 ## What's New in v0.4.1 — Claude Code as Agent Backend
 
-- **Claude Code CLI as agent backend** — Set any agent's model to "Claude Code (Local CLI)" in the Agent Editor. The agent runs through your locally installed `claude` CLI — a full autonomous agent with its own tool loop (Read, Edit, Bash, Glob, Grep). No API key needed — uses your claude.ai OAuth login.
+- **Claude Code & Codex as agent backends** — Set any agent's model to "Claude Code (Local CLI)" or "Codex (Local CLI)" in the Agent Editor. The agent runs through your locally installed CLI — a full autonomous agent with its own tool loop. No API key needed — uses OAuth login. Mix API models and local CLI agents in the same multi-agent system.
 - **Agent waiting/done states** — Task monitor now shows running, waiting, and done agents with distinct visual states and icons.
 - **Anti-abandonment nudges** — Prevents the LLM from stopping while sub-agents are still working or when responses sound incomplete.
 - **Python auto-retry** — Automatically fixes common syntax errors (unclosed brackets, unterminated strings, Python 2 print statements) and retries.
@@ -48,7 +48,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 ## Key Features
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
-- **Claude Code Agent Backend** — Use Claude Code CLI as an autonomous coding agent. Select it per-agent in the visual editor — no API key required, uses your claude.ai subscription via OAuth
+- **Claude Code & Codex Agent Backends** — Use Claude Code or OpenAI Codex CLI as autonomous coding agents. Select per-agent in the visual editor — no API key required, uses OAuth login. Mix local CLI agents with API models in the same multi-agent system
 - **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
 - **Long-Running Session Stability** — Three layers of protection for extended conversations:
   - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
@@ -125,49 +125,58 @@ npm run build && pm2 start npm --name "cowork" -- start
 3. Click **Test Connection** to verify
 4. Start chatting — the AI can search the web, run code, generate charts, and more
 
-## Claude Code Setup (Optional)
+## Local CLI Agent Setup (Optional)
 
-Use [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous agent backend — it handles code reading, editing, and execution with its own tool loop. No API key needed.
+Use **Claude Code** or **Codex** as autonomous agent backends — they handle code reading, editing, and execution with their own tool loops. No API key needed.
 
-### 1. Install Claude Code CLI
+### Claude Code
 
 ```bash
+# Install
 npm install -g @anthropic-ai/claude-code
-```
 
-### 2. Login (one-time)
-
-```bash
+# Login (one-time — opens browser for OAuth)
 claude
-```
+# Requires claude.ai Pro, Max, or Team subscription
 
-This opens a browser for OAuth login to your claude.ai account. Requires a **Pro, Max, or Team** subscription.
-
-### 3. Verify
-
-```bash
+# Verify
 claude -p "hello" --output-format json
 ```
 
-### 4. Use in Tiger Cowork
+### OpenAI Codex
+
+```bash
+# Install
+npm install -g @openai/codex
+
+# Login (one-time — opens browser for OAuth)
+codex login
+# Requires ChatGPT Plus, Pro, Business, or Enterprise plan
+# Alternative: set CODEX_API_KEY environment variable
+
+# Verify
+codex exec "hello"
+```
+
+### Use in Tiger Cowork
 
 1. Open the **Agent Editor**
 2. Select an agent → check **"Specify model for this agent"**
-3. Choose **"Claude Code (Local CLI)"** from the dropdown
-4. Save — that agent now runs through Claude Code
+3. Choose **"Claude Code (Local CLI)"** or **"Codex (Local CLI)"** from the dropdown
+4. Save — that agent now runs through the selected CLI
 
-You can mix providers: some agents use API models (GPT, Gemini, Claude API), others use Claude Code CLI — all in the same multi-agent system.
+You can mix providers: some agents use API models (GPT, Gemini, Claude API), others use Claude Code or Codex CLI — all in the same multi-agent system.
 
 ### Headless Server (no browser)
 
 If the server has no browser for OAuth login, authenticate on another machine first, then copy the credentials:
 
 ```bash
-# On a machine with a browser
-claude    # complete OAuth login
-
-# Copy auth to the headless server
+# Claude Code
 scp -r ~/.claude user@server:~/.claude
+
+# Codex
+scp -r ~/.codex user@server:~/.codex
 ```
 
 ## Context Management Settings

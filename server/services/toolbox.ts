@@ -1169,6 +1169,7 @@ export async function runClaudeCodeAgent(
     onToolCall?: (name: string, args: any) => void;
     onText?: (text: string) => void;
     maxTurns?: number;
+    model?: string;     // sub-model override (e.g. "sonnet", "opus")
   } = {},
 ): Promise<{ content: string; toolResults?: any[]; toolCalls?: string[] }> {
   const settings = await getSettings();
@@ -1191,7 +1192,12 @@ export async function runClaudeCodeAgent(
     "--verbose",
   ];
 
-  console.log(`[ClaudeCode] Spawning claude CLI in ${workDir} (timeout: ${timeout}ms, maxTurns: ${maxTurns})`);
+  // Pass sub-model if specified (e.g. "claude-code:sonnet" → "--model sonnet")
+  if (opts.model) {
+    cliArgs.push("--model", opts.model);
+  }
+
+  console.log(`[ClaudeCode] Spawning claude CLI in ${workDir} (timeout: ${timeout}ms, maxTurns: ${maxTurns}${opts.model ? `, model: ${opts.model}` : ""})`);
 
   return new Promise((resolve, reject) => {
     const child = spawnChild("claude", cliArgs, {
@@ -1304,6 +1310,212 @@ export async function runClaudeCodeAgent(
       settled = true;
       console.error(`[ClaudeCode] Spawn error:`, err.message);
       reject(new Error(`Failed to spawn Claude Code CLI: ${err.message}. Is 'claude' installed and in PATH?`));
+    });
+  });
+}
+
+// --- OpenAI Codex CLI Agent ---
+
+/** Check if a model string indicates Codex CLI should be used */
+export function isCodexModel(model?: string): boolean {
+  if (!model) return false;
+  const m = model.toLowerCase().trim();
+  return m === "codex" || m === "codex-cli" || m === "openai-codex" || m.startsWith("codex:");
+}
+
+/** Check if model is any local CLI agent (Claude Code or Codex) */
+export function isLocalCliAgent(model?: string): boolean {
+  return isClaudeCodeModel(model) || isCodexModel(model);
+}
+
+/** Extract sub-model from model string (e.g. "claude-code:sonnet" → "sonnet", "codex:o3" → "o3", "claude-code" → undefined) */
+export function extractCliSubModel(model?: string): string | undefined {
+  if (!model) return undefined;
+  const idx = model.indexOf(":");
+  if (idx < 0) return undefined;
+  const sub = model.slice(idx + 1).trim();
+  return sub || undefined;
+}
+
+/**
+ * Run a task using OpenAI Codex CLI (`codex exec`).
+ * Codex is a full autonomous agent with its own tool loop —
+ * it handles file reading, editing, and shell commands internally.
+ * Uses codex login OAuth or CODEX_API_KEY env var.
+ */
+export async function runCodexAgent(
+  task: string,
+  opts: {
+    workingDir?: string;
+    systemPrompt?: string;
+    signal?: AbortSignal;
+    timeout?: number;
+    onToolCall?: (name: string, args: any) => void;
+    onText?: (text: string) => void;
+    model?: string;     // sub-model override (e.g. "o3", "o4-mini")
+  } = {},
+): Promise<{ content: string; toolResults?: any[]; toolCalls?: string[] }> {
+  const settings = await getSettings();
+  const workDir = opts.workingDir || _currentProjectWorkingFolder || settings.sandboxDir || process.cwd();
+  const timeout = opts.timeout || 300_000;
+
+  // Build the prompt
+  let fullPrompt = task;
+  if (opts.systemPrompt) {
+    fullPrompt = `${opts.systemPrompt}\n\n---\n\nTASK:\n${task}`;
+  }
+
+  // Codex CLI args: exec mode, JSON streaming, full auto
+  const cliArgs: string[] = [
+    "exec",
+    fullPrompt,
+    "--json",
+    "--full-auto",
+  ];
+
+  // Pass sub-model if specified (e.g. "codex:o3" → "-m o3")
+  if (opts.model) {
+    cliArgs.push("-m", opts.model);
+  }
+
+  console.log(`[Codex] Spawning codex CLI in ${workDir} (timeout: ${timeout}ms${opts.model ? `, model: ${opts.model}` : ""})`);
+
+  return new Promise((resolve, reject) => {
+    const child = spawnChild("codex", cliArgs, {
+      cwd: workDir,
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let resultText = "";
+    let stderrText = "";
+    const toolCalls: string[] = [];
+    let settled = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGTERM");
+        console.log(`[Codex] Timeout after ${timeout}ms`);
+        resolve({
+          content: resultText || `Codex timed out after ${timeout / 1000}s.`,
+          toolCalls,
+        });
+      }
+    }, timeout);
+
+    if (opts.signal) {
+      const onAbort = () => {
+        if (!settled) {
+          settled = true;
+          child.kill("SIGTERM");
+          clearTimeout(timeoutId);
+          resolve({ content: resultText || "Task was cancelled.", toolCalls });
+        }
+      };
+      if (opts.signal.aborted) {
+        child.kill("SIGTERM");
+        clearTimeout(timeoutId);
+        return resolve({ content: "Task was cancelled.", toolCalls });
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    // Parse JSONL output from codex --json
+    let buffer = "";
+    child.stdout.on("data", (data: Buffer) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          // Codex JSONL event types
+          if (event.type === "item.completed" && event.item) {
+            const item = event.item;
+            if (item.type === "agent_message" && item.text) {
+              // Agent text response
+              resultText += item.text;
+              if (opts.onText) opts.onText(item.text);
+            } else if (item.type === "command_execution") {
+              // Shell command execution
+              const toolName = item.command || "shell";
+              toolCalls.push(toolName);
+              if (opts.onToolCall) opts.onToolCall("shell", { command: item.command });
+              // Append command output to result for context
+              if (item.aggregated_output) {
+                resultText += item.aggregated_output;
+                if (opts.onText) opts.onText(item.aggregated_output);
+              }
+            } else if (item.type === "file_edit" || item.type === "file_read") {
+              // File operations
+              const toolName = item.type;
+              toolCalls.push(toolName);
+              if (opts.onToolCall) opts.onToolCall(toolName, { path: item.path || item.file });
+            } else if (item.type === "message" && item.content) {
+              // Legacy/alternate message format
+              for (const block of (Array.isArray(item.content) ? item.content : [item.content])) {
+                if (block.type === "output_text" || block.type === "text") {
+                  const text = block.text || block.output || "";
+                  resultText += text;
+                  if (opts.onText) opts.onText(text);
+                } else if (typeof block === "string") {
+                  resultText += block;
+                  if (opts.onText) opts.onText(block);
+                }
+              }
+            } else if (item.type === "function_call" || item.type === "tool_use") {
+              const toolName = item.name || item.function?.name || "unknown";
+              toolCalls.push(toolName);
+              if (opts.onToolCall) opts.onToolCall(toolName, item.arguments || item.input || {});
+            }
+          } else if (event.type === "turn.completed") {
+            // End of turn — no additional output extraction needed
+          } else if (event.type === "message" && event.content) {
+            // Simple message event
+            const text = typeof event.content === "string" ? event.content : JSON.stringify(event.content);
+            resultText += text;
+            if (opts.onText) opts.onText(text);
+          }
+        } catch {
+          // Non-JSON line — might be plain text output
+          if (line.trim() && !line.startsWith("{")) {
+            resultText += line + "\n";
+          }
+        }
+      }
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderrText += data.toString();
+    });
+
+    child.on("close", (code: number | null) => {
+      clearTimeout(timeoutId);
+      if (settled) return;
+      settled = true;
+
+      if (code !== 0 && !resultText) {
+        console.error(`[Codex] Exited with code ${code}. stderr: ${stderrText.slice(0, 500)}`);
+        resolve({
+          content: `Codex exited with code ${code}. Error: ${stderrText.slice(0, 2000)}`,
+          toolCalls,
+        });
+      } else {
+        console.log(`[Codex] Completed. Tools used: ${toolCalls.length}, result length: ${resultText.length}`);
+        resolve({ content: resultText || "(no output)", toolCalls });
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(timeoutId);
+      if (settled) return;
+      settled = true;
+      console.error(`[Codex] Spawn error:`, err.message);
+      reject(new Error(`Failed to spawn Codex CLI: ${err.message}. Is 'codex' installed and in PATH?`));
     });
   });
 }
@@ -1613,18 +1825,23 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
 
     let result: any;
 
-    if (isClaudeCodeModel(agentModel)) {
-      // --- Claude Code CLI agent: bypass LLM tool loop, delegate entirely to claude CLI ---
-      console.log(`[SubAgent:${label}] Using Claude Code CLI as agent backend`);
-      result = await runClaudeCodeAgent(args.task, {
+    if (isLocalCliAgent(agentModel)) {
+      // --- Local CLI agent (Claude Code or Codex): bypass LLM tool loop ---
+      const isCodex = isCodexModel(agentModel);
+      const cliName = isCodex ? "Codex" : "Claude Code";
+      const runAgent = isCodex ? runCodexAgent : runClaudeCodeAgent;
+      const cliSubModel = extractCliSubModel(agentModel);
+      console.log(`[SubAgent:${label}] Using ${cliName} CLI as agent backend${cliSubModel ? ` (model: ${cliSubModel})` : ""}`);
+      result = await runAgent(args.task, {
         workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
         systemPrompt: subPrompt,
         signal: combinedSignal,
         timeout,
-        maxTurns: settings.agentMaxToolRounds || 15,
+        ...(isCodex ? {} : { maxTurns: settings.agentMaxToolRounds || 15 }),
+        model: cliSubModel,
         onToolCall: (name: string, toolArgs: any) => {
           run.toolCalls.push(name);
-          console.log(`[SubAgent:${label}] ClaudeCode Tool: ${name}`);
+          console.log(`[SubAgent:${label}] ${cliName} Tool: ${name}`);
           if (subagentStatusCallback) {
             subagentStatusCallback({
               sessionId: parentSessionId,
@@ -2077,17 +2294,22 @@ async function realtimeAgentLoop(
 
       let result: any;
 
-      if (isClaudeCodeModel(realtimeAgentModel)) {
-        // --- Claude Code CLI: autonomous agent with its own tool loop ---
-        console.log(`[Realtime:${agentDef.name}] Using Claude Code CLI as agent backend`);
-        result = await runClaudeCodeAgent(msg.payload.task, {
+      if (isLocalCliAgent(realtimeAgentModel)) {
+        // --- Local CLI agent (Claude Code or Codex): autonomous with own tool loop ---
+        const isCodex = isCodexModel(realtimeAgentModel);
+        const cliName = isCodex ? "Codex" : "Claude Code";
+        const runAgent = isCodex ? runCodexAgent : runClaudeCodeAgent;
+        const rtCliSubModel = extractCliSubModel(realtimeAgentModel);
+        console.log(`[Realtime:${agentDef.name}] Using ${cliName} CLI as agent backend${rtCliSubModel ? ` (model: ${rtCliSubModel})` : ""}`);
+        result = await runAgent(msg.payload.task, {
           workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
           systemPrompt: taskPrompt,
           signal,
           timeout: (settings.subAgentTimeout || 120) * 1000,
-          maxTurns: settings.agentMaxToolRounds || 15,
+          ...(isCodex ? {} : { maxTurns: settings.agentMaxToolRounds || 15 }),
+          model: rtCliSubModel,
           onToolCall: (name: string, toolArgs: any) => {
-            console.log(`[Realtime:${agentDef.name}] ClaudeCode Tool: ${name}`);
+            console.log(`[Realtime:${agentDef.name}] ${cliName} Tool: ${name}`);
             if (subagentStatusCallback) {
               subagentStatusCallback({
                 sessionId,
