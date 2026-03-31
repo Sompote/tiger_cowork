@@ -1,6 +1,6 @@
 ![Tiger Cowork Banner](picture/banner2.jpg)
 
-# Tiger Cowork v0.4.1
+# Tiger Cowork v0.4.2
 
 A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. **Mix different AI providers in the same agent team** — assign any OpenAI-compatible API model (OpenRouter, Ollama, Gemini, GPT, etc.) to one agent, **Claude Code CLI** (OAuth) to another, and **Codex CLI** (OAuth) to a third. Each agent in your architecture can run on a different model or provider. **Connect external MCP servers** (Stdio, SSE, StreamableHTTP) to extend the AI's toolbox with any Model Context Protocol-compatible service. Built with 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
@@ -30,7 +30,11 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 *Auto-generated agent architecture — AI creates a complete multi-agent system with roles, connections, and communication protocols from a single prompt.*
 
-## What's New in v0.4.1 — Per-Agent Model Selection & CLI Agent Backends
+## What's New in v0.4.2 — MiniMax Built-in Provider
+
+- **MiniMax as built-in AI provider** — MiniMax is now available as a default provider in the Settings dropdown (URL: api.minimax.io/v1, Model: MiniMax-M2.7). No need to manually add it as a custom provider.
+
+### Previous: v0.4.1 — Per-Agent Model Selection & CLI Agent Backends
 
 - **Per-agent model & provider selection** — Each agent in your architecture can run on a different model or backend. In the Agent Editor, check **"Specify model for this agent"** and pick any model — API-based or local CLI. One agent can use GPT-4o via API, another Claude Code via OAuth, and a third Codex CLI — all working together in the same multi-agent system.
 - **Claude Code & Codex as code agents (OAuth)** — Set any agent to "Claude Code (Local CLI)" or "Codex (Local CLI)". These run as fully autonomous coding agents with their own tool loops — reading files, editing code, running commands. No API key needed — they authenticate via OAuth (Claude Pro/Max/Team subscription or ChatGPT Plus/Pro plan).
