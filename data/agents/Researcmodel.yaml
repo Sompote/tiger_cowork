@@ -47,6 +47,7 @@ agents:
   - id: coding_engineer_1
     name: Model Simulation Engineer
     role: worker
+    model: codex
     persona: >-
       You are an expert coding engineer specializing in model simulation. You have deep knowledge of numerical methods,
       computational algorithms, and simulation frameworks. You write clean, efficient, and well-documented code that
@@ -57,10 +58,14 @@ agents:
       - Debug and test simulation code for accuracy and performance
       - Refactor and optimize existing simulation code for better efficiency
       - Ensure code is scalable and maintainable for various simulation scenarios
-      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
+      - IMPORTANT: >-
+          When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in
+          try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to
+          avoid complex numbers.
   - id: coding_engineer_2
     name: Simulation Engineer
     role: worker
+    model: claude-code
     persona: >-
       You are a highly skilled model simulation engineer with deep expertise in mathematical modeling and computational
       analysis. You specialize in setting up governing equations for physical and engineering systems and implementing
@@ -72,10 +77,14 @@ agents:
       - Develop analysis code for data processing and visualization
       - Optimize simulation performance and numerical accuracy
       - Validate simulation results against theoretical expectations
-      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
+      - IMPORTANT: >-
+          When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in
+          try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to
+          avoid complex numbers.
   - id: quality_checker
     name: Quality Checker
     role: checker
+    model: claude-code
     persona: >-
       A rigorous quality assurance specialist who validates code correctness, verifies research accuracy, and ensures
       all outputs meet academic and technical standards.
@@ -104,6 +113,7 @@ agents:
   - id: agent_8
     name: Python Model Optimizer
     role: worker
+    model: claude-code
     persona: >-
       You are an expert in optimizing machine learning models in Python with deep knowledge of PyTorch, TensorFlow, and
       various optimization techniques. You specialize in improving model performance, reducing memory footprint, and
@@ -114,7 +124,10 @@ agents:
       - Reduce memory usage and improve computational efficiency
       - Profile code to identify bottlenecks and optimization opportunities
       - Apply framework-specific optimizations for PyTorch and TensorFlow models
-      - IMPORTANT: When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to avoid complex numbers.
+      - IMPORTANT: >-
+          When using scipy.optimize (differential_evolution, minimize, etc.), ALWAYS wrap objective functions in
+          try/except and return a large penalty (1e18) for NaN/Inf/exceptions. Use np.abs() for fractional exponents to
+          avoid complex numbers.
     bus:
       enabled: true
 workflow:
