@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tiger Cowork — One-Click Mac Installer App
-# Shows folder chooser + live progress window
+# Installs directly to ~/TigerCowork — no folder chooser
 
 set -e
 
@@ -8,6 +8,7 @@ export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt
 
 APP_NAME="Tiger Cowork"
 REPO_URL="https://github.com/Sompote/tiger_cowork.git"
+INSTALL_DIR="$HOME/TigerCowork"
 URL="http://localhost:3001"
 LOG_FILE="/tmp/tiger-cowork-install.log"
 PROGRESS_HTML="/tmp/tiger-cowork-progress.html"
@@ -117,7 +118,7 @@ write_progress() {
 <div class="card">
   <div class="logo">🐯</div>
   <h1>Tiger Cowork</h1>
-  <div class="subtitle">Installer</div>
+  <div class="subtitle">Installing to ~/TigerCowork</div>
 
   <div class="progress-bar">
     <div class="progress-fill">${PERCENT}%</div>
@@ -160,29 +161,8 @@ alert() {
 }
 
 # ============================================================
-# STEP 0: Welcome + Folder Chooser
-# ============================================================
-INSTALL_DIR=$(osascript <<'ASEOF'
-  tell application "System Events"
-    activate
-    set dialogResult to display dialog "Welcome to Tiger Cowork!
-
-This installer will:
-  • Install Docker Desktop (if needed)
-  • Download Tiger Cowork
-  • Build and start the app
-
-Choose where to install:" with title "Tiger Cowork Installer" buttons {"Cancel", "Choose Folder…"} default button "Choose Folder…" with icon note
-  end tell
-
-  if button returned of dialogResult is "Choose Folder…" then
-    set installFolder to choose folder with prompt "Choose install location for Tiger Cowork:"
-    return POSIX path of installFolder & "TigerCowork"
-  end if
-ASEOF
-) || exit 0
-
 # Open progress window
+# ============================================================
 write_progress 1 7 "Checking Docker..." "Looking for Docker installation"
 open "$PROGRESS_HTML"
 sleep 1
@@ -209,9 +189,6 @@ if ! docker --version &>/dev/null 2>&1; then
   cp -R "/Volumes/Docker/Docker.app" /Applications/ 2>>"$LOG_FILE"
   hdiutil detach "/Volumes/Docker" -quiet 2>>"$LOG_FILE"
   rm -f /tmp/Docker.dmg
-  DOCKER_INSTALLED=true
-else
-  DOCKER_INSTALLED=false
 fi
 
 # ============================================================
@@ -317,7 +294,6 @@ done
 # ============================================================
 # STEP 7: Done!
 # ============================================================
-# Write final success page (no auto-refresh)
 cat > "$PROGRESS_HTML" <<'DONEEOF'
 <!DOCTYPE html>
 <html>
@@ -375,8 +351,9 @@ cat > "$PROGRESS_HTML" <<'DONEEOF'
   <div class="subtitle">Tiger Cowork is up and running</div>
   <a class="btn" href="http://localhost:3001" target="_blank">Open Tiger Cowork</a>
   <div class="info">
+    Installed at: ~/TigerCowork<br>
     To stop: open Docker Desktop → Containers → Stop tiger-cowork<br>
-    To restart: double-click TigerCowork.app in the install folder
+    To restart: double-click TigerCowork.app
   </div>
 </div>
 </body>
