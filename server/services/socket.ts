@@ -331,6 +331,34 @@ export function setupSocket(io: Server): void {
       // ─── Human Node messages (agent → human) ───
       } else if (data.status === "human_node_message") {
         progressText = `\n<div class="agent-response-tag" data-agent="${data.agentId}">📨 <strong>${data.label}</strong></div>\n\n${data.content}\n`;
+
+        // Save agent-to-human messages with output files so they appear in the output panel
+        const humanMsgFiles: string[] = data.outputFiles || [];
+        // Also scan sandbox for files generated during agent work
+        getSettings().then(async (msgSettings) => {
+          const msgSandboxDir = msgSettings.sandboxDir || path.resolve("sandbox");
+          const scannedMsgFiles = scanOutputFiles(msgSandboxDir, Date.now() - 120000); // files from last 2 min
+          for (const sf of scannedMsgFiles) {
+            if (!humanMsgFiles.includes(sf)) humanMsgFiles.push(sf);
+          }
+          if (humanMsgFiles.length > 0) {
+            // Save message with files to chat history so output panel picks them up
+            const sessions = await getChatHistory();
+            const session = sessions.find((s) => s.id === data.sessionId);
+            if (session) {
+              const agentMsg = `<div class="agent-response-tag" data-agent="${data.agentId}">📨 <strong>${data.label}</strong></div>\n\n${data.content}`;
+              session.messages.push({
+                role: "assistant",
+                content: agentMsg,
+                timestamp: new Date().toISOString(),
+                files: humanMsgFiles,
+              });
+              await saveChatHistory(sessions);
+              // Emit response with files so client refreshes output panel
+              ioRef?.emit("chat:response", { sessionId: data.sessionId, content: agentMsg, done: false, files: humanMsgFiles });
+            }
+          }
+        }).catch(() => {});
       }
       if (progressText) {
         ioRef.emit("chat:chunk", { sessionId: data.sessionId, content: progressText });

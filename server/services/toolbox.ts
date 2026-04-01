@@ -11,6 +11,9 @@ import {
   busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busLoadHistory,
   queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
   getProtocolStatus, cleanupSessionProtocols,
+  blackboardPropose, blackboardBid, blackboardAward, blackboardVote,
+  blackboardStartTask, blackboardCompleteTask, blackboardGetTask, blackboardGetTasks,
+  blackboardGetConsensus, blackboardGetLog,
 } from "./protocols";
 
 
@@ -331,6 +334,116 @@ const queueTools = [
   },
 ];
 
+// ─── Blackboard / P2P Governance Tools ───
+
+const blackboardTools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_propose",
+      description: "Propose a new task on the shared blackboard for peer agents to bid on (Contract Net Protocol). Use this when you identify work that needs to be done.",
+      parameters: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: "Task description" },
+          task_id: { type: "string", description: "Optional custom task ID" },
+        },
+        required: ["description"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_bid",
+      description: "Submit a bid for an open task on the blackboard. Include your confidence score (0-1) indicating how well-suited you are for this task.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Task ID to bid on" },
+          confidence: { type: "number", description: "Confidence score 0-1 for how well you can handle this task" },
+          cost: { type: "number", description: "Optional estimated cost/effort (lower is better)" },
+          reasoning: { type: "string", description: "Why you're suited for this task" },
+        },
+        required: ["task_id", "confidence"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_award",
+      description: "Award a task to the best bidder. If no agent is specified, the highest-confidence bidder wins automatically.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Task ID to award" },
+          award_to: { type: "string", description: "Optional: specific agent ID to award to" },
+        },
+        required: ["task_id"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_vote",
+      description: "Cast a vote on a task proposal or result (approve/reject/abstain). Used for consensus-based decisions.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Task ID to vote on" },
+          vote: { type: "string", enum: ["approve", "reject", "abstain"], description: "Your vote" },
+          weight: { type: "number", description: "Optional vote weight (default 1)" },
+        },
+        required: ["task_id", "vote"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_complete",
+      description: "Mark a task as completed with a result. Use this after you finish the work you were awarded.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Task ID to complete" },
+          result: { type: "string", description: "Task result / output" },
+        },
+        required: ["task_id", "result"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_read",
+      description: "Read the shared blackboard — see all tasks, their status, bids, and results. Optionally filter by status.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Optional: read a specific task" },
+          status: { type: "string", enum: ["open", "bidding", "awarded", "in_progress", "completed", "failed"], description: "Optional: filter by status" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "bb_log",
+      description: "Read the blackboard audit log — append-only event trail of all proposals, bids, votes, awards, and completions for auditability.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Max entries to return (default 50)" },
+        },
+      },
+    },
+  },
+];
+
 // All protocol tools combined (for backward compat / orchestrator)
 const protocolTools = [...tcpTools, ...busTools, ...queueTools];
 
@@ -375,6 +488,12 @@ export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connecti
     tools.push(...tcpTools, ...queueTools);
   }
 
+  // P2P: if agent is a peer or system is in p2p mode, add blackboard tools
+  const isP2P = systemConfig?.system?.orchestration_mode === "p2p";
+  if (isP2P || agentDef.role === "peer") {
+    tools.push(...blackboardTools);
+  }
+
   return tools;
 }
 
@@ -409,11 +528,17 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
   if (!config) return null;
   let summary = `\n\nMANUAL AGENT TEAM CONFIGURATION (${config.system?.name || "Unnamed"}):\n`;
   summary += `Orchestration mode: ${config.system?.orchestration_mode || "hierarchical"}\n`;
+  if (config.system?.orchestration_mode === "p2p") {
+    const governance = config.system?.p2p_governance;
+    summary += `P2P Governance: ${governance?.consensus_mechanism || "contract_net"}\n`;
+    summary += `All peer agents are autonomous — coordination via shared blackboard (propose → bid → award → execute).\n`;
+  }
   summary += `Available agents:\n`;
   for (const a of config.agents || []) {
     const flags = [
       a.bus?.enabled ? "bus" : "",
       a.mesh?.enabled ? "mesh" : "",
+      a.role === "peer" ? "peer" : "",
     ].filter(Boolean).join(", ");
     summary += `  - ${a.id} ("${a.name}"): role=${a.role}${flags ? ` [${flags}]` : ""}, persona=${a.persona || "N/A"}\n`;
     if (a.responsibilities && a.responsibilities.length > 0) {
@@ -435,6 +560,9 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
   summary += `\nINSTRUCTIONS: You MUST spawn sub-agents using the agentId parameter to match agents from this config.\n`;
   summary += `For each user task, follow the workflow sequence: spawn agents in order, pass context between them, and synthesize the final result.\n`;
   summary += `Example: spawn_subagent({task: "...", label: "Project manager", agentId: "agent_1", context: "..."})\n`;
+  summary += `\nPRESENTATION: After all agents complete, synthesize results into a clear, human-readable response.\n`;
+  summary += `Do NOT dump raw agent output. Organize findings with headings and bullet points. Mention any generated files so the user checks the output panel.\n`;
+  summary += `If agents return data, use run_python to create charts or formatted reports when appropriate.\n`;
   return summary;
 }
 
@@ -461,7 +589,8 @@ export async function getToolsForSubagent(
         (step: any) => step.agent === agentDef.id && step.outputs_to?.length > 0
       );
       const hasMesh = agentDef?.mesh?.enabled === true || systemConfig?.system?.orchestration_mode === "mesh";
-      if (hasDownstream || hasMesh) tools.push(spawnSubagentTool);
+      const hasP2P = agentDef?.role === "peer" || systemConfig?.system?.orchestration_mode === "p2p";
+      if (hasDownstream || hasMesh || hasP2P) tools.push(spawnSubagentTool);
     } else {
       // Auto mode: depth limit applies
       if (currentDepth < maxDepth) tools.push(spawnSubagentTool);
@@ -1121,7 +1250,7 @@ async function openRouterWebSearch(args: { query: string }): Promise<any> {
 interface AgentConfig {
   id: string;
   name: string;
-  role: string;
+  role: string;  // human, orchestrator, worker, checker, reporter, researcher, peer
   model: string;
   persona: string;
   responsibilities: string[];
@@ -1134,10 +1263,28 @@ interface AgentConfig {
   mesh?: {
     enabled: boolean;
   };
+  p2p?: {
+    confidence_domains?: string[];   // domains this agent is confident in
+    reputation_score?: number;       // 0-1, initial reputation
+  };
+}
+
+interface P2PGovernanceConfig {
+  consensus_mechanism: "majority_voting" | "weighted_voting" | "contract_net" | "blackboard";
+  bid_timeout_seconds?: number;      // how long to wait for bids (default 30)
+  vote_timeout_seconds?: number;     // how long to wait for votes (default 30)
+  min_confidence_threshold?: number; // minimum confidence to accept a bid (0-1)
+  max_task_retries?: number;         // max retries if task fails (default 2)
+  tiebreaker?: "agent_id_hash" | "random" | "first_bid";
+  audit_log?: boolean;               // enable append-only event log (default true)
 }
 
 interface AgentSystemConfig {
-  system: { name: string; orchestration_mode: string };
+  system: {
+    name: string;
+    orchestration_mode: string;  // hierarchical, flat, mesh, hybrid, pipeline, p2p
+    p2p_governance?: P2PGovernanceConfig;
+  };
   agents: AgentConfig[];
   connections?: any[];
   workflow?: any;
@@ -1552,7 +1699,28 @@ function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemCo
     .map((c: any) => c.to);
   const downstream = [...new Set([...outputsTo, ...connTargets])];
 
-  if (downstream.length > 0) {
+  const isP2P = systemConfig.system?.orchestration_mode === "p2p";
+
+  if (isP2P) {
+    const allPeers = (systemConfig.agents || [])
+      .filter((a: AgentConfig) => a.id !== agentDef.id && a.role !== "human")
+      .map((a: AgentConfig) => `  - ${a.id} ("${a.name}", role: ${a.role})`)
+      .join("\n");
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    prompt += `P2P SWARM MODE:\n`;
+    prompt += `You are an autonomous peer in a flat P2P swarm. No agent holds persistent authority.\n`;
+    prompt += `Consensus mechanism: ${mechanism}\n`;
+    if (agentDef.p2p?.confidence_domains?.length) {
+      prompt += `Your expertise: ${agentDef.p2p.confidence_domains.join(", ")}\n`;
+    }
+    prompt += `\nPeer agents:\n${allPeers}\n`;
+    prompt += `\nRULES:\n- Use blackboard tools (bb_propose, bb_bid, bb_award, bb_complete, bb_read) for task coordination\n`;
+    prompt += `- Bid only on tasks matching your expertise with honest confidence scores\n`;
+    prompt += `- Yield tasks to peers with higher confidence\n`;
+    prompt += `- Complete awarded tasks promptly and report results via bb_complete\n`;
+    prompt += `- You can also use spawn_subagent to directly delegate to any peer\n`;
+  } else if (downstream.length > 0) {
     const downstreamInfo = downstream.map(id => {
       const a = systemConfig.agents?.find((ag: AgentConfig) => ag.id === id);
       return a ? `  - ${a.id} ("${a.name}", role: ${a.role})` : `  - ${id}`;
@@ -1641,8 +1809,9 @@ export async function spawnSubagent(
         const callerDef = systemConfig.agents?.find((a: AgentConfig) => a.id === callerId);
         const callerHasMesh = callerDef?.mesh?.enabled === true;
         const isGlobalMesh = systemConfig.system?.orchestration_mode === "mesh";
+        const isP2PMode = systemConfig.system?.orchestration_mode === "p2p";
 
-        if (!callerHasMesh && !isGlobalMesh) {
+        if (!callerHasMesh && !isGlobalMesh && !isP2PMode) {
           const callerStep = systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
           const allowedTargets: string[] = callerStep?.outputs_to || [];
 
@@ -2194,6 +2363,7 @@ async function realtimeAgentLoop(
   const orchMode = systemConfig.system?.orchestration_mode;
   const isGlobalMesh = orchMode === "mesh";
   const isHybrid = orchMode === "hybrid";
+  const isP2P = orchMode === "p2p";
   const agentMeshEnabled = agentDef.mesh?.enabled === true;
   const hasMesh = isGlobalMesh || agentMeshEnabled;
 
@@ -2212,7 +2382,36 @@ async function realtimeAgentLoop(
     .filter((a: AgentConfig) => a.id !== agentId && a.role !== "human" && a.mesh?.enabled === true)
     .map((a: AgentConfig) => a.id);
 
-  if (isHybrid && agentDef.role === "orchestrator") {
+  if (isP2P) {
+    // P2P Swarm: all agents are autonomous peers using blackboard for coordination
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    agentTools.push(...blackboardTools);
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    systemPrompt += `\n\nPEER-TO-PEER SWARM MODE: You are an autonomous peer agent in a flat P2P swarm. No agent holds persistent authority.`;
+    systemPrompt += `\nPeer agents: ${allPeers.join(", ")}`;
+    systemPrompt += `\nConsensus mechanism: ${mechanism}`;
+    if (agentDef.p2p?.confidence_domains?.length) {
+      systemPrompt += `\nYour expertise domains: ${agentDef.p2p.confidence_domains.join(", ")}`;
+    }
+    systemPrompt += `\n\nCOORDINATION PROTOCOL (Contract Net Protocol):`;
+    systemPrompt += `\n  1. PROPOSE: When you identify work, use bb_propose to post it on the shared blackboard`;
+    systemPrompt += `\n  2. BID: When you see open tasks matching your capabilities, use bb_bid with your confidence score`;
+    systemPrompt += `\n  3. AWARD: Tasks are awarded to the highest-confidence bidder via bb_award`;
+    systemPrompt += `\n  4. EXECUTE: The winning agent executes the task using available tools`;
+    systemPrompt += `\n  5. COMPLETE: Report results via bb_complete`;
+    systemPrompt += `\n\nBLACKBOARD: Use bb_read to check for open tasks. Use bb_log to review the audit trail.`;
+    if (mechanism === "majority_voting" || mechanism === "weighted_voting") {
+      systemPrompt += `\nVOTING: Use bb_vote to approve/reject proposals. Decisions require majority approval.`;
+    }
+    systemPrompt += `\nYou can also use send_task for direct peer-to-peer delegation when you already know who should handle something.`;
+    systemPrompt += `\n\nRULES:`;
+    systemPrompt += `\n  - Only bid on tasks you are confident you can complete well`;
+    systemPrompt += `\n  - Yield tasks to peers with higher confidence scores`;
+    systemPrompt += `\n  - Avoid livelock: if you've been negotiating for too long, accept the current best bid`;
+    systemPrompt += `\n  - Complete your awarded tasks promptly and report results`;
+    systemPrompt += `\n  - Do NOT loop indefinitely — complete your part and report back`;
+  } else if (isHybrid && agentDef.role === "orchestrator") {
     // Hybrid orchestrator: controls flow via connections, monitors bus, can stop mesh agents
     agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
     systemPrompt += `\n\nHYBRID MODE (ORCHESTRATOR): You control the team and coordinate all work.`;
@@ -2365,12 +2564,15 @@ async function realtimeAgentLoop(
       handle.lastResult = resultContent.slice(0, 5000);
       handle.status = "idle";
 
-      console.log(`[Realtime:${agentDef.name}] Task completed. Result: ${resultContent.slice(0, 200)}`);
+      // Collect output files from tool results
+      const agentOutputFiles: string[] = result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []) || [];
+
+      console.log(`[Realtime:${agentDef.name}] Task completed. Result: ${resultContent.slice(0, 200)}${agentOutputFiles.length > 0 ? ` (${agentOutputFiles.length} files)` : ""}`);
 
       // Publish result to bus
       busPublish(sessionId, agentId, `result:${agentId}`, {
         result: resultContent,
-        outputFiles: result.toolResults?.flatMap((tr: any) => tr.result?.outputFiles || []),
+        outputFiles: agentOutputFiles,
       });
 
       if (subagentStatusCallback) {
@@ -2468,10 +2670,11 @@ export function getHumanConnectedAgents(sessionId: string): string[] {
     .filter(([, h]) => h.agentDef.role !== "human")
     .map(([id]) => id);
 
-  // Global mesh mode OR human node has mesh.enabled: can talk to all agents
+  // Global mesh/p2p mode OR human node has mesh.enabled: can talk to all agents
   const isGlobalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+  const isP2PMode = session.systemConfig.system?.orchestration_mode === "p2p";
   const humanHasMesh = humanNode.mesh?.enabled === true;
-  if (isGlobalMesh || humanHasMesh) {
+  if (isGlobalMesh || isP2PMode || humanHasMesh) {
     return allNonHuman;
   }
 
@@ -2508,13 +2711,14 @@ export function humanSendToAgent(sessionId: string, targetAgentId: string, task:
   }
 
   // Verify human is connected to this agent
-  // Skip check if: global mesh, human has mesh.enabled, or target agent has mesh.enabled
+  // Skip check if: global mesh, p2p, human has mesh.enabled, or target agent has mesh.enabled
   const isGlobalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+  const isP2PMode = session.systemConfig.system?.orchestration_mode === "p2p";
   const humanNode = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
   const humanHasMesh = humanNode?.mesh?.enabled === true;
   const targetHasMesh = targetAgent.agentDef.mesh?.enabled === true;
 
-  if (!isGlobalMesh && !humanHasMesh && !targetHasMesh) {
+  if (!isGlobalMesh && !isP2PMode && !humanHasMesh && !targetHasMesh) {
     const humanConnected = getHumanConnectedAgents(sessionId);
     if (humanConnected.length > 0 && !humanConnected.includes(targetAgentId)) {
       return { ok: false, error: `You can only talk to agents connected to the human node: ${humanConnected.join(", ")}` };
@@ -2586,18 +2790,23 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   // Validate caller is allowed to send to target
   const callerId = _currentAgentId;
   if (callerId === "main") {
-    // Main LLM must respect hierarchy — if there's an orchestrator, only send to it
-    const orchestrator = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "orchestrator");
-    if (orchestrator && args.to !== orchestrator.id) {
-      return { ok: false, error: `You must send tasks to the orchestrator agent "${orchestrator.id}" ("${orchestrator.name}") only. The orchestrator will delegate to other agents.` };
+    // P2P mode: main can send to any peer agent (no orchestrator hierarchy)
+    const isP2PMode = session.systemConfig.system?.orchestration_mode === "p2p";
+    if (!isP2PMode) {
+      // Main LLM must respect hierarchy — if there's an orchestrator, only send to it
+      const orchestrator = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "orchestrator");
+      if (orchestrator && args.to !== orchestrator.id) {
+        return { ok: false, error: `You must send tasks to the orchestrator agent "${orchestrator.id}" ("${orchestrator.name}") only. The orchestrator will delegate to other agents.` };
+      }
     }
   } else {
     const callerDef = session.systemConfig.agents?.find((a: AgentConfig) => a.id === callerId);
     const callerHasMesh = callerDef?.mesh?.enabled === true;
     const globalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
+    const globalP2P = session.systemConfig.system?.orchestration_mode === "p2p";
     const isHybridOrch = session.systemConfig.system?.orchestration_mode === "hybrid" && callerDef?.role === "orchestrator";
 
-    if (!callerHasMesh && !globalMesh && !isHybridOrch) {
+    if (!callerHasMesh && !globalMesh && !globalP2P && !isHybridOrch) {
       // Strict access control via connections
       const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
       const allowedTargets: string[] = callerStep?.outputs_to || [];
@@ -2615,6 +2824,17 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   // If target is a human node, route output to client via callback (not LLM loop)
   if (targetAgent.agentDef.role === "human") {
     console.log(`[Realtime] ${_currentAgentId} → send_task → HUMAN (${args.to}): ${args.task.slice(0, 100)}`);
+    // Collect any output files from this agent's last run
+    const callerHandle = session.agents.get(_currentAgentId);
+    const callerFiles: string[] = [];
+    // Check bus history for this agent's most recent result which may contain outputFiles
+    const recentResults = busHistory(sessionId, `result:${_currentAgentId}`);
+    if (recentResults.length > 0) {
+      const lastResult = recentResults[recentResults.length - 1];
+      if (lastResult.payload?.outputFiles) {
+        callerFiles.push(...lastResult.payload.outputFiles);
+      }
+    }
     if (subagentStatusCallback) {
       subagentStatusCallback({
         sessionId,
@@ -2622,6 +2842,7 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
         agentId: _currentAgentId,
         label: session.agents.get(_currentAgentId)?.agentDef.name || _currentAgentId,
         content: args.task,
+        outputFiles: callerFiles.length > 0 ? callerFiles : undefined,
       });
     }
     return {
@@ -2843,7 +3064,18 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
   summary += `All agents are ALREADY ALIVE and listening for tasks.\n\n`;
 
   const isHybrid = config.system?.orchestration_mode === "hybrid";
-  if (orchestrator) {
+  const isP2P = config.system?.orchestration_mode === "p2p";
+
+  if (isP2P) {
+    const peerAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human");
+    const governance = config.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    summary += `P2P SWARM MODE: All agents are autonomous peers. No agent holds persistent authority.\n`;
+    summary += `Consensus mechanism: ${mechanism}\n`;
+    summary += `Peer agents: ${peerAgents.map(a => `${a.id} ("${a.name}")`).join(", ")}\n\n`;
+    summary += `COORDINATION: Agents use the shared BLACKBOARD to propose tasks, bid with confidence scores, and award work via ${mechanism}.\n`;
+    summary += `You can send tasks to ANY peer agent. The swarm will self-organize via the Contract Net Protocol.\n\n`;
+  } else if (orchestrator) {
     summary += `ORCHESTRATOR AGENT: ${orchestrator.id} ("${orchestrator.name}")\n`;
     summary += `You MUST send ALL tasks to the orchestrator agent ONLY. The orchestrator will coordinate and delegate to the team.\n`;
     summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n`;
@@ -2900,7 +3132,15 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
   const orchDownstream = orchestratorStep?.outputs_to || [];
 
   summary += `\nINSTRUCTIONS (CRITICAL — YOU MUST FOLLOW):\n`;
-  if (orchestrator) {
+  if (isP2P) {
+    const peerIds = (config.agents || []).filter((a: AgentConfig) => a.role !== "human").map(a => a.id);
+    summary += `- P2P MODE: Send the user task to ONE or MORE peer agents for parallel execution\n`;
+    summary += `- Available peers: ${peerIds.join(", ")}\n`;
+    summary += `- Use send_task({to: "peer_id", task: "..."}) to assign work directly, or let agents self-organize via the blackboard\n`;
+    summary += `- Use wait_result({from: "peer_id"}) to collect results\n`;
+    summary += `- Agents will use Contract Net Protocol (propose → bid → award → execute → complete) on the shared blackboard\n`;
+    summary += `- Do NOT do research yourself — delegate ALL work to the peer agents.\n`;
+  } else if (orchestrator) {
     summary += `- STEP 1: Send the FULL user task to the orchestrator: send_task({to: "${orchestrator.id}", task: "provide the complete user request with all context and details"})\n`;
     summary += `- STEP 2: Wait for the orchestrator's result: wait_result({from: "${orchestrator.id}"})\n`;
     summary += `- STEP 3: Present the results to the user. Optionally use run_python to format into charts/reports.\n`;
@@ -2914,6 +3154,14 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
     summary += `- Do NOT do research yourself — delegate ALL work to the agent team.\n`;
   }
   summary += `- Use check_agents() to see agent statuses\n`;
+  summary += `\nPRESENTATION (CRITICAL — HOW TO RESPOND TO THE USER):\n`;
+  summary += `- After collecting agent results, you MUST synthesize them into a clear, human-readable response for the user.\n`;
+  summary += `- Do NOT just dump raw agent output. Summarize, organize, and present the findings in a well-structured format.\n`;
+  summary += `- Use headings, bullet points, and clear language. Highlight key findings and conclusions.\n`;
+  summary += `- If agents generated output files (charts, reports, data), mention them explicitly so the user knows to check the output panel.\n`;
+  summary += `- If the task involved research, present the synthesized knowledge — not just a list of what each agent found.\n`;
+  summary += `- If you receive partial or raw data, use run_python to create visualizations, tables, or formatted reports when appropriate.\n`;
+  summary += `- Your job is to be the interface between the agent team and the human — make the results useful and actionable.\n`;
   return summary;
 }
 
@@ -3020,6 +3268,51 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     case "proto_queue_peek": {
       const messages = queuePeek(args.from, _currentAgentId, args.topic, args.count || 5);
       return { ok: true, protocol: "queue", messages, count: messages.length };
+    }
+
+    // ─── Blackboard / P2P Governance Tools ───
+    case "bb_propose": {
+      const sessionId = _currentParentSessionId || "default";
+      const task = blackboardPropose(sessionId, _currentAgentId, args.description, args.task_id);
+      return { ok: true, protocol: "blackboard", action: "propose", task };
+    }
+    case "bb_bid": {
+      const sessionId = _currentParentSessionId || "default";
+      const result = blackboardBid(sessionId, _currentAgentId, args.task_id, args.confidence, args.cost, args.reasoning);
+      return { ...result, protocol: "blackboard", action: "bid" };
+    }
+    case "bb_award": {
+      const sessionId = _currentParentSessionId || "default";
+      const result = blackboardAward(sessionId, args.task_id, args.award_to);
+      if (result.ok && result.awardedTo) {
+        blackboardStartTask(sessionId, result.awardedTo, args.task_id);
+      }
+      return { ...result, protocol: "blackboard", action: "award" };
+    }
+    case "bb_vote": {
+      const sessionId = _currentParentSessionId || "default";
+      const result = blackboardVote(sessionId, _currentAgentId, args.task_id, args.vote, args.weight);
+      const consensus = blackboardGetConsensus(sessionId, args.task_id);
+      return { ...result, protocol: "blackboard", action: "vote", consensus };
+    }
+    case "bb_complete": {
+      const sessionId = _currentParentSessionId || "default";
+      const result = blackboardCompleteTask(sessionId, _currentAgentId, args.task_id, args.result);
+      return { ...result, protocol: "blackboard", action: "complete" };
+    }
+    case "bb_read": {
+      const sessionId = _currentParentSessionId || "default";
+      if (args.task_id) {
+        const task = blackboardGetTask(sessionId, args.task_id);
+        return { ok: true, protocol: "blackboard", action: "read", task: task || null };
+      }
+      const tasks = blackboardGetTasks(sessionId, args.status);
+      return { ok: true, protocol: "blackboard", action: "read", tasks, count: tasks.length };
+    }
+    case "bb_log": {
+      const sessionId = _currentParentSessionId || "default";
+      const log = blackboardGetLog(sessionId, args.limit || 50);
+      return { ok: true, protocol: "blackboard", action: "log", entries: log, count: log.length };
     }
 
     default:

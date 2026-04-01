@@ -254,6 +254,12 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.3);
 }
 
+.agent-node-peer-badge {
+  background: #ff9800;
+  right: auto;
+  left: -8px;
+}
+
 /* Mesh mode banner */
 .mesh-mode-banner {
   position: absolute;
@@ -277,6 +283,62 @@
   background: rgba(156, 39, 176, 0.15);
   color: #9c27b0;
   border-color: rgba(156, 39, 176, 0.3);
+}
+
+.p2p-mode-banner {
+  background: rgba(255, 152, 0, 0.15);
+  color: #ff9800;
+  border-color: rgba(255, 152, 0, 0.3);
+}
+
+/* P2P Governance Panel */
+.p2p-governance-panel {
+  background: rgba(255, 152, 0, 0.06);
+  border: 1px solid rgba(255, 152, 0, 0.2);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 0 0 8px 0;
+}
+
+.p2p-governance-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ff9800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.p2p-governance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.p2p-governance-grid .form-group {
+  margin-bottom: 0;
+}
+
+.p2p-governance-grid .form-group label {
+  font-size: 10px;
+  color: #aaa;
+  margin-bottom: 2px;
+  display: block;
+}
+
+.p2p-governance-grid .form-group select,
+.p2p-governance-grid .form-group input[type="number"] {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: #eee;
+}
+
+.p2p-governance-grid .bus-toggle-label {
+  font-size: 11px;
 }
 
 /* Connection ports */

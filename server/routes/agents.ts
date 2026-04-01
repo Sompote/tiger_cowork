@@ -125,7 +125,7 @@ Description: ${description}
 
 Return ONLY a valid JSON object (no markdown, no code fences) with these fields:
 - "name": string (short agent name)
-- "role": one of ["orchestrator", "worker", "checker", "reporter", "researcher"]
+- "role": one of ["orchestrator", "worker", "checker", "reporter", "researcher", "peer"]
 - "persona": detailed persona description (2-3 sentences)
 - "responsibilities": array of 3-5 responsibility strings
 
@@ -181,17 +181,25 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this exact st
     "name": "System Name",
     "orchestration_mode": "${archType}",
     "communication_protocol": "structured_handoff",
-    "context_passing": "full_chain"
+    "context_passing": "full_chain"${archType === "p2p" ? `,
+    "p2p_governance": {
+      "consensus_mechanism": "contract_net",
+      "bid_timeout_seconds": 30,
+      "min_confidence_threshold": 0.5,
+      "tiebreaker": "agent_id_hash",
+      "audit_log": true
+    }` : ""}
   },
   "agents": [
     {
       "id": "unique_snake_case_id",
       "name": "Agent Display Name",
-      "role": "one of: human, orchestrator, worker, checker, reporter, researcher",
+      "role": "one of: human, orchestrator, worker, checker, reporter, researcher, peer",
       "persona": "Detailed 2-3 sentence persona description",
       "responsibilities": ["responsibility 1", "responsibility 2", "responsibility 3"],
       "bus": { "enabled": true/false, "topics": ["topic1", "topic2"] },
-      "mesh": { "enabled": true/false }
+      "mesh": { "enabled": true/false }${archType === "p2p" ? `,
+      "p2p": { "confidence_domains": ["domain1", "domain2"], "reputation_score": 0.8 }` : ""}
     }
   ],
   "connections": [
@@ -227,6 +235,7 @@ ARCHITECTURE RULES:
 - For mesh: do NOT generate connections — mesh mode bypasses access control so all agents can freely send tasks to any other agent. Only enable bus on agents that need to share broadcast data.
 - For hybrid: human connects to ONE orchestrator. Orchestrator connects to all workers via tcp. Workers should have "mesh.enabled: true" so they can collaborate freely with each other without needing connection lines between them. The orchestrator should have "bus.enabled: true" to monitor all agent activity. This combines structured control (orchestrator routes tasks) with flexible peer collaboration (mesh workers). The orchestrator is responsible for preventing infinite loops among mesh agents.
 - For pipeline: agents form a sequential chain, each connecting to the next
+- For p2p (peer-to-peer swarm): ALL non-human agents MUST use role "peer" (NOT worker/orchestrator). Do NOT generate connections — P2P mode uses a shared blackboard for coordination via Contract Net Protocol (propose → bid → award → execute → complete). Each peer agent MUST have a "p2p" field with "confidence_domains" (list of domains this agent excels at) and "reputation_score" (0-1 initial reputation). Enable "bus.enabled: true" on ALL peer agents for status broadcasting. The system.p2p_governance field defines consensus mechanism (contract_net, majority_voting, weighted_voting, or blackboard). Agents self-organize: they propose tasks on the blackboard, bid with confidence scores, and the best-suited agent wins the work.
 - Per-agent mesh: individual agents can have "mesh.enabled: true" which lets them send tasks to any other agent without needing connection lines. Use this for agents that need flexible collaboration (e.g., researchers, analysts). Agents without mesh.enabled must use explicit connections.
 - Each non-human agent must have a meaningful persona and 3-5 responsibilities
 - Agent IDs must be snake_case (e.g., "design_engineer", "quality_checker")

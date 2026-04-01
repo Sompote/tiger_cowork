@@ -345,11 +345,240 @@ export function busWaitForMessage(
   });
 }
 
+// ─── Blackboard Protocol (P2P Governance) ───
+// Shared workspace for P2P agent swarms. Agents post proposals, bids, votes,
+// and task results. Implements Contract Net Protocol and consensus mechanisms.
+
+export interface BlackboardEntry {
+  id: string;
+  type: "proposal" | "bid" | "vote" | "result" | "status";
+  taskId: string;
+  agentId: string;
+  timestamp: string;
+  payload: any;
+}
+
+export interface BlackboardTask {
+  taskId: string;
+  description: string;
+  status: "open" | "bidding" | "awarded" | "in_progress" | "completed" | "failed";
+  proposedBy: string;
+  proposedAt: string;
+  bids: { agentId: string; confidence: number; cost?: number; reasoning?: string; timestamp: string }[];
+  awardedTo?: string;
+  awardedAt?: string;
+  result?: any;
+  completedAt?: string;
+  votes: { agentId: string; vote: "approve" | "reject" | "abstain"; weight?: number; timestamp: string }[];
+  consensusMechanism?: string;
+}
+
+class Blackboard {
+  private tasks = new Map<string, BlackboardTask>();
+  private log: BlackboardEntry[] = [];
+  private maxLog = 1000;
+  private taskCounter = 0;
+
+  /** Propose a new task for the swarm to bid on */
+  propose(agentId: string, description: string, taskId?: string): BlackboardTask {
+    const id = taskId || `T${++this.taskCounter}_${Date.now().toString(36)}`;
+    const task: BlackboardTask = {
+      taskId: id,
+      description,
+      status: "open",
+      proposedBy: agentId,
+      proposedAt: new Date().toISOString(),
+      bids: [],
+      votes: [],
+    };
+    this.tasks.set(id, task);
+    this.appendLog({ id: `e_${Date.now()}`, type: "proposal", taskId: id, agentId, timestamp: task.proposedAt, payload: { description } });
+    return task;
+  }
+
+  /** Submit a bid for a task (Contract Net Protocol) */
+  bid(agentId: string, taskId: string, confidence: number, cost?: number, reasoning?: string): { ok: boolean; error?: string } {
+    const task = this.tasks.get(taskId);
+    if (!task) return { ok: false, error: `Task "${taskId}" not found` };
+    if (task.status !== "open" && task.status !== "bidding") return { ok: false, error: `Task "${taskId}" is ${task.status}, not accepting bids` };
+    // Prevent duplicate bids from same agent
+    if (task.bids.some(b => b.agentId === agentId)) return { ok: false, error: `Agent "${agentId}" already bid on "${taskId}"` };
+    task.status = "bidding";
+    const bidEntry = { agentId, confidence, cost, reasoning, timestamp: new Date().toISOString() };
+    task.bids.push(bidEntry);
+    this.appendLog({ id: `e_${Date.now()}`, type: "bid", taskId, agentId, timestamp: bidEntry.timestamp, payload: bidEntry });
+    return { ok: true };
+  }
+
+  /** Award a task to the best bidder (by confidence score, or specified agent) */
+  award(taskId: string, awardTo?: string, mechanism?: string): { ok: boolean; awardedTo?: string; error?: string } {
+    const task = this.tasks.get(taskId);
+    if (!task) return { ok: false, error: `Task "${taskId}" not found` };
+    if (task.bids.length === 0) return { ok: false, error: `No bids on task "${taskId}"` };
+
+    let winner: string;
+    if (awardTo) {
+      if (!task.bids.some(b => b.agentId === awardTo)) return { ok: false, error: `Agent "${awardTo}" did not bid on "${taskId}"` };
+      winner = awardTo;
+    } else {
+      // Default: highest confidence wins (weighted_max)
+      const best = task.bids.reduce((a, b) => a.confidence >= b.confidence ? a : b);
+      winner = best.agentId;
+    }
+
+    task.awardedTo = winner;
+    task.awardedAt = new Date().toISOString();
+    task.status = "awarded";
+    task.consensusMechanism = mechanism || "weighted_max";
+
+    this.appendLog({
+      id: `e_${Date.now()}`, type: "status", taskId, agentId: winner,
+      timestamp: task.awardedAt,
+      payload: {
+        event: "BID_ACCEPTED",
+        awardedTo: winner,
+        competing_bids: task.bids.map(b => ({ agent: b.agentId, confidence: b.confidence })),
+        consensus_mechanism: task.consensusMechanism,
+      },
+    });
+    return { ok: true, awardedTo: winner };
+  }
+
+  /** Cast a vote on a task (for majority/weighted voting consensus) */
+  vote(agentId: string, taskId: string, voteValue: "approve" | "reject" | "abstain", weight?: number): { ok: boolean; error?: string } {
+    const task = this.tasks.get(taskId);
+    if (!task) return { ok: false, error: `Task "${taskId}" not found` };
+    if (task.votes.some(v => v.agentId === agentId)) return { ok: false, error: `Agent "${agentId}" already voted on "${taskId}"` };
+    const entry = { agentId, vote: voteValue, weight: weight || 1, timestamp: new Date().toISOString() };
+    task.votes.push(entry);
+    this.appendLog({ id: `e_${Date.now()}`, type: "vote", taskId, agentId, timestamp: entry.timestamp, payload: entry });
+    return { ok: true };
+  }
+
+  /** Get consensus result for a task's votes */
+  getConsensus(taskId: string): { approved: boolean; approveWeight: number; rejectWeight: number; totalVotes: number } | null {
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
+    const approveWeight = task.votes.filter(v => v.vote === "approve").reduce((s, v) => s + (v.weight || 1), 0);
+    const rejectWeight = task.votes.filter(v => v.vote === "reject").reduce((s, v) => s + (v.weight || 1), 0);
+    return { approved: approveWeight > rejectWeight, approveWeight, rejectWeight, totalVotes: task.votes.length };
+  }
+
+  /** Mark task as in_progress (agent starts working) */
+  startTask(agentId: string, taskId: string): { ok: boolean; error?: string } {
+    const task = this.tasks.get(taskId);
+    if (!task) return { ok: false, error: `Task "${taskId}" not found` };
+    if (task.awardedTo !== agentId) return { ok: false, error: `Task "${taskId}" not awarded to "${agentId}"` };
+    task.status = "in_progress";
+    this.appendLog({ id: `e_${Date.now()}`, type: "status", taskId, agentId, timestamp: new Date().toISOString(), payload: { event: "TASK_STARTED" } });
+    return { ok: true };
+  }
+
+  /** Complete a task with a result */
+  completeTask(agentId: string, taskId: string, result: any): { ok: boolean; error?: string } {
+    const task = this.tasks.get(taskId);
+    if (!task) return { ok: false, error: `Task "${taskId}" not found` };
+    task.status = "completed";
+    task.result = result;
+    task.completedAt = new Date().toISOString();
+    this.appendLog({ id: `e_${Date.now()}`, type: "result", taskId, agentId, timestamp: task.completedAt, payload: { result } });
+    return { ok: true };
+  }
+
+  /** Read a task */
+  getTask(taskId: string): BlackboardTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /** Read all tasks (optionally filtered by status) */
+  getTasks(status?: string): BlackboardTask[] {
+    const all = Array.from(this.tasks.values());
+    return status ? all.filter(t => t.status === status) : all;
+  }
+
+  /** Read the full audit log */
+  getLog(limit?: number): BlackboardEntry[] {
+    return limit ? this.log.slice(-limit) : [...this.log];
+  }
+
+  clear(): void {
+    this.tasks.clear();
+    this.log = [];
+    this.taskCounter = 0;
+  }
+
+  private appendLog(entry: BlackboardEntry): void {
+    this.log.push(entry);
+    if (this.log.length > this.maxLog) this.log.shift();
+  }
+}
+
+// One blackboard per session
+const blackboards = new Map<string, Blackboard>();
+
+export function blackboardGet(sessionId: string): Blackboard {
+  if (!blackboards.has(sessionId)) {
+    blackboards.set(sessionId, new Blackboard());
+    console.log(`[Protocol:Blackboard] Created blackboard for session ${sessionId}`);
+  }
+  return blackboards.get(sessionId)!;
+}
+
+export function blackboardPropose(sessionId: string, agentId: string, description: string, taskId?: string): BlackboardTask {
+  return blackboardGet(sessionId).propose(agentId, description, taskId);
+}
+
+export function blackboardBid(sessionId: string, agentId: string, taskId: string, confidence: number, cost?: number, reasoning?: string) {
+  return blackboardGet(sessionId).bid(agentId, taskId, confidence, cost, reasoning);
+}
+
+export function blackboardAward(sessionId: string, taskId: string, awardTo?: string, mechanism?: string) {
+  return blackboardGet(sessionId).award(taskId, awardTo, mechanism);
+}
+
+export function blackboardVote(sessionId: string, agentId: string, taskId: string, vote: "approve" | "reject" | "abstain", weight?: number) {
+  return blackboardGet(sessionId).vote(agentId, taskId, vote, weight);
+}
+
+export function blackboardStartTask(sessionId: string, agentId: string, taskId: string) {
+  return blackboardGet(sessionId).startTask(agentId, taskId);
+}
+
+export function blackboardCompleteTask(sessionId: string, agentId: string, taskId: string, result: any) {
+  return blackboardGet(sessionId).completeTask(agentId, taskId, result);
+}
+
+export function blackboardGetTask(sessionId: string, taskId: string) {
+  return blackboardGet(sessionId).getTask(taskId);
+}
+
+export function blackboardGetTasks(sessionId: string, status?: string) {
+  return blackboardGet(sessionId).getTasks(status);
+}
+
+export function blackboardGetConsensus(sessionId: string, taskId: string) {
+  return blackboardGet(sessionId).getConsensus(taskId);
+}
+
+export function blackboardGetLog(sessionId: string, limit?: number) {
+  return blackboardGet(sessionId).getLog(limit);
+}
+
+export function blackboardDestroy(sessionId: string): void {
+  const bb = blackboards.get(sessionId);
+  if (bb) {
+    bb.clear();
+    blackboards.delete(sessionId);
+    console.log(`[Protocol:Blackboard] Destroyed blackboard for session ${sessionId}`);
+  }
+}
+
 // ─── Cleanup ───
 // Call this when a session ends to free all protocol resources
 
 export function cleanupSessionProtocols(sessionId: string): void {
   busDestroy(sessionId);
+  blackboardDestroy(sessionId);
   // Clean TCP channels that include session-scoped agents
   for (const [key, ch] of tcpChannels.entries()) {
     if (key.includes(sessionId)) {
@@ -366,6 +595,7 @@ export function getProtocolStatus(): {
   tcp: { channels: number; details: { id: string; port: number; buffered: number }[] };
   bus: { sessions: number; details: { session: string; history: number }[] };
   queue: { channels: number; details: { id: string; depth: number }[] };
+  blackboard: { sessions: number; details: { session: string; tasks: number; log: number }[] };
 } {
   return {
     tcp: {
@@ -384,6 +614,12 @@ export function getProtocolStatus(): {
       channels: queues.size,
       details: Array.from(queues.entries()).map(([id, q]) => ({
         id, depth: q.messages.length,
+      })),
+    },
+    blackboard: {
+      sessions: blackboards.size,
+      details: Array.from(blackboards.entries()).map(([session, bb]) => ({
+        session, tasks: bb.getTasks().length, log: bb.getLog().length,
       })),
     },
   };

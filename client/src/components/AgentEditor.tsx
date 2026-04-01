@@ -17,6 +17,18 @@ interface AgentNode {
   busEnabled: boolean;
   busTopics: string[];
   meshEnabled: boolean;
+  p2pConfidenceDomains: string[];
+  p2pReputationScore: number;
+}
+
+interface P2PGovernance {
+  consensus_mechanism: string;
+  bid_timeout_seconds: number;
+  vote_timeout_seconds: number;
+  min_confidence_threshold: number;
+  max_task_retries: number;
+  tiebreaker: string;
+  audit_log: boolean;
 }
 
 interface Connection {
@@ -33,6 +45,7 @@ interface EditorState {
   orchestrationMode: string;
   agents: AgentNode[];
   connections: Connection[];
+  p2pGovernance: P2PGovernance;
 }
 
 const ROLE_COLORS: Record<string, string> = {
@@ -42,12 +55,13 @@ const ROLE_COLORS: Record<string, string> = {
   checker: "#ea8600",
   reporter: "#9c27b0",
   researcher: "#00bcd4",
+  peer: "#ff9800",
   default: "#607d8b",
 };
 
 // No hardcoded model list — users type model names and validate against the backend
 
-const ROLES = ["human", "orchestrator", "worker", "checker", "reporter", "researcher"];
+const ROLES = ["human", "orchestrator", "worker", "checker", "reporter", "researcher", "peer"];
 const PROTOCOLS = ["tcp", "queue"];
 const PROTOCOL_LABELS: Record<string, string> = {
   tcp: "TCP",
@@ -348,6 +362,35 @@ function AgentDefPanel({
             </label>
             <p className="bus-hint">Can send tasks to any agent without needing connection lines</p>
           </div>
+
+          {/* P2P Peer Configuration */}
+          {agent.role === "peer" && (
+            <>
+              <div className="agent-def-divider">P2P peer config</div>
+              <div className="form-group">
+                <label>Confidence Domains (one per line)</label>
+                <textarea
+                  value={agent.p2pConfidenceDomains.join("\n")}
+                  onChange={(e) => onUpdate({ ...agent, p2pConfidenceDomains: e.target.value.split("\n").filter(Boolean) })}
+                  rows={3}
+                  placeholder="data_analysis&#10;web_research&#10;code_review"
+                />
+                <p className="bus-hint">Domains this agent excels at — used for task bidding confidence</p>
+              </div>
+              <div className="form-group">
+                <label>Reputation Score (0-1)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={agent.p2pReputationScore}
+                  onChange={(e) => onUpdate({ ...agent, p2pReputationScore: parseFloat(e.target.value) || 0.8 })}
+                />
+                <p className="bus-hint">Initial reputation — higher reputation bids are weighted more in consensus</p>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -444,11 +487,22 @@ export default function AgentEditor({
   initialYaml?: string;
   initialFilename?: string;
 }) {
+  const defaultP2PGovernance: P2PGovernance = {
+    consensus_mechanism: "contract_net",
+    bid_timeout_seconds: 30,
+    vote_timeout_seconds: 30,
+    min_confidence_threshold: 0.5,
+    max_task_retries: 2,
+    tiebreaker: "agent_id_hash",
+    audit_log: true,
+  };
+
   const [state, setState] = useState<EditorState>({
     systemName: "Multi-Agent System",
     orchestrationMode: "hierarchical",
     agents: [],
     connections: [],
+    p2pGovernance: defaultP2PGovernance,
   });
 
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
@@ -546,6 +600,8 @@ export default function AgentEditor({
       busEnabled: a.bus?.enabled || false,
       busTopics: a.bus?.topics || [],
       meshEnabled: a.mesh?.enabled || false,
+      p2pConfidenceDomains: a.p2p?.confidence_domains || [],
+      p2pReputationScore: a.p2p?.reputation_score ?? 0.8,
     }));
 
     const connections: Connection[] = (sys.connections || []).map((c: any) => ({
@@ -557,11 +613,21 @@ export default function AgentEditor({
       topics: c.topics || [],
     }));
 
+    const p2pGov = sys.system?.p2p_governance;
     setState({
       systemName: sys.system?.name || "Auto-Generated System",
       orchestrationMode: sys.system?.orchestration_mode || autoArchType,
       agents,
       connections,
+      p2pGovernance: p2pGov ? {
+        consensus_mechanism: p2pGov.consensus_mechanism || "contract_net",
+        bid_timeout_seconds: p2pGov.bid_timeout_seconds || 30,
+        vote_timeout_seconds: p2pGov.vote_timeout_seconds || 30,
+        min_confidence_threshold: p2pGov.min_confidence_threshold || 0.5,
+        max_task_retries: p2pGov.max_task_retries || 2,
+        tiebreaker: p2pGov.tiebreaker || "agent_id_hash",
+        audit_log: p2pGov.audit_log !== false,
+      } : defaultP2PGovernance,
     });
 
     setShowAutoArch(false);
@@ -636,7 +702,7 @@ export default function AgentEditor({
       await loadExistingFiles();
       // If the deleted file is currently loaded, clear the editor
       if (filename === fname.replace(/\.ya?ml$/i, "")) {
-        setState({ systemName: "Multi-Agent System", orchestrationMode: "hierarchical", agents: [], connections: [] });
+        setState({ systemName: "Multi-Agent System", orchestrationMode: "hierarchical", agents: [], connections: [], p2pGovernance: defaultP2PGovernance });
         setFilename("agents");
       }
     } catch (err: any) {
@@ -662,6 +728,8 @@ export default function AgentEditor({
             busEnabled: a.bus?.enabled || false,
             busTopics: a.bus?.topics || [],
             meshEnabled: a.mesh?.enabled || false,
+            p2pConfidenceDomains: a.p2p?.confidence_domains || [],
+            p2pReputationScore: a.p2p?.reputation_score ?? 0.8,
           }));
 
           // Extract connections: prefer explicit connections array, fall back to workflow
@@ -710,11 +778,21 @@ export default function AgentEditor({
             }
           }
 
+          const loadedP2PGov = parsed.system?.p2p_governance;
           setState({
             systemName: parsed.system?.name || "Multi-Agent System",
             orchestrationMode: parsed.system?.orchestration_mode || "hierarchical",
             agents,
             connections,
+            p2pGovernance: loadedP2PGov ? {
+              consensus_mechanism: loadedP2PGov.consensus_mechanism || "contract_net",
+              bid_timeout_seconds: loadedP2PGov.bid_timeout_seconds || 30,
+              vote_timeout_seconds: loadedP2PGov.vote_timeout_seconds || 30,
+              min_confidence_threshold: loadedP2PGov.min_confidence_threshold || 0.5,
+              max_task_retries: loadedP2PGov.max_task_retries || 2,
+              tiebreaker: loadedP2PGov.tiebreaker || "agent_id_hash",
+              audit_log: loadedP2PGov.audit_log !== false,
+            } : defaultP2PGovernance,
           });
         }
       });
@@ -724,19 +802,22 @@ export default function AgentEditor({
   };
 
   const addAgent = () => {
+    const isP2PMode = state.orchestrationMode === "p2p";
     const newAgent: AgentNode = {
       id: "agent_" + (state.agents.length + 1),
       name: "New Agent",
-      role: "worker",
+      role: isP2PMode ? "peer" : "worker",
       model: "",
       persona: "",
       responsibilities: [],
       x: 150 + Math.random() * 300,
       y: 100 + Math.random() * 200,
-      color: ROLE_COLORS.worker,
-      busEnabled: false,
+      color: isP2PMode ? ROLE_COLORS.peer : ROLE_COLORS.worker,
+      busEnabled: isP2PMode,
       busTopics: [],
       meshEnabled: false,
+      p2pConfidenceDomains: [],
+      p2pReputationScore: 0.8,
     };
     setState((s) => ({ ...s, agents: [...s.agents, newAgent] }));
     setSelectedAgent(newAgent.id);
@@ -864,13 +945,25 @@ export default function AgentEditor({
 
   // Generate YAML from current state
   const buildYamlObject = () => {
+    const systemDef: any = {
+      name: state.systemName,
+      orchestration_mode: state.orchestrationMode,
+      communication_protocol: "structured_handoff",
+      context_passing: "full_chain",
+    };
+    if (state.orchestrationMode === "p2p") {
+      systemDef.p2p_governance = {
+        consensus_mechanism: state.p2pGovernance.consensus_mechanism,
+        bid_timeout_seconds: state.p2pGovernance.bid_timeout_seconds,
+        vote_timeout_seconds: state.p2pGovernance.vote_timeout_seconds,
+        min_confidence_threshold: state.p2pGovernance.min_confidence_threshold,
+        max_task_retries: state.p2pGovernance.max_task_retries,
+        tiebreaker: state.p2pGovernance.tiebreaker,
+        audit_log: state.p2pGovernance.audit_log,
+      };
+    }
     const yamlObj: any = {
-      system: {
-        name: state.systemName,
-        orchestration_mode: state.orchestrationMode,
-        communication_protocol: "structured_handoff",
-        context_passing: "full_chain",
-      },
+      system: systemDef,
       agents: state.agents.map((a) => {
         const agentDef: any = {
           id: a.id,
@@ -888,6 +981,14 @@ export default function AgentEditor({
         }
         if (a.meshEnabled) {
           agentDef.mesh = { enabled: true };
+        }
+        if (a.role === "peer" || state.orchestrationMode === "p2p") {
+          if (a.p2pConfidenceDomains?.length > 0 || a.p2pReputationScore !== undefined) {
+            agentDef.p2p = {
+              confidence_domains: a.p2pConfidenceDomains?.length > 0 ? a.p2pConfidenceDomains : undefined,
+              reputation_score: a.p2pReputationScore ?? 0.8,
+            };
+          }
         }
         return agentDef;
       }),
@@ -1062,6 +1163,7 @@ export default function AgentEditor({
                 <option value="mesh">Mesh</option>
                 <option value="hybrid">Hybrid</option>
                 <option value="pipeline">Pipeline</option>
+                <option value="p2p">P2P Swarm</option>
               </select>
             </div>
           </div>
@@ -1107,6 +1209,8 @@ export default function AgentEditor({
                   busEnabled: false,
                   busTopics: [],
                   meshEnabled: false,
+                  p2pConfidenceDomains: [],
+                  p2pReputationScore: 1.0,
                 };
                 setState((s) => ({ ...s, agents: [humanNode, ...s.agents] }));
                 setSelectedAgent(humanNode.id);
@@ -1189,6 +1293,79 @@ export default function AgentEditor({
             </div>
           )}
 
+          {/* P2P Governance Config (only shown in p2p mode) */}
+          {state.orchestrationMode === "p2p" && (
+            <div className="p2p-governance-panel">
+              <div className="p2p-governance-header">P2P Governance Settings</div>
+              <div className="p2p-governance-grid">
+                <div className="form-group">
+                  <label>Consensus Mechanism</label>
+                  <select
+                    value={state.p2pGovernance.consensus_mechanism}
+                    onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, consensus_mechanism: e.target.value } }))}
+                  >
+                    <option value="contract_net">Contract Net Protocol</option>
+                    <option value="majority_voting">Majority Voting</option>
+                    <option value="weighted_voting">Weighted Voting</option>
+                    <option value="blackboard">Blackboard</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Tiebreaker</label>
+                  <select
+                    value={state.p2pGovernance.tiebreaker}
+                    onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, tiebreaker: e.target.value } }))}
+                  >
+                    <option value="agent_id_hash">Agent ID Hash</option>
+                    <option value="random">Random</option>
+                    <option value="first_bid">First Bid</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Bid Timeout (s)</label>
+                  <input
+                    type="number"
+                    min="5"
+                    max="300"
+                    value={state.p2pGovernance.bid_timeout_seconds}
+                    onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, bid_timeout_seconds: parseInt(e.target.value) || 30 } }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Min Confidence</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={state.p2pGovernance.min_confidence_threshold}
+                    onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, min_confidence_threshold: parseFloat(e.target.value) || 0.5 } }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Max Retries</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="10"
+                    value={state.p2pGovernance.max_task_retries}
+                    onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, max_task_retries: parseInt(e.target.value) || 2 } }))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="bus-toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={state.p2pGovernance.audit_log}
+                      onChange={(e) => setState((s) => ({ ...s, p2pGovernance: { ...s.p2pGovernance, audit_log: e.target.checked } }))}
+                    />
+                    <span>Audit Log</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Canvas */}
           <div
             ref={canvasRef}
@@ -1218,10 +1395,15 @@ export default function AgentEditor({
                   HYBRID — orchestrator controls flow via connections + mesh agents collaborate freely
                 </div>
               )}
+              {state.orchestrationMode === "p2p" && (
+                <div className="mesh-mode-banner p2p-mode-banner">
+                  P2P SWARM — autonomous peers self-organize via blackboard + Contract Net Protocol (no connections needed)
+                </div>
+              )}
 
               {/* SVG layer for connections (hidden in mesh mode) */}
               <svg className="editor-svg-layer">
-                {state.orchestrationMode !== "mesh" && state.connections.map((conn) => {
+                {state.orchestrationMode !== "mesh" && state.orchestrationMode !== "p2p" && state.connections.map((conn) => {
                   const from = getOutputPort(conn.from);
                   const to = getInputPort(conn.to);
                   const isSelected = selectedConn === conn.id;
@@ -1288,7 +1470,7 @@ export default function AgentEditor({
                 })}
 
                 {/* Drawing line while connecting (not in mesh mode) */}
-                {connecting && state.orchestrationMode !== "mesh" && (
+                {connecting && state.orchestrationMode !== "mesh" && state.orchestrationMode !== "p2p" && (
                   <line
                     x1={getOutputPort(connecting.fromId).x}
                     y1={getOutputPort(connecting.fromId).y}
@@ -1347,7 +1529,12 @@ export default function AgentEditor({
                         MESH
                       </div>
                     )}
-                    {state.orchestrationMode !== "mesh" && (
+                    {agent.role === "peer" && (
+                      <div className="agent-node-mesh-badge agent-node-peer-badge" title="P2P peer: autonomous agent with blackboard coordination">
+                        PEER
+                      </div>
+                    )}
+                    {state.orchestrationMode !== "mesh" && state.orchestrationMode !== "p2p" && (
                       <>
                         <div className="agent-node-port agent-node-port-in" title="Input port">
                           <div className="port-dot port-dot-in" />
@@ -1377,7 +1564,7 @@ export default function AgentEditor({
             />
           )}
 
-          {selectedConnData && state.orchestrationMode !== "mesh" && (
+          {selectedConnData && state.orchestrationMode !== "mesh" && state.orchestrationMode !== "p2p" && (
             <ConnectionPanel
               conn={selectedConnData}
               agents={state.agents}
@@ -1407,6 +1594,7 @@ export default function AgentEditor({
                     <option value="mesh">Mesh</option>
                     <option value="hybrid">Hybrid</option>
                     <option value="pipeline">Pipeline</option>
+                    <option value="p2p">P2P Swarm</option>
                   </select>
                 </div>
                 <div className="auto-arch-option">

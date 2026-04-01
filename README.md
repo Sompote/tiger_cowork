@@ -1,8 +1,8 @@
 ![Tiger Cowork Banner](picture/banner2.jpg)
 
-# Tiger Cowork v0.4.2
+# Tiger Cowork v0.4.3
 
-A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. **Mix different AI providers in the same agent team** — assign any OpenAI-compatible API model (OpenRouter, Ollama, Gemini, GPT, etc.) to one agent, **Claude Code CLI** (OAuth) to another, and **Codex CLI** (OAuth) to a third. Each agent in your architecture can run on a different model or provider. **Connect external MCP servers** (Stdio, SSE, StreamableHTTP) to extend the AI's toolbox with any Model Context Protocol-compatible service. Built with 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
+A self-hosted AI workspace that brings chat, code execution, **fully parallel multi-agent orchestration**, project management, and a skill marketplace into one web interface. **Mix different AI providers in the same agent team** — assign any OpenAI-compatible API model (OpenRouter, Ollama, Gemini, GPT, etc.) to one agent, **Claude Code CLI** (OAuth) to another, and **Codex CLI** (OAuth) to a third. Each agent in your architecture can run on a different model or provider. **Connect external MCP servers** (Stdio, SSE, StreamableHTTP) to extend the AI's toolbox with any Model Context Protocol-compatible service. Built with 16 built-in tools — from web search and Python execution to visual multi-agent systems with mesh networking and P2P swarm governance. Built for **long-running sessions** — smart context compression, checkpoint recovery, and intelligent tool result handling keep conversations stable across 100+ tool calls.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -30,7 +30,17 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 *Auto-generated agent architecture — AI creates a complete multi-agent system with roles, connections, and communication protocols from a single prompt.*
 
-## What's New in v0.4.2 — MiniMax Built-in Provider
+## What's New in v0.4.3 — P2P Swarm Governance
+
+- **P2P Swarm orchestration mode** — New `p2p` orchestration topology where autonomous peer agents self-organize via a shared blackboard. No persistent authority — agents propose tasks, bid with confidence scores, and the best-suited agent wins the work through Contract Net Protocol.
+- **Blackboard protocol** — Fourth communication protocol alongside TCP, Bus, and Queue. Session-scoped shared workspace with proposals, bids, votes, results, and an append-only audit log for full traceability.
+- **Four consensus mechanisms** — Configure how P2P agents make group decisions: Contract Net Protocol (competitive bidding), Majority Voting, Weighted Voting (reputation-based), or Blackboard (self-select).
+- **Peer agent role** — New `peer` role for P2P swarm agents with per-agent `confidence_domains` (expertise areas) and `reputation_score` (0-1 weight for voting). Shown with amber color and PEER badge in the editor.
+- **P2P Governance panel** — Visual configuration in the Agent Editor for consensus mechanism, tiebreaker strategy, bid timeout, minimum confidence threshold, max retries, and audit log toggle.
+- **Seven blackboard tools** — `bb_propose`, `bb_bid`, `bb_award`, `bb_vote`, `bb_complete`, `bb_read`, `bb_log` — injected into peer agents' toolbox automatically.
+- **Auto Architecture support** — The AI architect can now generate complete P2P swarm configurations from natural language descriptions.
+
+### Previous: v0.4.2 — MiniMax Built-in Provider
 
 - **MiniMax as built-in AI provider** — MiniMax is now available as a default provider in the Settings dropdown (URL: api.minimax.io/v1, Model: MiniMax-M2.7). No need to manually add it as a custom provider.
 
@@ -54,7 +64,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
 - **Mix Any Model per Agent** — Each agent in your architecture can use a different AI provider or model. Assign OpenAI-compatible API models (GPT, Gemini, Claude API, LLaMA via Ollama, etc.) to some agents, and use **Claude Code** or **Codex CLI** (OAuth, no API key) as autonomous coding agents for others — all in the same team
-- **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Supports mesh networking, bus communication, TCP/Queue protocols, and hybrid orchestration
+- **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Six orchestration topologies (hierarchical, flat, mesh, hybrid, pipeline, P2P swarm), four communication protocols (TCP, bus, queue, blackboard), and P2P governance with Contract Net Protocol, consensus voting, and audit logging
 - **Long-Running Session Stability** — Three layers of protection for extended conversations:
   - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
   - **Smart Tool Result Compression** — Intelligently compresses tool outputs by type (first/last lines for code output, titles+URLs for search, structure preview for fetched pages) instead of raw truncation
@@ -70,21 +80,22 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 ## Agent Communication Architecture
 
-Tiger Cowork agents communicate through three protocols and five orchestration topologies. Understanding how agents connect, discover each other, and exchange information is key to designing effective multi-agent systems.
+Tiger Cowork agents communicate through four protocols and six orchestration topologies. Understanding how agents connect, discover each other, and exchange information is key to designing effective multi-agent systems.
 
 ### How Agents Discover Each Other
 
 Agents don't query a registry at runtime. Instead, the server loads your YAML configuration at startup and **injects the full architecture into each agent's system prompt** — every agent's name, ID, role, responsibilities, and available connections. Each agent knows who else exists and how to reach them from the moment it starts.
 
-### Three Communication Protocols
+### Four Communication Protocols
 
 | Protocol | Pattern | How It Works | Use Case |
 |---|---|---|---|
 | **TCP** | Point-to-point | Ephemeral bidirectional channels between agent pairs via localhost sockets. Newline-delimited JSON. | Direct messaging between two specific agents |
 | **Bus** | Pub/Sub broadcast | In-process EventEmitter with topic-based subscriptions and 500-message history per session. | Status updates, findings broadcast to all listeners |
 | **Queue** | FIFO ordered | Per-channel message queue (max 200 messages). | Sequential task delivery, ordered handoffs |
+| **Blackboard** | Shared workspace | Session-scoped task board with proposals, bids, votes, and an append-only audit log (P2P mode). | P2P task negotiation, consensus, Contract Net Protocol |
 
-Agents access these via tool calls: `proto_tcp_send`/`proto_tcp_read`, `proto_bus_publish`/`proto_bus_history`, `proto_queue_send`/`proto_queue_receive`.
+Agents access these via tool calls: `proto_tcp_send`/`proto_tcp_read`, `proto_bus_publish`/`proto_bus_history`, `proto_queue_send`/`proto_queue_receive`, and `bb_propose`/`bb_bid`/`bb_award`/`bb_vote`/`bb_complete`/`bb_read`/`bb_log` (P2P blackboard).
 
 ### Task Delegation (send_task / wait_result)
 
@@ -107,7 +118,7 @@ Agent A                          Agent B
 
 Agents can send tasks to **multiple agents in a single response** for parallel execution.
 
-### Five Orchestration Topologies
+### Six Orchestration Topologies
 
 Configure via `system.orchestration_mode` in your YAML:
 
@@ -118,6 +129,16 @@ Configure via `system.orchestration_mode` in your YAML:
 | **Flat** | Human sends tasks directly to any agent. No orchestrator. | Human connects to all agents directly |
 | **Mesh** | All agents can send tasks to any other agent. Fully connected. | Every agent gets `send_task`/`wait_result` |
 | **Pipeline** | Sequential chain: agent_1 → agent_2 → agent_3. | Each agent passes output to the next |
+| **P2P Swarm** | Autonomous peers self-organize via shared blackboard and Contract Net Protocol. No persistent authority. | All peers get blackboard tools + `send_task`/`wait_result` |
+
+```
+More Control                                                   More Autonomy
+    |                                                               |
+    Hierarchical → Pipeline → Flat → Hybrid → Mesh → P2P Swarm
+    |                                                               |
+Single boss       Chain      Direct    Mixed    Free    Self-organizing
+controls all      order      assign    mode     talk    with consensus
+```
 
 ### Mesh Networking — Peer-to-Peer Collaboration
 
@@ -152,6 +173,166 @@ Orchestrator → send_task → Researcher 1 ("investigate topic X")
 
 **Without mesh**, a worker agent can only receive tasks and return results — it cannot ask other agents for help.
 
+### P2P Swarm — Governed Self-Organization
+
+P2P Swarm is the most autonomous orchestration mode. Unlike mesh (which is free-for-all), P2P adds **governance** — agents coordinate through a shared blackboard using the Contract Net Protocol, consensus voting, and an immutable audit log.
+
+**Key concepts:**
+- **No persistent authority** — all agents are autonomous peers with role `peer`
+- **Shared blackboard** — a workspace where agents post tasks, bids, votes, and results
+- **Contract Net Protocol (CNP)** — structured bidding: propose → bid → award → execute → complete
+- **Consensus mechanisms** — four strategies for group decision-making
+- **Audit log** — append-only event trail for full auditability
+
+**How it works:**
+
+```
+┌───────────────────────────────────────────┐
+│           SHARED BLACKBOARD               │
+│  ┌────────────┐  ┌──────────────────────┐ │
+│  │ Task Pool  │  │  Bids / Results      │ │
+│  │ T1: open   │  │  T2: [result_A]      │ │
+│  │ T2: done   │  │  T3: [bid_B: 0.88]   │ │
+│  │ T3: bidding│  │  T4: pending...       │ │
+│  └────────────┘  └──────────────────────┘ │
+└───────────────────────────────────────────┘
+       ↑ read/write        ↑ read/write
+  [Peer_A]    [Peer_B]    [Peer_C]    [Peer_D]
+```
+
+**Contract Net Protocol flow:**
+
+```
+1. PROPOSE  → Agent posts task on blackboard (bb_propose)
+2. BID      → Capable peers submit confidence scores (bb_bid)
+3. AWARD    → Best bid wins the contract (bb_award)
+4. EXECUTE  → Winner performs the task using available tools
+5. COMPLETE → Winner reports result (bb_complete)
+```
+
+**Four consensus mechanisms:**
+
+| Mechanism | How It Works | Best For |
+|---|---|---|
+| **Contract Net** (default) | Agents bid with confidence scores; highest score wins | Task allocation with diverse specialties |
+| **Majority Voting** | Each agent votes approve/reject; simple majority wins | Validating plans or results |
+| **Weighted Voting** | Votes weighted by agent reputation (0-1); weighted majority wins | Teams with domain experts |
+| **Blackboard** | Agents self-select tasks from shared workspace; no formal bidding | Loosely-coupled, async work |
+
+**Three tiebreakers** (when bids or votes are equal):
+
+| Tiebreaker | Behavior |
+|---|---|
+| `agent_id_hash` (default) | Deterministic — hash of agent ID breaks tie consistently |
+| `random` | Random selection — fair over many rounds |
+| `first_bid` | Earliest bidder wins — rewards responsiveness |
+
+**P2P blackboard tools** (available to all peer agents):
+
+| Tool | Purpose |
+|---|---|
+| `bb_propose` | Post a new task on the blackboard for peers to bid on |
+| `bb_bid` | Submit a bid with confidence score (0-1) and reasoning |
+| `bb_award` | Award a task to the best bidder (or auto-select highest confidence) |
+| `bb_vote` | Cast approve/reject/abstain vote for consensus decisions |
+| `bb_complete` | Mark a task as completed with result |
+| `bb_read` | Read the blackboard — all tasks, bids, statuses |
+| `bb_log` | Read the audit log — full event trail for auditability |
+
+**Example YAML configuration:**
+
+```yaml
+system:
+  name: Research Swarm
+  orchestration_mode: p2p
+  p2p_governance:
+    consensus_mechanism: contract_net
+    bid_timeout_seconds: 30
+    min_confidence_threshold: 0.5
+    tiebreaker: agent_id_hash
+    audit_log: true
+
+agents:
+  - id: human
+    name: User
+    role: human
+
+  - id: data_analyst
+    name: Data Analyst
+    role: peer
+    persona: "Expert in statistical analysis and data visualization."
+    responsibilities:
+      - Analyze datasets and compute statistics
+      - Create charts and visualizations
+      - Identify patterns and trends
+    bus:
+      enabled: true
+    p2p:
+      confidence_domains:
+        - statistics
+        - data_visualization
+      reputation_score: 0.9
+
+  - id: web_researcher
+    name: Web Researcher
+    role: peer
+    persona: "Skilled at finding and synthesizing information from the web."
+    responsibilities:
+      - Search for relevant papers and articles
+      - Extract key findings from sources
+      - Cross-reference multiple sources
+    bus:
+      enabled: true
+    p2p:
+      confidence_domains:
+        - web_search
+        - literature_review
+      reputation_score: 0.85
+
+  - id: report_writer
+    name: Report Writer
+    role: peer
+    persona: "Clear technical writer who synthesizes findings into reports."
+    responsibilities:
+      - Compile findings into structured reports
+      - Write executive summaries
+      - Format results for presentation
+    bus:
+      enabled: true
+    p2p:
+      confidence_domains:
+        - technical_writing
+        - summarization
+      reputation_score: 0.8
+```
+
+**No connections needed** — P2P agents coordinate entirely via the blackboard. No connection lines are drawn in the editor.
+
+**P2P Swarm vs Mesh:**
+
+| | Mesh | P2P Swarm |
+|---|---|---|
+| Connections | None (free-for-all) | None (blackboard) |
+| Coordination | Ad-hoc direct messaging | Governed protocol (CNP) |
+| Task allocation | Agent decides who to ask | Competitive bidding on confidence |
+| Livelock prevention | None | Tiebreakers + bid timeout |
+| Auditability | Bus history only | Full audit log (proposals, bids, votes, awards) |
+| Agent role | Any (worker, researcher, etc.) | `peer` |
+
+P2P Swarm is essentially **Mesh with governance**.
+
+### Agent Roles
+
+| Role | Color | Purpose |
+|---|---|---|
+| **human** | Pink | User entry point — the human interacts via this node |
+| **orchestrator** | Blue | Central coordinator — decomposes tasks, delegates to workers, synthesizes results |
+| **worker** | Green | Executes assigned tasks — the workhorse of hierarchical/hybrid teams |
+| **checker** | Orange | Quality assurance — validates outputs from other agents |
+| **reporter** | Purple | Synthesizes results into reports, summaries, and presentations |
+| **researcher** | Teal | Information gathering — web search, literature review, data collection |
+| **peer** | Amber | Autonomous P2P agent — self-organizes via blackboard and consensus |
+
 ### Connection Access Control
 
 The `connections` array in YAML defines allowed communication paths:
@@ -176,6 +357,7 @@ connections:
 |---|---|
 | Agent has `mesh.enabled: true` | Yes — to any peer |
 | Global `orchestration_mode: mesh` | Yes — to any peer |
+| Global `orchestration_mode: p2p` | Yes — to any peer (+ blackboard tools) |
 | Agent has explicit `outputs_to` or `connections` to target | Yes — to listed targets only |
 | Hybrid orchestrator | Yes — to connected agents |
 | None of the above | No — `send_task` tool is not available |
@@ -221,6 +403,7 @@ This sends the prompt to every agent connected to the human node in parallel and
 | Condition | Human can talk to |
 |---|---|
 | `orchestration_mode: "mesh"` | All agents |
+| `orchestration_mode: "p2p"` | All peer agents |
 | Human node has `mesh.enabled: true` | All agents |
 | Explicit `connections` from/to human | Only connected agents |
 
@@ -242,11 +425,13 @@ agents:
 
 ### Design Tips
 
-- **Use `hybrid` mode** when you want structured orchestration but also want specialist agents to collaborate freely — set `mesh.enabled: true` on the collaborating agents.
 - **Use `hierarchical` mode** for strict control — the orchestrator is the single point of delegation.
+- **Use `hybrid` mode** when you want structured orchestration but also want specialist agents to collaborate freely — set `mesh.enabled: true` on the collaborating agents.
 - **Use `mesh` mode** for flat, fully connected teams where any agent can ask any other for help.
+- **Use `p2p` mode** when agents have diverse specialties and you want them to self-organize — tasks go to whoever is most qualified via competitive bidding. The blackboard provides structure that mesh lacks.
 - **Add `mesh.enabled: true`** to any agent that might need to request help mid-task (e.g., a code engineer that might need research data, or a quality checker that might need clarification from an engineer).
 - **Bus topics** are useful for monitoring — the orchestrator can watch `proto_bus_history` to see what all agents are doing without blocking on `wait_result`.
+- **P2P confidence_domains** — set distinct expertise domains per peer agent so they bid accurately. Overlapping domains mean multiple agents compete, which improves task quality through selection pressure.
 
 ## Installation
 
