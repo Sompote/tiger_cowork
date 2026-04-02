@@ -1,4 +1,4 @@
-# Tiger Cowork - Windows Installer (PowerShell + WPF)
+# Tigrimos - Windows Installer (PowerShell + WPF)
 # Shows a themed progress window matching the Mac installer style
 
 param(
@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $REPO_URL = "https://github.com/Sompote/tiger_cowork.git"
 $APP_URL  = "http://localhost:3001"
 $PORT     = 3001
-$LOG_FILE = "$env:TEMP\tiger-cowork-install.log"
+$LOG_FILE = "$env:TEMP\tigrimos-install.log"
 
 # Load WPF assemblies
 Add-Type -AssemblyName PresentationFramework
@@ -25,7 +25,7 @@ Add-Type -AssemblyName System.Windows.Forms
 $welcomeXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Tiger Cowork Installer"
+        Title="Tigrimos Installer"
         Width="520" Height="440"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
@@ -64,7 +64,7 @@ $welcomeXaml = @"
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Width="420">
                 <!-- Tiger Logo -->
                 <TextBlock Text="&#x1F42F;" FontSize="56" HorizontalAlignment="Center" Margin="0,0,0,8"/>
-                <TextBlock Text="Tiger Cowork" FontSize="24" FontWeight="SemiBold" Foreground="White"
+                <TextBlock Text="Tigrimos" FontSize="24" FontWeight="SemiBold" Foreground="White"
                            HorizontalAlignment="Center" Margin="0,0,0,4"/>
                 <TextBlock Text="Windows Installer" FontSize="13" Foreground="#80FFFFFF"
                            HorizontalAlignment="Center" Margin="0,0,0,24"/>
@@ -75,7 +75,7 @@ $welcomeXaml = @"
                 </TextBlock>
                 <TextBlock Foreground="#AAFFFFFF" FontSize="13" Margin="16,0,0,2" Text="&#x2022; Install Docker Desktop (if needed)"/>
                 <TextBlock Foreground="#AAFFFFFF" FontSize="13" Margin="16,0,0,2" Text="&#x2022; Install Git (if needed)"/>
-                <TextBlock Foreground="#AAFFFFFF" FontSize="13" Margin="16,0,0,2" Text="&#x2022; Download Tiger Cowork"/>
+                <TextBlock Foreground="#AAFFFFFF" FontSize="13" Margin="16,0,0,2" Text="&#x2022; Download Tigrimos"/>
                 <TextBlock Foreground="#AAFFFFFF" FontSize="13" Margin="16,0,0,20" Text="&#x2022; Build and start the app"/>
 
                 <!-- Folder chooser -->
@@ -85,7 +85,7 @@ $welcomeXaml = @"
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox x:Name="PathBox" Grid.Column="0" Text="C:\TigerCowork"
+                    <TextBox x:Name="PathBox" Grid.Column="0" Text="C:\Tigrimos"
                              FontSize="13" Padding="8,6" Background="#20FFFFFF" Foreground="White"
                              BorderBrush="#30FFFFFF" BorderThickness="1"/>
                     <Button x:Name="BrowseBtn" Grid.Column="1" Content="Browse..."
@@ -130,10 +130,10 @@ $script:userCancelled = $true
 
 $browseBtn.Add_Click({
     $folderDialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $folderDialog.Description = "Choose install location for Tiger Cowork"
+    $folderDialog.Description = "Choose install location for Tigrimos"
     $folderDialog.SelectedPath = "C:\"
     if ($folderDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $selectedPath = Join-Path $folderDialog.SelectedPath "TigerCowork"
+        $selectedPath = Join-Path $folderDialog.SelectedPath "Tigrimos"
         $pathBox.Text = $selectedPath
     }
 })
@@ -165,7 +165,7 @@ $stepLabels = @(
     "Check Docker",
     "Start Docker Engine",
     "Check Git",
-    "Download Tiger Cowork",
+    "Download Tigrimos",
     "Configure",
     "Build & Start Container",
     "Launch App"
@@ -174,7 +174,7 @@ $stepLabels = @(
 $progressXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Installing Tiger Cowork"
+        Title="Installing Tigrimos"
         Width="560" Height="520"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
@@ -191,7 +191,7 @@ $progressXaml = @"
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Width="440">
                 <!-- Tiger Logo -->
                 <TextBlock Text="&#x1F42F;" FontSize="56" HorizontalAlignment="Center" Margin="0,0,0,8"/>
-                <TextBlock Text="Tiger Cowork" FontSize="24" FontWeight="SemiBold" Foreground="White"
+                <TextBlock Text="Tigrimos" FontSize="24" FontWeight="SemiBold" Foreground="White"
                            HorizontalAlignment="Center" Margin="0,0,0,4"/>
                 <TextBlock Text="Installer" FontSize="13" Foreground="#80FFFFFF"
                            HorizontalAlignment="Center" Margin="0,0,0,28"/>
@@ -317,7 +317,7 @@ function Update-Progress {
 # ============================================================
 function Show-InstallerError {
     param([string]$Message)
-    [System.Windows.MessageBox]::Show($Message, "Tiger Cowork", "OK", "Error") | Out-Null
+    [System.Windows.MessageBox]::Show($Message, "Tigrimos", "OK", "Error") | Out-Null
 }
 
 # ============================================================
@@ -444,7 +444,7 @@ $progressWindow.Add_ContentRendered({
         function Show-Error {
             param([string]$msg)
             $progressWindow.Dispatcher.Invoke([Action]{
-                [System.Windows.MessageBox]::Show($progressWindow, $msg, "Tiger Cowork", "OK", "Error") | Out-Null
+                [System.Windows.MessageBox]::Show($progressWindow, $msg, "Tigrimos", "OK", "Error") | Out-Null
             })
         }
 
@@ -454,7 +454,7 @@ $progressWindow.Add_ContentRendered({
                 $progressPercent.Text = "100%"
                 $stepTitle.Text = "Installation Complete!"
                 $stepTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FF4ade80")
-                $stepStatus.Text = "Tiger Cowork is up and running"
+                $stepStatus.Text = "Tigrimos is up and running"
 
                 $greenBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FF4ade80")
                 for ($i = 0; $i -lt $stepTextBlocks.Count; $i++) {
@@ -614,10 +614,10 @@ $progressWindow.Add_ContentRendered({
             # ============================================================
             # STEP 4: Clone / Update repo
             # ============================================================
-            Update-ProgressInner 4 7 "Downloading Tiger Cowork..." "Cloning repository"
+            Update-ProgressInner 4 7 "Downloading Tigrimos..." "Cloning repository"
 
             if (Test-Path (Join-Path $InstallDir ".git")) {
-                Update-ProgressInner 4 7 "Updating Tiger Cowork..." "Pulling latest changes"
+                Update-ProgressInner 4 7 "Updating Tigrimos..." "Pulling latest changes"
                 Push-Location $InstallDir
                 & $gitExe pull *>> $LOG_FILE
                 Pop-Location
@@ -659,7 +659,7 @@ ACCESS_TOKEN=
                 $progressWindow.Dispatcher.Invoke([Action]{
                     $result = [System.Windows.MessageBox]::Show(
                         "Port $PORT is already in use. Stop the process and continue?",
-                        "Tiger Cowork",
+                        "Tigrimos",
                         "YesNo", "Warning")
                     if ($result -eq "No") {
                         $progressWindow.Close()
@@ -679,7 +679,7 @@ ACCESS_TOKEN=
 
             if ($buildExit -ne 0) {
                 Update-ProgressInner 6 7 "Build Failed" "Check log: $LOG_FILE"
-                Show-Error "Failed to build and start Tiger Cowork.`nCheck log at: $LOG_FILE"
+                Show-Error "Failed to build and start Tigrimos.`nCheck log at: $LOG_FILE"
                 $progressWindow.Dispatcher.Invoke([Action]{ $progressWindow.Close() })
                 return
             }
@@ -704,8 +704,8 @@ ACCESS_TOKEN=
 
             # Copy start/stop scripts to install directory
             $scriptDir = Split-Path -Parent $PSCommandPath
-            $startBat = Join-Path $scriptDir "TigerCoworkStart.bat"
-            $stopBat  = Join-Path $scriptDir "TigerCoworkStop.bat"
+            $startBat = Join-Path $scriptDir "TigrimosStart.bat"
+            $stopBat  = Join-Path $scriptDir "TigrimosStop.bat"
             if ((Test-Path $startBat) -and ($scriptDir -ne $InstallDir)) {
                 Copy-Item $startBat $InstallDir -Force -ErrorAction SilentlyContinue
             }

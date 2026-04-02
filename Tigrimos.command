@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Tiger Cowork — One-Click Mac Launcher
-# Double-click this file to start Tiger Cowork via Docker
+# Tigrimos — One-Click Mac Launcher
+# Double-click this file to start Tigrimos via Docker
 
 set -e
 cd "$(dirname "$0")"
 
-APP_NAME="Tiger Cowork"
+APP_NAME="Tigrimos"
 URL="http://localhost:3001"
 
 echo "========================================="

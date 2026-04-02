@@ -1,10 +1,10 @@
 @echo off
-:: Tiger Cowork - Stop Container
-title Tiger Cowork - Stopping...
+:: Tigrimos - Stop Container
+title Tigrimos - Stopping...
 
 echo.
 echo   ========================================
-echo      Tiger Cowork - Stopping
+echo      Tigrimos - Stopping
 echo   ========================================
 echo.
 
@@ -27,7 +27,7 @@ exit /b 1
 
 :found_docker
 
-:: Find the TigerCowork install directory
+:: Find the Tigrimos install directory
 :: First check if we're in the install directory (has docker-compose.yml)
 if exist "%~dp0docker-compose.yml" (
     set "INSTALL_DIR=%~dp0"
@@ -35,19 +35,19 @@ if exist "%~dp0docker-compose.yml" (
 )
 
 :: Check default install location
-if exist "C:\TigerCowork\docker-compose.yml" (
-    set "INSTALL_DIR=C:\TigerCowork"
+if exist "C:\Tigrimos\docker-compose.yml" (
+    set "INSTALL_DIR=C:\Tigrimos"
     goto :stop_app
 )
 
-echo   [ERROR] Cannot find Tiger Cowork installation.
-echo   Please run this script from the Tiger Cowork install directory.
+echo   [ERROR] Cannot find Tigrimos installation.
+echo   Please run this script from the Tigrimos install directory.
 echo.
 pause
 exit /b 1
 
 :stop_app
-echo   Stopping Tiger Cowork...
+echo   Stopping Tigrimos...
 echo.
 
 pushd "%INSTALL_DIR%"
@@ -56,10 +56,10 @@ popd
 
 if %ERRORLEVEL% equ 0 (
     echo.
-    echo   Tiger Cowork has been stopped.
+    echo   Tigrimos has been stopped.
 ) else (
     echo.
-    echo   There was a problem stopping Tiger Cowork.
+    echo   There was a problem stopping Tigrimos.
 )
 
 echo.

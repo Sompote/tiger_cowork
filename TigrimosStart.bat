@@ -1,10 +1,10 @@
 @echo off
-:: Tiger Cowork - Start Application
-title Tiger Cowork - Starting...
+:: Tigrimos - Start Application
+title Tigrimos - Starting...
 
 echo.
 echo   ========================================
-echo      Tiger Cowork - Starting
+echo      Tigrimos - Starting
 echo   ========================================
 echo.
 
@@ -54,25 +54,25 @@ if %ERRORLEVEL% neq 0 (
 echo   Docker is running.
 echo.
 
-:: Find the TigerCowork install directory
+:: Find the Tigrimos install directory
 if exist "%~dp0docker-compose.yml" (
     set "INSTALL_DIR=%~dp0"
     goto :start_app
 )
 
-if exist "C:\TigerCowork\docker-compose.yml" (
-    set "INSTALL_DIR=C:\TigerCowork"
+if exist "C:\Tigrimos\docker-compose.yml" (
+    set "INSTALL_DIR=C:\Tigrimos"
     goto :start_app
 )
 
-echo   [ERROR] Cannot find Tiger Cowork installation.
-echo   Please run this script from the Tiger Cowork install directory.
+echo   [ERROR] Cannot find Tigrimos installation.
+echo   Please run this script from the Tigrimos install directory.
 echo.
 pause
 exit /b 1
 
 :start_app
-echo   Starting Tiger Cowork...
+echo   Starting Tigrimos...
 echo.
 
 pushd "%INSTALL_DIR%"
@@ -81,13 +81,13 @@ popd
 
 if %ERRORLEVEL% equ 0 (
     echo.
-    echo   Tiger Cowork is starting up...
+    echo   Tigrimos is starting up...
     echo   Opening browser at http://localhost:3001
     timeout /t 3 /nobreak >nul
     start "" "http://localhost:3001"
 ) else (
     echo.
-    echo   [ERROR] Failed to start Tiger Cowork.
+    echo   [ERROR] Failed to start Tigrimos.
     echo   Check Docker Desktop for more details.
 )
 

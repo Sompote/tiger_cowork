@@ -30,7 +30,7 @@ import os, sys, urllib.parse, urllib.request, json
 
 # Set default User-Agent for web requests
 opener = urllib.request.build_opener()
-opener.addheaders = [('User-Agent', 'TigerCowork/1.0 (Python; Web Search)')]
+opener.addheaders = [('User-Agent', 'Tigrimos/1.0 (Python; Web Search)')]
 urllib.request.install_opener(opener)
 
 # Configure matplotlib for non-interactive backend (save to file, not show)

@@ -4,17 +4,17 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Tiger Cowork</string>
+  <string>Tigrimos Installer</string>
   <key>CFBundleDisplayName</key>
-  <string>Tiger Cowork</string>
+  <string>Tigrimos Installer</string>
   <key>CFBundleIdentifier</key>
-  <string>com.tigercowork.app</string>
+  <string>com.tigrimos.installer</string>
   <key>CFBundleVersion</key>
   <string>1.0.0</string>
   <key>CFBundleShortVersionString</key>
   <string>1.0.0</string>
   <key>CFBundleExecutable</key>
-  <string>launcher</string>
+  <string>installer</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
@@ -23,7 +23,5 @@
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
-  <key>LSUIElement</key>
-  <false/>
 </dict>
 </plist>

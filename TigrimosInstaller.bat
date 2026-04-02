@@ -1,12 +1,12 @@
 @echo off
-:: Tiger Cowork Installer - Windows Launcher
+:: Tigrimos Installer - Windows Launcher
 :: Double-click this file to start the installation
 
-title Tiger Cowork Installer
+title Tigrimos Installer
 
 echo.
 echo   ========================================
-echo      Tiger Cowork Installer
+echo      Tigrimos Installer
 echo   ========================================
 echo.
 echo   Starting installer, please wait...

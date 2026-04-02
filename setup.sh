@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# One-time setup for Tiger Cowork
+# One-time setup for Tigrimos
 
 set -e
 
-echo "=== Tiger Cowork Setup ==="
+echo "=== Tigrimos Setup ==="
 echo ""
 
 # 1. Install dependencies

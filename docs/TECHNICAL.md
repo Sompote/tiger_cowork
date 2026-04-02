@@ -1,10 +1,10 @@
-# Tiger Cowork — Technical Documentation
+# Tigrimos — Technical Documentation
 
 ## Architecture
 
-![Tiger Cowork Agent Workflow](../picture/tiger_cowork_workflow.png)
+![Tigrimos Agent Workflow](../picture/tiger_cowork_workflow.png)
 
-The diagram above illustrates the **Tool Use & Reasoning Loop** at the core of Tiger Cowork's AI agent:
+The diagram above illustrates the **Tool Use & Reasoning Loop** at the core of Tigrimos's AI agent:
 
 1. **User Input** — The user sends a message through the chat interface.
 2. **Agent Reasoning** — The AI analyzes the query and plans which actions to take.
@@ -315,7 +315,7 @@ Configure these in **Settings > Agent Parameters > Sub-Agent**.
 
 ## Security Notice
 
-> **This app can execute shell commands, Python code, and install third-party skills.** For safety, it is strongly recommended to run Tiger Cowork inside a sandboxed environment such as a **Docker container**.
+> **This app can execute shell commands, Python code, and install third-party skills.** For safety, it is strongly recommended to run Tigrimos inside a sandboxed environment such as a **Docker container**.
 
 ### Recommended: Run in Docker (Ubuntu)
 
@@ -412,7 +412,7 @@ You can also generate these commands automatically:
 
 ### Access Token Protection
 
-Tiger Cowork supports a simple access token to protect the app from unauthorized access.
+Tigrimos supports a simple access token to protect the app from unauthorized access.
 
 **Setup:**
 
@@ -602,7 +602,7 @@ tiger_cowork/
 
 ## Agent Communication Architecture
 
-Tiger Cowork agents communicate through four protocols and seven orchestration topologies. Understanding how agents connect, discover each other, and exchange information is key to designing effective multi-agent systems.
+Tigrimos agents communicate through four protocols and seven orchestration topologies. Understanding how agents connect, discover each other, and exchange information is key to designing effective multi-agent systems.
 
 ### How Agents Discover Each Other
 
@@ -881,7 +881,7 @@ codex login     # one-time OAuth login
 codex exec "hello"
 ```
 
-**Use in Tiger Cowork:**
+**Use in Tigrimos:**
 1. Open the Agent Editor → select an agent → check "Specify model for this agent"
 2. Choose Claude Code (Local CLI), Codex (Local CLI), or any API model
 3. Each agent runs on its assigned backend

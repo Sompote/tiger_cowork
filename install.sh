@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Tiger Cowork — One-Line Installer for Mac
+# Tigrimos — One-Line Installer for Mac
 # Usage: curl -fsSL https://raw.githubusercontent.com/<user>/<repo>/main/install.sh | bash
 
 set -e
 
-APP_NAME="Tiger Cowork"
+APP_NAME="Tigrimos"
 REPO_URL="https://github.com/Sompote/tiger_cowork.git"
-INSTALL_DIR="$HOME/TigerCowork"
+INSTALL_DIR="$HOME/Tigrimos"
 
 echo ""
 echo "========================================="
@@ -130,5 +130,5 @@ echo "========================================="
 echo ""
 echo "  Installed at: $INSTALL_DIR"
 echo "  To stop:      cd $INSTALL_DIR && docker compose down"
-echo "  To restart:    double-click TigerCowork.app"
+echo "  To restart:    double-click Tigrimos.app"
 echo ""

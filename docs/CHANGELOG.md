@@ -85,7 +85,7 @@
 - Project file browser with preview panel
 
 ## v0.2.3
-- Windows installer (`TigerCoworkInstaller.bat`)
+- Windows installer (`TigrimosInstaller.bat`)
 - Docker Desktop prerequisite with download links
 - Sandbox 401 fix for fresh installs
 - Docker image includes Python3
