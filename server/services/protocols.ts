@@ -379,9 +379,37 @@ class Blackboard {
   private maxLog = 1000;
   private taskCounter = 0;
 
-  /** Propose a new task for the swarm to bid on */
-  propose(agentId: string, description: string, taskId?: string): BlackboardTask {
+  /** Propose a new task for the swarm to bid on.
+   *  If a task with the same taskId already exists AND is completed/in_progress,
+   *  skip re-proposal to prevent duplicate work after orchestrator re-dispatch. */
+  propose(agentId: string, description: string, taskId?: string): BlackboardTask & { skipped?: boolean } {
     const id = taskId || `T${++this.taskCounter}_${Date.now().toString(36)}`;
+
+    // Guard: don't re-propose tasks that are already done or in progress
+    const existing = this.tasks.get(id);
+    if (existing) {
+      if (existing.status === "completed") {
+        console.log(`[Blackboard] Task "${id}" already completed — skipping re-proposal`);
+        return { ...existing, skipped: true };
+      }
+      if (existing.status === "in_progress" || existing.status === "awarded" || existing.status === "bidding") {
+        console.log(`[Blackboard] Task "${id}" already ${existing.status} — skipping re-proposal`);
+        return { ...existing, skipped: true };
+      }
+      // If task previously failed, allow re-proposal but reset bids
+      if (existing.status === "failed") {
+        console.log(`[Blackboard] Task "${id}" previously failed — re-opening for bids`);
+        existing.status = "open";
+        existing.bids = [];
+        existing.awardedTo = undefined;
+        existing.awardedAt = undefined;
+        existing.result = undefined;
+        existing.completedAt = undefined;
+        this.appendLog({ id: `e_${Date.now()}`, type: "proposal", taskId: id, agentId, timestamp: new Date().toISOString(), payload: { description, reopen: true } });
+        return existing;
+      }
+    }
+
     const task: BlackboardTask = {
       taskId: id,
       description,

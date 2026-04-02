@@ -1257,6 +1257,7 @@ interface P2PGovernanceConfig {
   min_confidence_threshold?: number; // minimum confidence to accept a bid (0-1)
   max_task_retries?: number;         // max retries if task fails (default 2)
   audit_log?: boolean;               // enable append-only event log (default true)
+  auto_assign_threshold?: number;    // if ≤ this many bidders, skip bidding and auto-assign (default 2)
 }
 
 interface AgentSystemConfig {
@@ -2937,6 +2938,15 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
     const isP2POrch = isP2POrchMode && callerDef?.role === "orchestrator";
     const callerIsBidder = callerDef?.p2p?.bidder === true && isP2POrchMode;
 
+    // Guard: block non-orchestrator agents from sending tasks to the orchestrator (circular delegation)
+    if (!isP2POrch && (isP2POrchMode || isHybridOrch || session.systemConfig.system?.orchestration_mode === "hierarchical")) {
+      const targetDef = session.systemConfig.agents?.find((a: AgentConfig) => a.id === args.to);
+      if (targetDef?.role === "orchestrator") {
+        console.log(`[send_task] BLOCKED: "${callerId}" (${callerDef?.role}) tried to send task to orchestrator "${args.to}" — circular delegation prevented`);
+        return { ok: false, error: `Agent "${callerId}" cannot send tasks to orchestrator "${args.to}". Only the orchestrator delegates work downward. If you need to report results, use bb_complete or proto_bus_publish instead.` };
+      }
+    }
+
     if (isP2POrch) {
       // P2P Orchestrator: can send_task to connected agents freely,
       // but bidder-only agents (not in connections) must go through blackboard first
@@ -3178,6 +3188,14 @@ export function getWorkingAgents(sessionId: string): Array<{ agentId: string; ag
   return working;
 }
 
+/** Check if there are unfinished blackboard tasks (open, bidding, awarded, or in_progress) */
+export function getPendingBlackboardTasks(sessionId: string): Array<{ taskId: string; status: string; description: string }> {
+  const allTasks = blackboardGetTasks(sessionId);
+  return allTasks
+    .filter((t: any) => ["open", "bidding", "awarded", "in_progress"].includes(t.status))
+    .map((t: any) => ({ taskId: t.taskId, status: t.status, description: t.description?.slice(0, 100) || "" }));
+}
+
 // --- Get tools for realtime orchestrator ---
 
 export async function getToolsForRealtimeOrchestrator(): Promise<any[]> {
@@ -3378,7 +3396,28 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     // ─── Blackboard / P2P Governance Tools ───
     case "bb_propose": {
       const sessionId = _currentParentSessionId || "default";
+
+      // Guard: only orchestrator-role agents can propose tasks (prevents scope creep from worker agents)
+      const rtSessionForPropose = realtimeSessions.get(sessionId);
+      if (rtSessionForPropose) {
+        const callerDefForPropose = rtSessionForPropose.systemConfig.agents?.find((a: AgentConfig) => a.id === _currentAgentId);
+        if (callerDefForPropose && callerDefForPropose.role !== "orchestrator" && callerDefForPropose.role !== "human") {
+          console.log(`[bb_propose] BLOCKED: "${_currentAgentId}" (role: ${callerDefForPropose.role}) is not an orchestrator — only orchestrators can propose tasks`);
+          return { ok: false, error: `Only orchestrator agents can propose tasks via bb_propose. Agent "${_currentAgentId}" (role: ${callerDefForPropose.role}) should complete assigned work, not create new tasks. Use bb_complete to report results instead.` };
+        }
+      }
+
       const task = blackboardPropose(sessionId, _currentAgentId, args.description, args.task_id);
+
+      // If task was already completed or in progress, don't re-broadcast to bidders
+      if ((task as any).skipped) {
+        console.log(`[bb_propose] Task "${task.taskId}" skipped (status: ${task.status}) — not waking bidders`);
+        return { ok: true, protocol: "blackboard", action: "propose", task,
+          skipped: true,
+          bidders_notified: [],
+          hint: `Task "${task.taskId}" is already ${task.status}. No need to re-dispatch — ${task.status === "completed" ? "results are available via bb_read" : "work is in progress"}.` };
+      }
+
       // Notify all agents via bus so bidders can discover the new task
       const proposedTaskId = task.taskId;
       busPublish(sessionId, _currentAgentId, "bb:new_task", {
@@ -3395,6 +3434,31 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
         const bidderAgents = allAgents
           .filter((a: AgentConfig) => a.id !== _currentAgentId && a.role !== "human" && a.p2p?.bidder === true);
         console.log(`[bb_propose] Total agents: ${allAgents.length}, bidders found: ${bidderAgents.length}, ids: ${bidderAgents.map((a: AgentConfig) => a.id).join(", ")}`);
+
+        // Fast-path: if ≤2 bidders, auto-assign to the first one (skip full bidding cycle)
+        const p2pGov = rtSession.systemConfig.system?.p2p_governance;
+        const autoAssignThreshold = p2pGov?.auto_assign_threshold ?? 2;
+        if (bidderAgents.length > 0 && bidderAgents.length <= autoAssignThreshold) {
+          // Round-robin among available bidders for fair distribution
+          const assignee = bidderAgents[Math.floor(Math.random() * bidderAgents.length)];
+          console.log(`[bb_propose] Auto-assigning task "${proposedTaskId}" to "${assignee.id}" (only ${bidderAgents.length} bidder(s), threshold=${autoAssignThreshold})`);
+          // Auto-bid, award, and start
+          blackboardBid(sessionId, assignee.id, proposedTaskId, 1.0);
+          blackboardAward(sessionId, proposedTaskId, assignee.id);
+          blackboardStartTask(sessionId, assignee.id, proposedTaskId);
+          busPublish(sessionId, _currentAgentId, "bb:task_awarded", {
+            task_id: proposedTaskId,
+            awarded_to: assignee.id,
+            description: args.description,
+            auto_assigned: true,
+          });
+          return { ok: true, protocol: "blackboard", action: "propose", task,
+            auto_assigned: true,
+            assigned_to: assignee.id,
+            bidders_notified: [],
+            hint: `Task auto-assigned to "${assignee.id}" (${bidderAgents.length} bidder(s) — below threshold ${autoAssignThreshold}, bidding skipped). Use send_task({to: "${assignee.id}", task: "..."}) to deliver the work NOW.` };
+        }
+
         for (const bidder of bidderAgents) {
           console.log(`[bb_propose] Waking bidder ${bidder.id} via task:${bidder.id}`);
           busPublish(sessionId, _currentAgentId, `task:${bidder.id}`, {

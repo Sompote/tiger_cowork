@@ -139,10 +139,30 @@
     "id": "df12f538-30f8-4f04-9d7c-f2954ea719f3",
     "name": "SASW",
     "description": "",
-    "workingFolder": "",
+    "workingFolder": "SASW",
     "memory": "",
     "skills": [],
     "createdAt": "2026-03-30T03:40:57.615Z",
-    "updatedAt": "2026-03-30T03:40:57.615Z"
+    "updatedAt": "2026-04-01T11:03:42.932Z"
+  },
+  {
+    "id": "4babf517-a476-44d0-89b3-53dbdc76d381",
+    "name": "tunnel",
+    "description": "",
+    "workingFolder": "tunnel",
+    "memory": "",
+    "skills": [],
+    "createdAt": "2026-04-01T03:48:33.874Z",
+    "updatedAt": "2026-04-01T03:49:29.719Z"
+  },
+  {
+    "id": "ead7eed2-c9de-4734-ad08-40b0e76bc1f2",
+    "name": "web_research",
+    "description": "",
+    "workingFolder": "research",
+    "memory": "",
+    "skills": [],
+    "createdAt": "2026-04-01T22:24:38.566Z",
+    "updatedAt": "2026-04-01T22:24:47.655Z"
   }
 ]

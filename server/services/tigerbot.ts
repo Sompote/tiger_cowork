@@ -1,6 +1,8 @@
 import { getSettings, getCheckpointDir } from "./data";
-import { getTools, callTool, getWorkingAgents, collectPendingResults, isClaudeCodeModel, runClaudeCodeAgent, isCodexModel, runCodexAgent, isLocalCliAgent, extractCliSubModel } from "./toolbox";
+import { getTools, callTool, getWorkingAgents, collectPendingResults, getPendingBlackboardTasks, isClaudeCodeModel, runClaudeCodeAgent, isCodexModel, runCodexAgent, isLocalCliAgent, extractCliSubModel } from "./toolbox";
 import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
 
 interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -185,11 +187,290 @@ function compressToolResult(toolName: string, result: any, maxLen: number): stri
   }
 }
 
-// ─── Feature 1: Sliding Window with Summary Compression ───
+// ─── Feature 1: Full Compact Algorithm ───
+// Implements a structured 9-step compaction pipeline:
+//  1. Pre-compact hooks → 2. Structured summarization prompt (9 sections)
+//  3. Strip images/docs → 4. Send to model (forked/fallback)
+//  5. Handle prompt-too-long (retry with group dropping)
+//  6. Format summary (strip <analysis>, extract <summary>)
+//  7. Restore critical context (files, plan, skills, tools)
+//  8. Build new message history (boundary + summary + attachments)
+//  9. Cleanup (transcript, caches)
+
+// --- Compact state tracking ---
+interface CompactMetadata {
+  compactionId: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  messagesBefore: number;
+  messagesAfter: number;
+  timestamp: string;
+  transcriptPath?: string;
+}
+
+// Track recently-read files across the session for post-compact restoration
+const _recentFileReads: Map<string, { path: string; content: string; timestamp: number }> = new Map();
+const MAX_RECENT_FILES = 10;
+
+export function trackFileRead(filePath: string, content: string): void {
+  _recentFileReads.set(filePath, {
+    path: filePath,
+    content: content.slice(0, 20_000), // keep up to 20K chars per file for restoration
+    timestamp: Date.now(),
+  });
+  // Evict oldest entries beyond limit
+  if (_recentFileReads.size > MAX_RECENT_FILES) {
+    const oldest = [..._recentFileReads.entries()]
+      .sort((a, b) => a[1].timestamp - b[1].timestamp)
+      .slice(0, _recentFileReads.size - MAX_RECENT_FILES);
+    for (const [key] of oldest) _recentFileReads.delete(key);
+  }
+}
+
+// Track active plan for post-compact restoration
+let _activePlan: string | null = null;
+export function setActivePlan(plan: string | null): void { _activePlan = plan; }
+export function getActivePlan(): string | null { return _activePlan; }
+
+// Track invoked skills for post-compact restoration
+const _invokedSkills: Map<string, string> = new Map();
+export function trackInvokedSkill(name: string, content: string): void {
+  _invokedSkills.set(name, content.slice(0, 5000));
+}
+
+// --- Compact hooks ---
+type CompactHook = (messages: ChatMessage[]) => Promise<string | void>;
+const _preCompactHooks: CompactHook[] = [];
+const _postCompactHooks: CompactHook[] = [];
+
+export function onPreCompact(hook: CompactHook): void { _preCompactHooks.push(hook); }
+export function onPostCompact(hook: CompactHook): void { _postCompactHooks.push(hook); }
+
+// Consecutive compact failure tracking (circuit breaker)
+let _consecutiveCompactFailures = 0;
+const MAX_COMPACT_FAILURES = 3;
+
+// Compaction cooldown: minimum interval between compactions (prevents excessive LLM calls)
+let _lastCompactionTime = 0;
+const COMPACT_COOLDOWN_MS = 60_000; // 60 seconds minimum between compactions
 
 /**
- * Compress older messages in the context into a summary using a fast LLM call.
- * Keeps system prompt + recent messages, replaces older messages with a compressed summary.
+ * Build the structured summarization prompt with 9 sections.
+ * Asks the model to produce <analysis> (scratchpad, stripped later) and <summary>.
+ */
+function buildSummarizationPrompt(
+  toCompress: ChatMessage[],
+  toolCallCount: number,
+  conversationParts: string[]
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: `You are a conversation context compressor. You will receive a conversation history and must produce a structured summary.
+
+RULES:
+- Do NOT use any tools — respond with text only.
+- First produce an <analysis> block where you think through what's important (this is your scratchpad and will be stripped).
+- Then produce a <summary> block with EXACTLY these 9 sections:
+
+<analysis>
+(Your private reasoning about what to preserve and what to drop. Consider: what is the user trying to accomplish? What files were touched? What errors occurred? What decisions were made?)
+</analysis>
+
+<summary>
+## a. Primary Request and Intent
+(What the user originally asked for and what they're trying to achieve)
+
+## b. Key Technical Concepts
+(Important technical terms, algorithms, frameworks, or domain concepts discussed)
+
+## c. Files and Code Sections
+(File paths mentioned or modified, with relevant code snippets — preserve exact paths and line numbers)
+
+## d. Errors and Fixes
+(Errors encountered and how they were resolved, or unresolved errors)
+
+## e. Problem Solving
+(Key decisions made, approaches tried, reasoning about trade-offs)
+
+## f. All User Messages
+(Reproduce ALL non-tool-result user messages — preserve the user's exact words where possible)
+
+## g. Pending Tasks
+(Tasks mentioned but not yet completed, next steps discussed)
+
+## h. Current Work
+(What was actively being worked on at the end of this conversation segment)
+
+## i. Optional Next Step
+(If the conversation implies a clear next action, state it with verbatim quotes from the user if applicable)
+</summary>
+
+Be thorough but concise. Preserve factual details, file paths, exact error messages, and code snippets. Do NOT fabricate information.`
+    },
+    {
+      role: "user",
+      content: `Compress this conversation history (${toCompress.length} messages, ${toolCallCount} tool calls):\n\n${conversationParts.join("\n")}`
+    }
+  ];
+}
+
+/**
+ * Step 3: Strip unnecessary content from messages before summarization.
+ * Images → [image] placeholders, documents → [document] placeholders.
+ */
+function stripForSummarization(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map(msg => {
+    if (Array.isArray(msg.content)) {
+      const stripped = msg.content.map((part: any) => {
+        if (part.type === "image_url" || part.type === "image") {
+          return { type: "text", text: "[image]" };
+        }
+        if (part.type === "document" || part.type === "file") {
+          return { type: "text", text: `[document: ${part.name || part.path || "unknown"}]` };
+        }
+        return part;
+      });
+      return { ...msg, content: stripped };
+    }
+    return msg;
+  });
+}
+
+/**
+ * Step 5: Group messages by API round and drop oldest groups to fit token budget.
+ * A "round" = one user message + its assistant response + any tool results.
+ */
+function groupMessagesByRound(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = [];
+  let current: ChatMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "user" && current.length > 0) {
+      groups.push(current);
+      current = [];
+    }
+    current.push(msg);
+  }
+  if (current.length > 0) groups.push(current);
+
+  return groups;
+}
+
+/**
+ * Step 6: Format the summary — strip <analysis>, extract <summary>, wrap with session header.
+ */
+function formatCompactSummary(
+  rawSummary: string,
+  metadata: CompactMetadata
+): string {
+  // Strip <analysis> block (chain-of-thought scratchpad)
+  let formatted = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").trim();
+
+  // Extract <summary> content if present
+  const summaryMatch = formatted.match(/<summary>([\s\S]*?)<\/summary>/i);
+  if (summaryMatch) {
+    formatted = summaryMatch[1].trim();
+  }
+
+  // Wrap with session continuation header
+  const header = `This session is continued from a previous conversation that was compacted to save context space.
+Compaction ID: ${metadata.compactionId} | Messages: ${metadata.messagesBefore} → ${metadata.messagesAfter} | Tokens saved: ~${metadata.tokensBefore - metadata.tokensAfter}`;
+
+  const transcriptNote = metadata.transcriptPath
+    ? `\nFull pre-compact transcript available at: ${metadata.transcriptPath} (use read_file to access if needed)`
+    : "";
+
+  return `${header}${transcriptNote}\n\n---\n\n${formatted}`;
+}
+
+/**
+ * Step 7: Build post-compact attachments that restore critical context.
+ */
+function buildPostCompactAttachments(): ChatMessage[] {
+  const attachments: ChatMessage[] = [];
+  const MAX_FILE_TOKENS = 5000; // ~20K chars per file
+  const MAX_TOTAL_FILE_CHARS = 200_000; // 50K token budget for files
+
+  // 1. Top 5 recently-read files
+  const recentFiles = [..._recentFileReads.values()]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 5);
+
+  if (recentFiles.length > 0) {
+    let totalChars = 0;
+    const fileParts: string[] = [];
+    for (const file of recentFiles) {
+      const maxChars = MAX_FILE_TOKENS * 4; // ~4 chars per token
+      const content = file.content.slice(0, maxChars);
+      if (totalChars + content.length > MAX_TOTAL_FILE_CHARS) break;
+      fileParts.push(`### ${file.path}\n\`\`\`\n${content}\n\`\`\``);
+      totalChars += content.length;
+    }
+    if (fileParts.length > 0) {
+      attachments.push({
+        role: "system",
+        content: `[Post-compact: Recently-read files (${fileParts.length} files)]\n\n${fileParts.join("\n\n")}`,
+      });
+    }
+  }
+
+  // 2. Active plan
+  if (_activePlan) {
+    attachments.push({
+      role: "system",
+      content: `[Post-compact: Active Plan]\n\n${_activePlan}`,
+    });
+  }
+
+  // 3. Invoked skills (up to 5K tokens each)
+  if (_invokedSkills.size > 0) {
+    const skillParts = [..._invokedSkills.entries()]
+      .map(([name, content]) => `### Skill: ${name}\n${content}`)
+      .join("\n\n");
+    attachments.push({
+      role: "system",
+      content: `[Post-compact: Invoked Skills]\n\n${skillParts}`,
+    });
+  }
+
+  return attachments;
+}
+
+/**
+ * Step 9: Write pre-compact transcript to disk for later retrieval.
+ */
+async function writeCompactTranscript(
+  compactionId: string,
+  messages: ChatMessage[]
+): Promise<string | undefined> {
+  try {
+    const transcriptDir = path.resolve("data", "transcripts");
+    await fs.mkdir(transcriptDir, { recursive: true });
+    const transcriptPath = path.join(transcriptDir, `compact_${compactionId}.jsonl`);
+
+    const lines = messages.map(msg => JSON.stringify({
+      role: msg.role,
+      content: typeof msg.content === "string" ? msg.content.slice(0, 10_000) : "[multimodal]",
+      tool_calls: msg.tool_calls?.map(tc => ({ name: tc.function?.name, id: tc.id })),
+      tool_call_id: msg.tool_call_id,
+    }));
+
+    await fs.writeFile(transcriptPath, lines.join("\n"));
+    console.log(`[Compact] Transcript written: ${transcriptPath} (${lines.length} messages)`);
+    return transcriptPath;
+  } catch (err: any) {
+    console.error(`[Compact] Failed to write transcript: ${err.message}`);
+    return undefined;
+  }
+}
+
+/**
+ * Full Compact Algorithm — structured 9-step compaction pipeline.
+ *
+ * Replaces older messages with a structured LLM-generated summary,
+ * restores critical context (files, plans, skills), and writes
+ * a transcript of the pre-compact messages for later retrieval.
  */
 export async function compressOlderMessages(
   allMessages: ChatMessage[],
@@ -207,78 +488,219 @@ export async function compressOlderMessages(
     return allMessages; // Nothing to compress
   }
 
-  // Messages to compress vs keep
+  // Circuit breaker: skip if too many consecutive failures
+  if (_consecutiveCompactFailures >= MAX_COMPACT_FAILURES) {
+    console.log(`[Compact] Circuit breaker: ${_consecutiveCompactFailures} consecutive failures. Skipping compaction.`);
+    return allMessages;
+  }
+
+  // Cooldown: skip if compacted too recently (prevents excessive LLM summarization calls)
+  const now = Date.now();
+  if (now - _lastCompactionTime < COMPACT_COOLDOWN_MS) {
+    console.log(`[Compact] Cooldown: last compaction was ${Math.round((now - _lastCompactionTime) / 1000)}s ago (min ${COMPACT_COOLDOWN_MS / 1000}s). Skipping.`);
+    return allMessages;
+  }
+
+  const compactionId = crypto.randomBytes(8).toString("hex");
+  const tokensBefore = Math.ceil(estimateMessagesChars(allMessages) / 4);
+
+  console.log(`[Compact] Starting compaction ${compactionId} — ${allMessages.length} messages, ~${tokensBefore} tokens`);
+
+  // ─── Step 1: Pre-compact hooks ───
+  const hookInjections: string[] = [];
+  for (const hook of _preCompactHooks) {
+    try {
+      const result = await hook(allMessages);
+      if (result) hookInjections.push(result);
+    } catch (err: any) {
+      console.error(`[Compact] Pre-compact hook failed: ${err.message}`);
+    }
+  }
+
+  // ─── Step 2 & 3: Prepare messages for summarization ───
   const toCompress = nonSystemMessages.slice(0, nonSystemMessages.length - windowSize);
   const toKeep = nonSystemMessages.slice(nonSystemMessages.length - windowSize);
 
-  // Build a summary of older messages
+  // Step 3: Strip images/documents from messages before summarization
+  const strippedMessages = stripForSummarization(toCompress);
+
+  // Build conversation parts for the summarization prompt
   const summaryParts: string[] = [];
   let toolCallCount = 0;
-  for (const msg of toCompress) {
+  for (const msg of strippedMessages) {
     if (msg.role === "user") {
-      const text = typeof msg.content === "string" ? msg.content : "(multimodal)";
-      summaryParts.push(`USER: ${text.slice(0, 300)}`);
+      const text = typeof msg.content === "string"
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.map((p: any) => p.text || p.type || "").join(" ")
+          : "(multimodal)";
+      summaryParts.push(`USER: ${text.slice(0, 500)}`);
     } else if (msg.role === "assistant") {
       const text = typeof msg.content === "string" ? msg.content : "";
-      if (text) summaryParts.push(`ASSISTANT: ${text.slice(0, 200)}`);
+      if (text) summaryParts.push(`ASSISTANT: ${text.slice(0, 300)}`);
       if (msg.tool_calls?.length) {
         for (const tc of msg.tool_calls) {
-          summaryParts.push(`  → Called ${tc.function?.name || "unknown"}`);
+          const args = tc.function?.arguments || "";
+          const argsPreview = typeof args === "string" ? args.slice(0, 100) : JSON.stringify(args).slice(0, 100);
+          summaryParts.push(`  → Called ${tc.function?.name || "unknown"}(${argsPreview})`);
           toolCallCount++;
         }
       }
     } else if (msg.role === "tool") {
       const text = typeof msg.content === "string" ? msg.content : "";
-      summaryParts.push(`  RESULT: ${text.slice(0, 150)}`);
+      summaryParts.push(`  RESULT: ${text.slice(0, 200)}`);
     }
   }
 
-  const compressionPrompt: ChatMessage[] = [
-    {
-      role: "system",
-      content: "You are a context compressor. Summarize the following conversation history into a concise but complete summary. Preserve: key decisions, important data/findings, file paths, errors encountered, and the current state of the task. Be factual and brief. Output ONLY the summary, no preamble."
-    },
-    {
-      role: "user",
-      content: `Compress this conversation history (${toCompress.length} messages, ${toolCallCount} tool calls):\n\n${summaryParts.join("\n").slice(0, 8000)}`
+  // Add hook injections to the prompt
+  if (hookInjections.length > 0) {
+    summaryParts.push("\n--- Pre-compact hook context ---");
+    summaryParts.push(...hookInjections);
+  }
+
+  // ─── Step 4 & 5: Send to model with prompt-too-long retry logic ───
+  let summary = "";
+  let promptMessages = summaryParts;
+  const MAX_PROMPT_RETRIES = 3;
+
+  for (let retry = 0; retry < MAX_PROMPT_RETRIES; retry++) {
+    const compressionPrompt = buildSummarizationPrompt(
+      toCompress, toolCallCount, promptMessages
+    );
+
+    try {
+      console.log(`[Compact] Sending summarization request (attempt ${retry + 1}/${MAX_PROMPT_RETRIES}, ${promptMessages.join("\n").length} chars)...`);
+      const data = await llmCall(compressionPrompt, { model });
+      summary = data.choices?.[0]?.message?.content || "";
+
+      if (summary) {
+        _consecutiveCompactFailures = 0; // Reset circuit breaker on success
+        break;
+      }
+
+      console.log("[Compact] LLM returned empty summary.");
+    } catch (err: any) {
+      const errMsg = err.message || "";
+      const isPromptTooLong = errMsg.includes("context window exceeds") ||
+        errMsg.includes("context_length_exceeded") ||
+        errMsg.includes("maximum context length") ||
+        errMsg.includes("too many tokens");
+
+      if (isPromptTooLong && retry < MAX_PROMPT_RETRIES - 1) {
+        // Step 5: Drop oldest message groups to free tokens
+        console.log(`[Compact] Prompt too long — dropping oldest message groups (retry ${retry + 1})...`);
+        const groups = groupMessagesByRound(
+          strippedMessages.slice(0, strippedMessages.length - Math.floor(strippedMessages.length / (retry + 2)))
+        );
+
+        // Rebuild summary parts from remaining groups
+        const remaining = groups.flat();
+        promptMessages = [];
+        for (const msg of remaining) {
+          if (msg.role === "user") {
+            const text = typeof msg.content === "string" ? msg.content : "(multimodal)";
+            promptMessages.push(`USER: ${text.slice(0, 300)}`);
+          } else if (msg.role === "assistant") {
+            const text = typeof msg.content === "string" ? msg.content : "";
+            if (text) promptMessages.push(`ASSISTANT: ${text.slice(0, 150)}`);
+            if (msg.tool_calls?.length) {
+              for (const tc of msg.tool_calls) {
+                promptMessages.push(`  → Called ${tc.function?.name || "unknown"}`);
+              }
+            }
+          } else if (msg.role === "tool") {
+            const text = typeof msg.content === "string" ? msg.content : "";
+            promptMessages.push(`  RESULT: ${text.slice(0, 100)}`);
+          }
+        }
+        console.log(`[Compact] Reduced to ${promptMessages.length} parts (dropped ${summaryParts.length - promptMessages.length} parts)`);
+        continue;
+      }
+
+      console.error(`[Compact] Summarization failed: ${err.message}`);
+      _consecutiveCompactFailures++;
+      return allMessages; // Fallback: return uncompacted
     }
-  ];
+  }
 
-  try {
-    console.log(`[Compression] Compressing ${toCompress.length} messages into summary (keeping ${toKeep.length} recent)...`);
-    const data = await llmCall(compressionPrompt, { model });
-    const summary = data.choices?.[0]?.message?.content || "";
-
-    if (!summary) {
-      console.log("[Compression] LLM returned empty summary, falling back to naive trim.");
-      return allMessages;
-    }
-
-    console.log(`[Compression] Summary generated: ${summary.length} chars (compressed from ${summaryParts.join("\n").length} chars)`);
-
-    // Rebuild: system messages + compressed summary + recent messages
-    // Ensure a user message exists after system messages — some APIs (zAi/GLM) reject system→assistant
-    const compressed: ChatMessage[] = [
-      ...allMessages.slice(0, systemEnd),
-      {
-        role: "system",
-        content: `[COMPRESSED CONTEXT — ${toCompress.length} earlier messages, ${toolCallCount} tool calls]\n${summary}`,
-      },
-    ];
-    if (toKeep.length === 0 || toKeep[0].role !== "user") {
-      // Extract the original user objective from compressed messages
-      const firstUserMsg = toCompress.find((m) => m.role === "user");
-      compressed.push({
-        role: "user",
-        content: firstUserMsg ? (typeof firstUserMsg.content === "string" ? firstUserMsg.content : "Continue with the task.") : "Continue with the task.",
-      });
-    }
-    compressed.push(...toKeep);
-    return compressed;
-  } catch (err: any) {
-    console.error(`[Compression] Failed: ${err.message}. Falling back to naive trim.`);
+  if (!summary) {
+    console.log("[Compact] All summarization attempts returned empty. Falling back to naive trim.");
+    _consecutiveCompactFailures++;
     return allMessages;
   }
+
+  // ─── Step 6: Format the summary ───
+  // Write transcript BEFORE formatting so we have the path
+  const transcriptPath = await writeCompactTranscript(compactionId, toCompress);
+
+  const metadata: CompactMetadata = {
+    compactionId,
+    tokensBefore,
+    tokensAfter: 0, // computed after building final messages
+    messagesBefore: allMessages.length,
+    messagesAfter: 0,
+    timestamp: new Date().toISOString(),
+    transcriptPath,
+  };
+
+  const formattedSummary = formatCompactSummary(summary, metadata);
+
+  // ─── Step 7: Restore critical context ───
+  const postCompactAttachments = buildPostCompactAttachments();
+
+  // ─── Step 8: Build the new message history ───
+  const compressed: ChatMessage[] = [
+    // Keep original system messages
+    ...allMessages.slice(0, systemEnd),
+    // Compact boundary marker
+    {
+      role: "system",
+      content: `[COMPACT BOUNDARY — id:${compactionId} | ${toCompress.length} messages compacted, ${toolCallCount} tool calls | tokens saved: ~${tokensBefore}]`,
+    },
+    // The structured summary
+    {
+      role: "system",
+      content: formattedSummary,
+    },
+    // Post-compact attachments (recently-read files, plan, skills)
+    ...postCompactAttachments,
+  ];
+
+  // Ensure a user message exists before assistant messages — some APIs reject system→assistant
+  if (toKeep.length === 0 || toKeep[0].role !== "user") {
+    const firstUserMsg = toCompress.find((m) => m.role === "user");
+    compressed.push({
+      role: "user",
+      content: firstUserMsg
+        ? (typeof firstUserMsg.content === "string" ? firstUserMsg.content : "Continue with the task.")
+        : "Continue with the task.",
+    });
+  }
+
+  // Keep recent messages
+  compressed.push(...toKeep);
+
+  // Update metadata with final token count
+  metadata.tokensAfter = Math.ceil(estimateMessagesChars(compressed) / 4);
+  metadata.messagesAfter = compressed.length;
+
+  console.log(`[Compact] Compaction ${compactionId} complete: ${metadata.messagesBefore} → ${metadata.messagesAfter} messages, ~${metadata.tokensBefore} → ~${metadata.tokensAfter} tokens`);
+  _lastCompactionTime = Date.now();
+
+  // ─── Step 9: Cleanup ───
+  // Clear file-read cache (will be rebuilt as conversation continues)
+  _recentFileReads.clear();
+
+  // Execute post-compact hooks
+  for (const hook of _postCompactHooks) {
+    try {
+      await hook(compressed);
+    } catch (err: any) {
+      console.error(`[Compact] Post-compact hook failed: ${err.message}`);
+    }
+  }
+
+  return compressed;
 }
 
 // ─── Feature 3: Checkpoint & Resume ───
@@ -820,6 +1242,10 @@ export async function callTigerBotWithTools(
 
     let data: any;
     const llmMaxRetries = 3;
+    // 529 (overloaded) gets extra retries with exponential backoff to avoid
+    // all sub-agents hammering the API simultaneously and all failing fast
+    const overloadMaxRetries = 4;
+    let overloadRetryCount = 0;
     for (let llmRetry = 0; llmRetry < llmMaxRetries; llmRetry++) {
       try {
         data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
@@ -857,6 +1283,23 @@ export async function callTigerBotWithTools(
           }
           continue; // retry immediately after compression
         }
+
+        // Detect 529 overloaded — use longer exponential backoff and more retries
+        const isOverloaded = errMsg.includes("529") || errMsg.includes("overloaded") || errMsg.includes("Too many requests");
+        if (isOverloaded && overloadRetryCount < overloadMaxRetries) {
+          overloadRetryCount++;
+          // Exponential backoff with jitter: 3s, 6s, 12s, 24s capped at 30s
+          const baseDelay = Math.min(3000 * Math.pow(2, overloadRetryCount - 1), 30000);
+          const jitter = Math.floor(Math.random() * 2000);
+          const delay = baseDelay + jitter;
+          console.log(`[ToolLoop] API overloaded (529) — backoff retry ${overloadRetryCount}/${overloadMaxRetries} in ${delay}ms...`);
+          onRetry?.(overloadRetryCount, overloadMaxRetries, `API overloaded (529), backing off ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          // Don't increment llmRetry — overload retries are separate from normal retries
+          llmRetry--;
+          continue;
+        }
+
         if (llmRetry < llmMaxRetries - 1) {
           const delay = (llmRetry + 1) * 2000; // 2s, 4s backoff
           console.log(`[ToolLoop] LLM call failed (attempt ${llmRetry + 1}/${llmMaxRetries}): ${err.message}. Retrying in ${delay}ms...`);
@@ -992,10 +1435,14 @@ export async function callTigerBotWithTools(
       if (sessionId) {
         const workingAgents = getWorkingAgents(sessionId);
         const pendingResults = collectPendingResults(sessionId);
-        if (workingAgents.length > 0 || pendingResults.length > 0) {
+        const pendingBBTasks = getPendingBlackboardTasks(sessionId);
+        const hasPendingWork = workingAgents.length > 0 || pendingResults.length > 0 || pendingBBTasks.length > 0;
+
+        if (hasPendingWork) {
           const agentNames = workingAgents.map(a => a.agentName).join(", ");
           const pendingNames = pendingResults.map(r => r.agentName).join(", ");
-          console.log(`[ToolLoop] LLM tried to stop but agents still working: [${agentNames}], pending results: [${pendingNames}]`);
+          const bbTaskInfo = pendingBBTasks.map(t => `${t.taskId}(${t.status})`).join(", ");
+          console.log(`[ToolLoop] LLM tried to stop but work pending: agents=[${agentNames}], results=[${pendingNames}], bb_tasks=[${bbTaskInfo}]`);
 
           // Inject pending results if available
           let pendingInfo = "";
@@ -1003,9 +1450,22 @@ export async function callTigerBotWithTools(
             pendingInfo = "\n\nResults just arrived from your agents:\n" + pendingResults.map(r => `**${r.agentName}**: ${r.result.slice(0, 3000)}`).join("\n\n");
           }
 
+          // Build specific guidance based on what's pending
+          let bbGuidance = "";
+          if (pendingBBTasks.length > 0) {
+            const openTasks = pendingBBTasks.filter(t => t.status === "open" || t.status === "bidding");
+            const awardedTasks = pendingBBTasks.filter(t => t.status === "awarded" || t.status === "in_progress");
+            if (openTasks.length > 0) {
+              bbGuidance += `\n- ${openTasks.length} blackboard task(s) still need bids/awards: ${openTasks.map(t => t.taskId).join(", ")}. Use bb_read to check bids, then bb_award to assign them.`;
+            }
+            if (awardedTasks.length > 0) {
+              bbGuidance += `\n- ${awardedTasks.length} blackboard task(s) are awarded/in-progress: ${awardedTasks.map(t => t.taskId).join(", ")}. Use wait_result to collect results.`;
+            }
+          }
+
           allMessages.push({
             role: "user" as const,
-            content: `⚠️ SYSTEM: Do NOT stop yet — you have ${workingAgents.length} agent(s) still working${agentNames ? ` (${agentNames})` : ""} and ${pendingResults.length} pending result(s). You MUST:\n1. Use check_agents or wait_result to collect their results\n2. Integrate ALL agent results into your final answer\n3. Only finish AFTER all agents have reported back\nDo NOT give a partial answer. Do NOT abandon pending work.${pendingInfo}`,
+            content: `⚠️ SYSTEM: Do NOT stop yet — you have ${workingAgents.length} agent(s) still working${agentNames ? ` (${agentNames})` : ""}, ${pendingResults.length} pending result(s), and ${pendingBBTasks.length} unfinished blackboard task(s). You MUST:\n1. Use bb_read to check bid status, then bb_award to assign open tasks\n2. Use send_task to deliver work to awarded agents\n3. Use wait_result to collect all agent results\n4. Integrate ALL results into your final answer\n5. Only finish AFTER all tasks are completed\nDo NOT give a partial answer. Do NOT abandon pending work.${bbGuidance}${pendingInfo}`,
           });
           consecutiveErrors = 0;
           continue;
@@ -1153,6 +1613,14 @@ export async function callTigerBotWithTools(
       if (onToolResult) onToolResult(fnName, result);
       toolResults.push({ tool: fnName, result });
       totalToolCalls++;
+
+      // Track file reads and skill loads for post-compact restoration
+      if (fnName === "read_file" && result?.content && result?.path) {
+        trackFileRead(result.path, result.content);
+      }
+      if (fnName === "load_skill" && result?.content && fnArgs?.skill) {
+        trackInvokedSkill(fnArgs.skill, typeof result.content === "string" ? result.content : JSON.stringify(result.content));
+      }
 
       // Feature 2: Smart tool result compression
       const HARD_MAX = 100_000;

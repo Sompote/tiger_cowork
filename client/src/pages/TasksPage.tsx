@@ -178,19 +178,17 @@ export default function TasksPage() {
                 </div>
                 <div className="active-task-actions">
                   <span className="active-task-elapsed">{elapsed(task.startedAt)}</span>
-                  {task.agentTools && Object.keys(task.agentTools).length > 0 && (
-                    <button
-                      className={`btn btn-sm${graphicOpen[task.id] ? " btn-primary" : " btn-ghost"}`}
-                      onClick={() => setGraphicOpen(prev => ({ ...prev, [task.id]: !prev[task.id] }))}
-                      title="Toggle agent graphic view"
-                      style={{ gap: 4 }}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-4-8c.79 0 1.5-.71 1.5-1.5S8.79 9 8 9s-1.5.71-1.5 1.5S7.21 12 8 12zm8 0c.79 0 1.5-.71 1.5-1.5S16.79 9 16 9s-1.5.71-1.5 1.5.71 1.5 1.5 1.5zm-4 4c2.21 0 4-1.12 4-2.5h-8c0 1.38 1.79 2.5 4 2.5z"/>
-                      </svg>
-                      Graphic
-                    </button>
-                  )}
+                  <button
+                    className={`btn btn-sm${graphicOpen[task.id] ? " btn-primary" : " btn-ghost"}`}
+                    onClick={() => setGraphicOpen(prev => ({ ...prev, [task.id]: !prev[task.id] }))}
+                    title="Toggle agent graphic view"
+                    style={{ gap: 4 }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-4-8c.79 0 1.5-.71 1.5-1.5S8.79 9 8 9s-1.5.71-1.5 1.5S7.21 12 8 12zm8 0c.79 0 1.5-.71 1.5-1.5S16.79 9 16 9s-1.5.71-1.5 1.5.71 1.5 1.5 1.5zm-4 4c2.21 0 4-1.12 4-2.5h-8c0 1.38 1.79 2.5 4 2.5z"/>
+                    </svg>
+                    Graphic
+                  </button>
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => navigate(`/?session=${task.sessionId}`)}
