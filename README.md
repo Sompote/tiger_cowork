@@ -1,6 +1,6 @@
-![Tigrimos Banner](picture/banner2.jpg)
+![Tiger CoWork Banner](picture/banner2.jpg)
 
-# Tigrimos v0.4.3
+# Tiger CoWork v0.4.3
 
 A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
 
@@ -8,15 +8,15 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 ## Screenshots
 
-![Tigrimos — AI chat with output panel](picture/screen3.jpg)
+![Tiger CoWork — AI chat with output panel](picture/screen3.jpg)
 
 *AI Chat with tool-calling — generates React/Recharts visualizations rendered in the output panel.*
 
-![Tigrimos — Agent System Editor](picture/agent2.jpg)
+![Tiger CoWork — Agent System Editor](picture/agent2.jpg)
 
 *Visual Agent Editor — drag-and-drop multi-agent design with mesh networking and YAML export.*
 
-![Tigrimos — Minecraft Task Monitor](picture/screentask.png)
+![Tiger CoWork — Minecraft Task Monitor](picture/screentask.png)
 
 *Minecraft Task Monitor — live pixel-art agents with speech bubbles, walking animations, and inter-agent interactions.*
 
@@ -37,30 +37,30 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 ### One-Click Installers
 
 **Mac:**
-1. Download [`Tigrimos.zip`](https://github.com/Sompote/Tigrimos/releases/latest)
-2. Unzip, right-click `Tigrimos.app` and select **Open**
+1. Download [`TigerCoWork.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+2. Unzip, right-click `TigerCoWork.app` and select **Open**
 
 **Windows:**
-1. Download [`TigrimosInstaller.zip`](https://github.com/Sompote/Tigrimos/releases/latest)
-2. Unzip and run `TigrimosInstaller.bat`
+1. Download [`TigerCoWorkInstaller.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+2. Unzip and run `TigerCoWorkInstaller.bat`
 
 **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running.
 
 | | Mac | Windows |
 |---|---|---|
-| **Start** | Double-click `Tigrimos.app` | Double-click `TigrimosStart.bat` |
-| **Stop** | Docker Desktop → Containers → Stop | Double-click `TigrimosStop.bat` |
+| **Start** | Double-click `TigerCoWork.app` | Double-click `TigerCoWorkStart.bat` |
+| **Stop** | Docker Desktop → Containers → Stop | Double-click `TigerCoWorkStop.bat` |
 
 ### Terminal Install
 
 **Mac/Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sompote/Tigrimos/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/Sompote/Tigrimos/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | iex
 ```
 
 ### Manual Install
@@ -68,8 +68,8 @@ irm https://raw.githubusercontent.com/Sompote/Tigrimos/main/install.ps1 | iex
 **Prerequisites:** Node.js >= 18, npm, Python 3 (optional)
 
 ```bash
-git clone https://github.com/Sompote/Tigrimos.git
-cd Tigrimos
+git clone https://github.com/Sompote/tiger_cowork.git
+cd tiger_cowork
 bash setup.sh        # installs deps, prompts for ClawHub token
 npm run dev          # development → http://localhost:3001
 ```
