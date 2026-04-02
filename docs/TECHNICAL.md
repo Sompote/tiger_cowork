@@ -599,3 +599,346 @@ tiger_cowork/
 | `python:run`        | Client → Server  | Execute Python code                  |
 | `python:status`     | Server → Client  | Python execution status              |
 | `python:result`     | Server → Client  | Python execution result              |
+
+## Agent Communication Architecture
+
+Tiger Cowork agents communicate through four protocols and seven orchestration topologies. Understanding how agents connect, discover each other, and exchange information is key to designing effective multi-agent systems.
+
+### How Agents Discover Each Other
+
+Agents don't query a registry at runtime. Instead, the server loads your YAML configuration at startup and **injects the full architecture into each agent's system prompt** — every agent's name, ID, role, responsibilities, and available connections. Each agent knows who else exists and how to reach them from the moment it starts.
+
+### Four Communication Protocols
+
+| Protocol | Pattern | How It Works | Use Case |
+|---|---|---|---|
+| **TCP** | Point-to-point | Ephemeral bidirectional channels between agent pairs via localhost sockets. Newline-delimited JSON. | Direct messaging between two specific agents |
+| **Bus** | Pub/Sub broadcast | In-process EventEmitter with topic-based subscriptions and 500-message history per session. | Status updates, findings broadcast to all listeners |
+| **Queue** | FIFO ordered | Per-channel message queue (max 200 messages). | Sequential task delivery, ordered handoffs |
+| **Blackboard** | Shared workspace | Session-scoped task board with proposals, bids, combined scoring, and an append-only audit log (P2P mode). | P2P task negotiation, Contract Net Protocol with 50/50 scoring |
+
+Agents access these via tool calls: `proto_tcp_send`/`proto_tcp_read`, `proto_bus_publish`/`proto_bus_history`, `proto_queue_send`/`proto_queue_receive`, and `bb_propose`/`bb_bid`/`bb_award`/`bb_complete`/`bb_read`/`bb_log` (P2P blackboard).
+
+### Task Delegation (send_task / wait_result)
+
+The primary way agents assign work to each other:
+
+```
+Agent A                          Agent B
+   │                                │
+   ├── send_task({to: "agent_b",    │
+   │     task: "analyze data"})     │
+   │         ──── bus topic ────►   │
+   │           "task:agent_b"       ├── processes task
+   │                                │
+   │   ◄──── bus topic ─────        ├── publishes result
+   │       "result:agent_b"         │
+   ├── wait_result({from:           │
+   │     "agent_b"}) → gets result  │
+   │                                │
+```
+
+Agents can send tasks to **multiple agents in a single response** for parallel execution.
+
+### Seven Orchestration Topologies
+
+Configure via `system.orchestration_mode` in your YAML:
+
+| Mode | Description | Agent Access |
+|---|---|---|
+| **Hierarchical** | Human → Orchestrator → Workers. Orchestrator gatekeeps all delegation. | Only orchestrator has `send_task` to workers |
+| **Hybrid** | Orchestrator controls main flow, but mesh-enabled workers can collaborate freely with peers. | Orchestrator delegates; mesh workers can `send_task` to each other |
+| **Flat** | Human sends tasks directly to any agent. No orchestrator. | Human connects to all agents directly |
+| **Mesh** | All agents can send tasks to any other agent. Fully connected. | Every agent gets `send_task`/`wait_result` |
+| **Pipeline** | Sequential chain: agent_1 → agent_2 → agent_3. | Each agent passes output to the next |
+| **P2P Swarm** | Autonomous peers self-organize via shared blackboard and Contract Net Protocol. No persistent authority. | All peers get blackboard tools + `send_task`/`wait_result` |
+| **P2P Orchestrator** | Orchestrator delegates directly to connected agents OR posts tasks for bidder agents to compete on via blackboard. Combined 50/50 scoring. | Orchestrator gets both `send_task` and blackboard tools; bidders get blackboard tools |
+
+```
+More Control                                                              More Autonomy
+    |                                                                          |
+    Hierarchical → Pipeline → Flat → Hybrid → Mesh → P2P Orchestrator → P2P Swarm
+    |                                                                          |
+Single boss       Chain      Direct    Mixed    Free    Boss + bidding    Self-organizing
+controls all      order      assign    mode     talk    with scoring      with consensus
+```
+
+### Mesh Networking — Peer-to-Peer Collaboration
+
+Mesh enables agents to **autonomously request help** from other agents. When an agent receives a task and decides it needs assistance, it can delegate sub-tasks to peers without going through the orchestrator.
+
+**Enable mesh per agent:**
+```yaml
+agents:
+  - id: web_researcher_1
+    name: Primary Researcher
+    role: researcher
+    mesh:
+      enabled: true    # This agent can send_task to any peer
+```
+
+**Or enable globally:**
+```yaml
+system:
+  orchestration_mode: mesh    # ALL agents can communicate freely
+```
+
+**Example — researcher asks a peer for help:**
+```
+Orchestrator → send_task → Researcher 1 ("investigate topic X")
+    Researcher 1 starts working...
+    Researcher 1 thinks: "I need statistics for this"
+    Researcher 1 → send_task → Researcher 3 ("find statistics on X")
+    Researcher 3 → processes and returns stats
+    Researcher 1 → wait_result → combines everything
+    Researcher 1 → returns final result to Orchestrator
+```
+
+**Without mesh**, a worker agent can only receive tasks and return results — it cannot ask other agents for help.
+
+### P2P Swarm — Governed Self-Organization
+
+P2P Swarm is the most autonomous orchestration mode. Unlike mesh (which is free-for-all), P2P adds **governance** — agents coordinate through a shared blackboard using the Contract Net Protocol with combined 50/50 scoring and an immutable audit log. For teams that need a central coordinator, use **P2P Orchestrator** mode instead.
+
+**Key concepts:**
+- **No persistent authority** — all agents are autonomous peers with role `peer`
+- **Shared blackboard** — a workspace where agents post tasks, bids, and results
+- **Contract Net Protocol (CNP)** — structured bidding: propose → bid → award (50/50 scoring) → execute → complete
+- **Combined scoring** — winner determined by 50% bidder confidence + 50% orchestrator assessment
+- **Audit log** — append-only event trail for full auditability
+
+**Contract Net Protocol flow:**
+
+```
+1. PROPOSE  → Agent posts task on blackboard (bb_propose) — bidders auto-notified
+2. BID      → Bidders submit confidence scores (bb_bid)
+3. REVIEW   → Orchestrator reads bids + bidder profiles via bb_read
+4. SCORE    → Orchestrator provides its own score for each bidder
+5. AWARD    → Winner = 50% bidder confidence + 50% orchestrator score (bb_award)
+6. SEND     → Orchestrator sends actual task to winner (send_task)
+7. EXECUTE  → Winner performs the task using available tools
+8. COMPLETE → Winner reports result (bb_complete)
+```
+
+**P2P blackboard tools** (available to all peer/bidder agents):
+
+| Tool | Purpose |
+|---|---|
+| `bb_propose` | Post a new task on the blackboard — bidders are auto-notified and asked to bid |
+| `bb_bid` | Submit a bid with confidence score (0-1) and reasoning |
+| `bb_award` | Award task using combined scoring (orchestrator_scores + bidder confidence) |
+| `bb_complete` | Mark a task as completed with result |
+| `bb_read` | Read the blackboard — tasks, bids with bidder profiles, statuses |
+| `bb_log` | Read the audit log — full event trail for auditability |
+
+**Example YAML configuration:**
+
+```yaml
+system:
+  name: Research Swarm
+  orchestration_mode: p2p
+  p2p_governance:
+    consensus_mechanism: contract_net
+    bid_timeout_seconds: 30
+    min_confidence_threshold: 0.5
+    audit_log: true
+
+agents:
+  - id: human
+    name: User
+    role: human
+
+  - id: data_analyst
+    name: Data Analyst
+    role: peer
+    persona: "Expert in statistical analysis and data visualization."
+    responsibilities:
+      - Analyze datasets and compute statistics
+      - Create charts and visualizations
+    bus:
+      enabled: true
+    p2p:
+      confidence_domains:
+        - statistics
+        - data_visualization
+      reputation_score: 0.9
+
+  - id: web_researcher
+    name: Web Researcher
+    role: peer
+    persona: "Skilled at finding and synthesizing information from the web."
+    responsibilities:
+      - Search for relevant papers and articles
+      - Extract key findings from sources
+    bus:
+      enabled: true
+    p2p:
+      confidence_domains:
+        - web_search
+        - literature_review
+      reputation_score: 0.85
+```
+
+**P2P Swarm vs Mesh:**
+
+| | Mesh | P2P Swarm | P2P Orchestrator |
+|---|---|---|---|
+| Connections | None (free-for-all) | None (blackboard) | Orchestrator → direct agents + blackboard for bidders |
+| Coordination | Ad-hoc direct messaging | Governed protocol (CNP) | Hybrid: direct delegation + CNP bidding |
+| Task allocation | Agent decides who to ask | Competitive bidding | 50/50 combined scoring (bidder + orchestrator) |
+| Auditability | Bus history only | Full audit log | Full audit log with scoring details |
+| Agent role | Any (worker, researcher, etc.) | `peer` | `orchestrator` + `bidder` agents |
+
+### Agent Roles
+
+| Role | Color | Purpose |
+|---|---|---|
+| **human** | Pink | User entry point — the human interacts via this node |
+| **orchestrator** | Blue | Central coordinator — decomposes tasks, delegates to workers, synthesizes results |
+| **worker** | Green | Executes assigned tasks — the workhorse of hierarchical/hybrid teams |
+| **checker** | Orange | Quality assurance — validates outputs from other agents |
+| **reporter** | Purple | Synthesizes results into reports, summaries, and presentations |
+| **researcher** | Teal | Information gathering — web search, literature review, data collection |
+| **peer** | Amber | Autonomous P2P agent — self-organizes via blackboard and consensus |
+
+### Connection Access Control
+
+The `connections` array in YAML defines allowed communication paths:
+
+```yaml
+connections:
+  - from: research_orchestrator
+    to: web_researcher_1
+    label: search_task
+    protocol: tcp
+  - from: web_researcher_1
+    to: research_synthesizer
+    label: deliver_findings
+    protocol: queue
+    topics:
+      - raw_findings
+```
+
+**Access rules enforced at runtime:**
+
+| Condition | Can `send_task`? |
+|---|---|
+| Agent has `mesh.enabled: true` | Yes — to any peer |
+| Global `orchestration_mode: mesh` | Yes — to any peer |
+| Global `orchestration_mode: p2p` | Yes — to any peer (+ blackboard tools) |
+| Global `orchestration_mode: p2p_orchestrator` + orchestrator role | Yes — to connected agents directly; bidder-only agents require blackboard bidding first |
+| Agent has explicit `outputs_to` or `connections` to target | Yes — to listed targets only |
+| Hybrid orchestrator | Yes — to connected agents |
+| None of the above | No — `send_task` tool is not available |
+
+### Bus Topics
+
+Agents configured with `bus.enabled: true` can publish and subscribe to topics. Some bus activity is **automatic**:
+
+| Bus Topic | When Published | By Whom |
+|---|---|---|
+| `task:{agent_id}` | When a task is sent to an agent | System (via `send_task`) |
+| `result:{agent_id}` | When an agent completes a task | System (automatic) |
+| Custom topics (e.g. `raw_findings`) | When an agent decides to broadcast | Agent (via `proto_bus_publish`) |
+
+### Talking to Agents Directly (`/agent` command)
+
+During a running realtime session, you can talk to specific agents directly from the chat:
+
+```
+/agent research_orchestrator "analyze the impact of climate change on soil mechanics"
+```
+
+Or use the agent's display name (case-insensitive):
+
+```
+/agent "Literature Researcher" "find recent papers on SANISAND model"
+```
+
+**Broadcast to all connected agents** (omit the agent name):
+
+```
+/agent "summarize your current findings"
+```
+
+**Access control:** The human can only talk to agents connected to the human node.
+
+### Local CLI Agent Setup
+
+Use **Claude Code** or **Codex** as autonomous agent backends — they handle code reading, editing, and execution with their own tool loops. No API key needed.
+
+**Claude Code:**
+```bash
+npm install -g @anthropic-ai/claude-code
+claude          # one-time OAuth login
+claude -p "hello" --output-format json
+```
+
+**OpenAI Codex:**
+```bash
+npm install -g @openai/codex
+codex login     # one-time OAuth login
+codex exec "hello"
+```
+
+**Use in Tiger Cowork:**
+1. Open the Agent Editor → select an agent → check "Specify model for this agent"
+2. Choose Claude Code (Local CLI), Codex (Local CLI), or any API model
+3. Each agent runs on its assigned backend
+
+**Headless server (no browser):** authenticate on another machine, then copy credentials:
+```bash
+scp -r ~/.claude user@server:~/.claude   # Claude Code
+scp -r ~/.codex user@server:~/.codex     # Codex
+```
+
+### MCP Server Setup
+
+Connect external **Model Context Protocol** servers to extend the AI's toolbox. Supports **StreamableHTTP**, **SSE**, and **Stdio** transports.
+
+Configure in **Settings** → **MCP Servers**:
+
+```json
+{
+  "mcpServers": {
+    "web-search": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "Bearer your-token" },
+      "enabled": true
+    },
+    "local-files": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/folder"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Connected tools appear automatically alongside built-in tools with the naming pattern `mcp_{serverName}_{toolName}`.
+
+### Context Management Settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `agentCompressionInterval` | `5` | Compress older messages every N tool loop rounds |
+| `agentCompressionWindowSize` | `10` | Number of recent messages to keep uncompressed |
+| `agentCompressionModel` | *(main model)* | Optional cheaper/faster model for compression |
+| `agentCheckpointEnabled` | `true` | Enable automatic checkpoint saving for crash recovery |
+| `agentCheckpointInterval` | `5` | Save checkpoint every N rounds |
+| `agentToolResultMaxLen` | `6000` | Max chars per tool result (hard-capped at 100KB) |
+| `agentMaxToolRounds` | `8` | Max iterations of the tool-calling loop |
+| `agentMaxToolCalls` | `12` | Total tool calls allowed per session |
+
+### Design Tips
+
+- **Use `hierarchical` mode** for strict control — the orchestrator is the single point of delegation.
+- **Use `hybrid` mode** when you want structured orchestration but also want specialist agents to collaborate freely.
+- **Use `mesh` mode** for flat, fully connected teams where any agent can ask any other for help.
+- **Use `p2p` mode** when agents have diverse specialties and you want them to self-organize via competitive bidding.
+- **Use `p2p_orchestrator` mode** when you want a central coordinator with competitive task allocation using 50/50 scoring.
+- **Add `mesh.enabled: true`** to any agent that might need to request help mid-task.
+- **Bus topics** are useful for monitoring — watch `proto_bus_history` to see what all agents are doing.
+- **P2P confidence_domains** — set distinct expertise domains per peer agent so they bid accurately.
