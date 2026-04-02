@@ -524,43 +524,25 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
   if (settings.subAgentMode !== "manual" || !settings.subAgentConfigFile) return null;
   const config = loadAgentConfig(settings.subAgentConfigFile);
   if (!config) return null;
-  let summary = `\n\nMANUAL AGENT TEAM CONFIGURATION (${config.system?.name || "Unnamed"}):\n`;
-  summary += `Orchestration mode: ${config.system?.orchestration_mode || "hierarchical"}\n`;
-  if (config.system?.orchestration_mode === "p2p") {
-    const governance = config.system?.p2p_governance;
-    summary += `P2P Governance: ${governance?.consensus_mechanism || "contract_net"}\n`;
-    summary += `All peer agents are autonomous — coordination via shared blackboard (propose → bid → award → execute).\n`;
+  const mode = config.system?.orchestration_mode || "hierarchical";
+  let summary = `\n\nAGENT TEAM (${config.system?.name || "Unnamed"}, mode: ${mode}):\n`;
+  if (mode === "p2p") {
+    summary += `P2P governance: ${config.system?.p2p_governance?.consensus_mechanism || "contract_net"} — coordination via blackboard.\n`;
   }
-  summary += `Available agents:\n`;
   for (const a of config.agents || []) {
-    const flags = [
-      a.bus?.enabled ? "bus" : "",
-      a.mesh?.enabled ? "mesh" : "",
-      a.role === "peer" ? "peer" : "",
-    ].filter(Boolean).join(", ");
-    summary += `  - ${a.id} ("${a.name}"): role=${a.role}${flags ? ` [${flags}]` : ""}, persona=${a.persona || "N/A"}\n`;
-    if (a.responsibilities && a.responsibilities.length > 0) {
-      summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
-    }
+    const flags = [a.bus?.enabled && "bus", a.mesh?.enabled && "mesh", a.role === "peer" && "peer"].filter(Boolean).join(",");
+    summary += `- ${a.id} ("${a.name}"): ${a.role}${flags ? ` [${flags}]` : ""}${a.persona ? ` — ${a.persona}` : ""}\n`;
   }
 
-  // Include workflow sequence so the LLM knows the exact delegation order
   if (config.workflow?.sequence && config.workflow.sequence.length > 0) {
-    summary += `\nWORKFLOW SEQUENCE (you MUST follow this order):\n`;
+    summary += `\nWorkflow sequence:\n`;
     for (const step of config.workflow.sequence) {
-      const agent = config.agents?.find((a: AgentConfig) => a.id === step.agent);
-      const agentName = agent ? `${agent.name} (${agent.role})` : step.agent;
-      const outputsTo = step.outputs_to ? ` → outputs to: ${step.outputs_to.join(", ")}` : "";
-      summary += `  Step ${step.step}: ${step.agent} [${agentName}] — ${step.action}${outputsTo}\n`;
+      const outputsTo = step.outputs_to ? ` → ${step.outputs_to.join(", ")}` : "";
+      summary += `  ${step.step}. ${step.agent}: ${step.action}${outputsTo}\n`;
     }
   }
 
-  summary += `\nINSTRUCTIONS: You MUST spawn sub-agents using the agentId parameter to match agents from this config.\n`;
-  summary += `For each user task, follow the workflow sequence: spawn agents in order, pass context between them, and synthesize the final result.\n`;
-  summary += `Example: spawn_subagent({task: "...", label: "Project manager", agentId: "agent_1", context: "..."})\n`;
-  summary += `\nPRESENTATION: After all agents complete, synthesize results into a clear, human-readable response.\n`;
-  summary += `Do NOT dump raw agent output. Organize findings with headings and bullet points. Mention any generated files so the user checks the output panel.\n`;
-  summary += `If agents return data, use run_python to create charts or formatted reports when appropriate.\n`;
+  summary += `\nSpawn agents with agentId parameter. Follow workflow order. Synthesize results into a clear response with headings.\n`;
   return summary;
 }
 
@@ -2405,7 +2387,13 @@ async function realtimeAgentLoop(
   }
 
   // Build tool set: builtin tools + protocol tools
-  const agentTools: any[] = [...builtinTools];
+  // Orchestrator agents should DELEGATE work, not do research themselves.
+  // Only give orchestrators file I/O, code execution, and skill tools — remove web_search, fetch_url, etc.
+  const orchestratorOnlyTools = ["write_file", "read_file", "list_files", "run_python", "run_react", "list_skills", "load_skill"];
+  const isOrchRole = agentDef.role === "orchestrator";
+  const agentTools: any[] = isOrchRole
+    ? builtinTools.filter((t: any) => orchestratorOnlyTools.includes(t.function?.name || ""))
+    : [...builtinTools];
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
     agentTools.push(openRouterSearchTool);
   }
@@ -2578,7 +2566,16 @@ async function realtimeAgentLoop(
     systemPrompt += `\nSend tasks to MULTIPLE agents in a SINGLE response for parallel execution. Do NOT use proto_tcp_send or proto_bus_publish to assign tasks — use send_task instead.`;
   }
   agentTools.push(...agentProtoTools);
-  const finalTools = [...agentTools, ...getMcpTools()];
+  // Deduplicate tools by function name (e.g. blackboard tools may come from both proto and P2P paths)
+  const seenToolNames = new Set<string>();
+  const dedupedTools: any[] = [];
+  for (const t of [...agentTools, ...getMcpTools()]) {
+    const name = t.function?.name || "";
+    if (name && seenToolNames.has(name)) continue;
+    if (name) seenToolNames.add(name);
+    dedupedTools.push(t);
+  }
+  const finalTools = dedupedTools;
 
   console.log(`[Realtime:${agentDef.name}] Agent loop started, waiting for tasks...`);
 
@@ -3216,120 +3213,60 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
   // Find the orchestrator agent (role === "orchestrator")
   const orchestrator = config.agents?.find((a: AgentConfig) => a.role === "orchestrator");
 
-  let summary = `\n\nREALTIME AGENT SESSION (${config.system?.name || "Unnamed"}):\n`;
-  summary += `All agents are ALREADY ALIVE and listening for tasks.\n\n`;
+  const mode = config.system?.orchestration_mode || "hierarchical";
+  let summary = `\n\nREALTIME AGENT SESSION (${config.system?.name || "Unnamed"}, mode: ${mode}):\n`;
 
-  const isHybrid = config.system?.orchestration_mode === "hybrid";
-  const isP2P = config.system?.orchestration_mode === "p2p";
-  const isP2POrch = config.system?.orchestration_mode === "p2p_orchestrator";
+  const isP2P = mode === "p2p";
+  const isP2POrch = mode === "p2p_orchestrator";
 
+  // Mode description
   if (isP2P) {
-    const peerAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human");
-    const governance = config.system?.p2p_governance;
-    const mechanism = governance?.consensus_mechanism || "contract_net";
-    summary += `P2P SWARM MODE: All agents are autonomous peers. No agent holds persistent authority.\n`;
-    summary += `Consensus mechanism: ${mechanism}\n`;
-    summary += `Peer agents: ${peerAgents.map(a => `${a.id} ("${a.name}")`).join(", ")}\n\n`;
-    summary += `COORDINATION: Agents use the shared BLACKBOARD to propose tasks, bid with confidence scores, and award work via ${mechanism}.\n`;
-    summary += `You can send tasks to ANY peer agent. The swarm will self-organize via the Contract Net Protocol.\n\n`;
+    const mechanism = config.system?.p2p_governance?.consensus_mechanism || "contract_net";
+    summary += `P2P swarm — autonomous peers self-organize via blackboard (${mechanism}).\n`;
   } else if (isP2POrch && orchestrator) {
-    const bidderAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human" && a.p2p?.bidder === true);
-    const governance = config.system?.p2p_governance;
-    const mechanism = governance?.consensus_mechanism || "contract_net";
-    summary += `P2P ORCHESTRATOR MODE: Combines hierarchical delegation with P2P competitive bidding.\n`;
-    summary += `ORCHESTRATOR: ${orchestrator.id} ("${orchestrator.name}") — controls task routing.\n`;
-    summary += `P2P Bidder agents: ${bidderAgents.map(a => `${a.id} ("${a.name}")`).join(", ") || "(none)"}\n`;
-    summary += `Consensus mechanism: ${mechanism}\n\n`;
-    summary += `You MUST send ALL tasks to the orchestrator agent "${orchestrator.id}" ONLY.\n`;
-    summary += `The orchestrator will decide whether to delegate directly or post to the P2P blackboard for bidding.\n`;
-    summary += `Do NOT send tasks directly to worker or bidder agents — that is the orchestrator's job.\n\n`;
+    const bidders = (config.agents || []).filter((a: AgentConfig) => a.p2p?.bidder === true);
+    summary += `P2P orchestrator — "${orchestrator.id}" delegates directly or via blackboard bidding.\n`;
+    if (bidders.length > 0) summary += `Bidders: ${bidders.map(a => a.id).join(", ")}\n`;
   } else if (orchestrator) {
-    summary += `ORCHESTRATOR AGENT: ${orchestrator.id} ("${orchestrator.name}")\n`;
-    summary += `You MUST send ALL tasks to the orchestrator agent ONLY. The orchestrator will coordinate and delegate to the team.\n`;
-    summary += `Do NOT send tasks directly to worker agents — that is the orchestrator's job.\n`;
-    if (isHybrid) {
-      const meshAgents = (config.agents || []).filter((a: AgentConfig) => a.mesh?.enabled && a.role !== "human");
-      summary += `\nHYBRID MODE: The orchestrator controls task flow via connections. Mesh-enabled agents (${meshAgents.map(a => a.id).join(", ")}) can collaborate freely with each other.\n`;
-      summary += `The orchestrator monitors bus traffic and ensures work completes without infinite loops.\n`;
+    summary += `Orchestrator: ${orchestrator.id} ("${orchestrator.name}")`;
+    if (mode === "hybrid") {
+      const meshIds = (config.agents || []).filter((a: AgentConfig) => a.mesh?.enabled && a.role !== "human").map(a => a.id);
+      summary += ` | Hybrid: mesh agents (${meshIds.join(", ")}) collaborate freely`;
     }
     summary += `\n`;
   }
 
-  // Note human node
-  const humanNode = config.agents?.find((a: AgentConfig) => a.role === "human");
-  if (humanNode) {
-    summary += `HUMAN NODE: "${humanNode.id}" — the user interacts via this entry point.\n`;
-    summary += `Agents connected to the human node can receive tasks directly from the user and send results back.\n\n`;
-  }
-
-  summary += `Agent team:\n`;
+  // Agent list (compact)
+  summary += `\nAgents:\n`;
   for (const a of config.agents || []) {
-    if (a.role === "human") {
-      summary += `  - ${a.id} ("${a.name}"): role=human (user entry point)\n`;
-      continue;
-    }
-    const flags = [
-      a.bus?.enabled ? "bus" : "",
-      a.mesh?.enabled ? "mesh" : "",
-    ].filter(Boolean).join(", ");
-    summary += `  - ${a.id} ("${a.name}"): role=${a.role}${flags ? ` [${flags}]` : ""}, persona=${a.persona || "N/A"}\n`;
-    if (a.responsibilities && a.responsibilities.length > 0) {
-      summary += `    responsibilities: ${a.responsibilities.join("; ")}\n`;
-    }
+    const flags = [a.bus?.enabled && "bus", a.mesh?.enabled && "mesh"].filter(Boolean).join(",");
+    summary += `- ${a.id} ("${a.name}"): ${a.role}${flags ? ` [${flags}]` : ""}${a.persona ? ` — ${a.persona}` : ""}\n`;
   }
 
-  if (config.workflow?.sequence && config.workflow.sequence.length > 0) {
-    summary += `\nWORKFLOW SEQUENCE:\n`;
-    for (const step of config.workflow.sequence) {
-      const agent = config.agents?.find((a: AgentConfig) => a.id === step.agent);
-      const agentName = agent ? `${agent.name} (${agent.role})` : step.agent;
-      const outputsTo = step.outputs_to ? ` → outputs to: ${step.outputs_to.join(", ")}` : "";
-      summary += `  Step ${step.step}: ${step.agent} [${agentName}] — ${step.action}${outputsTo}\n`;
-    }
-  }
-
+  // Connections
   if (config.connections && config.connections.length > 0) {
-    summary += `\nCONNECTIONS:\n`;
-    for (const c of config.connections) {
-      summary += `  ${c.from} → ${c.to} (${c.protocol})\n`;
-    }
+    summary += `\nConnections: ${config.connections.map(c => `${c.from}→${c.to}(${c.protocol})`).join(", ")}\n`;
   }
 
-  // Collect downstream agents for the orchestrator reference
-  const orchestratorStep = orchestrator ? config.workflow?.sequence?.find((s: any) => s.agent === orchestrator.id) : null;
-  const orchDownstream = orchestratorStep?.outputs_to || [];
+  // Workflow
+  if (config.workflow?.sequence && config.workflow.sequence.length > 0) {
+    summary += `\nWorkflow: ${config.workflow.sequence.map((s: any) => {
+      const out = s.outputs_to ? `→${s.outputs_to.join(",")}` : "";
+      return `${s.step}.${s.agent}: ${s.action}${out}`;
+    }).join(" | ")}\n`;
+  }
 
-  summary += `\nINSTRUCTIONS (CRITICAL — YOU MUST FOLLOW):\n`;
+  // Delegation instructions (compact)
+  summary += `\nDelegation: `;
   if (isP2P) {
     const peerIds = (config.agents || []).filter((a: AgentConfig) => a.role !== "human").map(a => a.id);
-    summary += `- P2P MODE: Send the user task to ONE or MORE peer agents for parallel execution\n`;
-    summary += `- Available peers: ${peerIds.join(", ")}\n`;
-    summary += `- Use send_task({to: "peer_id", task: "..."}) to assign work directly, or let agents self-organize via the blackboard\n`;
-    summary += `- Use wait_result({from: "peer_id"}) to collect results\n`;
-    summary += `- Agents will use Contract Net Protocol (propose → bid → award → execute → complete) on the shared blackboard\n`;
-    summary += `- Do NOT do research yourself — delegate ALL work to the peer agents.\n`;
+    summary += `Send tasks to peers (${peerIds.join(", ")}) via send_task/wait_result. Agents self-organize via blackboard.\n`;
   } else if (orchestrator) {
-    summary += `- STEP 1: Send the FULL user task to the orchestrator: send_task({to: "${orchestrator.id}", task: "provide the complete user request with all context and details"})\n`;
-    summary += `- STEP 2: Wait for the orchestrator's result: wait_result({from: "${orchestrator.id}"})\n`;
-    summary += `- STEP 3: Present the results to the user. Optionally use run_python to format into charts/reports.\n`;
-    summary += `- The orchestrator ("${orchestrator.name}") will break down the task, delegate to ${orchDownstream.length > 0 ? orchDownstream.join(", ") : "worker agents"}, and synthesize results.\n`;
-    summary += `- Do NOT do research, web searches, or data gathering yourself — the agent team handles ALL of that.\n`;
-    summary += `- Do NOT send tasks to other agents directly — ONLY send to "${orchestrator.id}". The orchestrator manages the team.\n`;
+    summary += `Send ALL tasks to "${orchestrator.id}" only via send_task → wait_result. Do not bypass the orchestrator.\n`;
   } else {
-    summary += `- Use send_task({to: "agent_id", task: "..."}) to assign work to agents\n`;
-    summary += `- Use wait_result({from: "agent_id"}) to collect the result\n`;
-    summary += `- Send tasks to MULTIPLE agents in a single response for parallel execution\n`;
-    summary += `- Do NOT do research yourself — delegate ALL work to the agent team.\n`;
+    summary += `Use send_task/wait_result to assign work. Send to multiple agents for parallel execution.\n`;
   }
-  summary += `- Use check_agents() to see agent statuses\n`;
-  summary += `\nPRESENTATION (CRITICAL — HOW TO RESPOND TO THE USER):\n`;
-  summary += `- After collecting agent results, you MUST synthesize them into a clear, human-readable response for the user.\n`;
-  summary += `- Do NOT just dump raw agent output. Summarize, organize, and present the findings in a well-structured format.\n`;
-  summary += `- Use headings, bullet points, and clear language. Highlight key findings and conclusions.\n`;
-  summary += `- If agents generated output files (charts, reports, data), mention them explicitly so the user knows to check the output panel.\n`;
-  summary += `- If the task involved research, present the synthesized knowledge — not just a list of what each agent found.\n`;
-  summary += `- If you receive partial or raw data, use run_python to create visualizations, tables, or formatted reports when appropriate.\n`;
-  summary += `- Your job is to be the interface between the agent team and the human — make the results useful and actionable.\n`;
+  summary += `Synthesize agent results into a clear response with headings. Mention any generated files. Use run_python for charts/reports when appropriate.\n`;
   return summary;
 }
 

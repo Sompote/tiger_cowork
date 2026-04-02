@@ -225,6 +225,7 @@ export default function SettingsPage() {
                     zai: { url: "https://api.z.ai/api/coding/paas/v4", model: "GLM-5.1" },
                     anthropic_claude_code: { url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514" },
                     minimax: { url: "https://api.minimax.io/v1", model: "MiniMax-M2.7" },
+                    google_ai_studio: { url: "https://generativelanguage.googleapis.com/v1beta/openai/", model: "gemini-3-flash-preview" },
                   };
                   // Check custom providers for defaults
                   const customProviders: Array<{ id: string; name: string; url: string; model: string }> = settings.customProviders || [];
@@ -241,13 +242,14 @@ export default function SettingsPage() {
                 <option value="zai">zAi</option>
                 <option value="anthropic_claude_code">Anthropic (Claude)</option>
                 <option value="minimax">MiniMax</option>
+                <option value="google_ai_studio">Google AI Studio</option>
                 {(settings.customProviders || []).map((p: any) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </select>
               <button className="btn btn-secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowAddProvider(true)}>+ Add</button>
               {/* Show remove button only for custom providers */}
-              {!(["openrouter", "zai", "anthropic_claude_code", "minimax"].includes(settings.aiProvider || "openrouter")) && (
+              {!(["openrouter", "zai", "anthropic_claude_code", "minimax", "google_ai_studio"].includes(settings.aiProvider || "openrouter")) && (
                 <button className="btn btn-danger" style={{ whiteSpace: "nowrap" }} onClick={() => {
                   if (!confirm(`Remove provider "${(settings.customProviders || []).find((p: any) => p.id === settings.aiProvider)?.name || settings.aiProvider}"?`)) return;
                   const customProviders = (settings.customProviders || []).filter((p: any) => p.id !== settings.aiProvider);
