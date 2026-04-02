@@ -186,7 +186,6 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this exact st
       "consensus_mechanism": "contract_net",
       "bid_timeout_seconds": 30,
       "min_confidence_threshold": 0.5,
-      "tiebreaker": "agent_id_hash",
       "audit_log": true
     }` : ""}
   },

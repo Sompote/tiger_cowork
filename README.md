@@ -33,11 +33,16 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 ## What's New in v0.4.3 — P2P Swarm Governance
 
 - **P2P Swarm orchestration mode** — New `p2p` orchestration topology where autonomous peer agents self-organize via a shared blackboard. No persistent authority — agents propose tasks, bid with confidence scores, and the best-suited agent wins the work through Contract Net Protocol.
-- **Blackboard protocol** — Fourth communication protocol alongside TCP, Bus, and Queue. Session-scoped shared workspace with proposals, bids, votes, results, and an append-only audit log for full traceability.
-- **Four consensus mechanisms** — Configure how P2P agents make group decisions: Contract Net Protocol (competitive bidding), Majority Voting, Weighted Voting (reputation-based), or Blackboard (self-select).
-- **Peer agent role** — New `peer` role for P2P swarm agents with per-agent `confidence_domains` (expertise areas) and `reputation_score` (0-1 weight for voting). Shown with amber color and PEER badge in the editor.
-- **P2P Governance panel** — Visual configuration in the Agent Editor for consensus mechanism, tiebreaker strategy, bid timeout, minimum confidence threshold, max retries, and audit log toggle.
-- **Seven blackboard tools** — `bb_propose`, `bb_bid`, `bb_award`, `bb_vote`, `bb_complete`, `bb_read`, `bb_log` — injected into peer agents' toolbox automatically.
+- **P2P Orchestrator mode** — New `p2p_orchestrator` topology combining hierarchical control with P2P bidding. The orchestrator can delegate directly to connected agents OR post tasks to the blackboard for bidder agents to compete on. Bidder agents without direct connections are only reachable through the bidding workflow.
+- **Combined scoring (50/50)** — When awarding tasks, the orchestrator reviews bidder profiles and provides its own score for each bidder. Final winner = 50% bidder's self-reported confidence + 50% orchestrator's assessment score. The orchestrator sees each bidder's persona, expertise domains, responsibilities, and reputation when making its judgment.
+- **Blackboard protocol** — Fourth communication protocol alongside TCP, Bus, and Queue. Session-scoped shared workspace with proposals, bids, results, and an append-only audit log for full traceability.
+- **Active bidder wake-up** — When a task is proposed on the blackboard, bidder agents are automatically woken up and asked to bid. No polling required — the system sends each bidder a task notification via the bus.
+- **Bidder access control** — In `p2p_orchestrator` mode, the orchestrator cannot bypass bidding by sending tasks directly to bidder-only agents. The system enforces: propose → bid → award → send_task.
+- **Peer agent role** — New `peer` role for P2P swarm agents with per-agent `confidence_domains` (expertise areas) and `reputation_score` (0-1). Shown with amber color and PEER badge in the editor.
+- **BIDDER badge** — Agents marked as P2P bidders show a cyan BIDDER badge on their node in the editor (p2p_orchestrator mode).
+- **Mesh-enabled bidders** — Bidder agents with `mesh.enabled: true` can delegate sub-tasks to other agents after winning work, enabling collaborative task execution.
+- **P2P Governance panel** — Visual configuration in the Agent Editor for bid timeout, minimum confidence threshold, max retries, and audit log toggle.
+- **Six blackboard tools** — `bb_propose`, `bb_bid`, `bb_award`, `bb_complete`, `bb_read`, `bb_log` — injected into peer/bidder agents' toolbox automatically.
 - **Auto Architecture support** — The AI architect can now generate complete P2P swarm configurations from natural language descriptions.
 
 ### Previous: v0.4.2 — MiniMax Built-in Provider
@@ -64,7 +69,7 @@ A self-hosted AI workspace that brings chat, code execution, **fully parallel mu
 
 - **AI Chat with Tools** — 16 built-in tools (web search, Python, React, shell, files, skills, sub-agents) with real-time streaming
 - **Mix Any Model per Agent** — Each agent in your architecture can use a different AI provider or model. Assign OpenAI-compatible API models (GPT, Gemini, Claude API, LLaMA via Ollama, etc.) to some agents, and use **Claude Code** or **Codex CLI** (OAuth, no API key) as autonomous coding agents for others — all in the same team
-- **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Six orchestration topologies (hierarchical, flat, mesh, hybrid, pipeline, P2P swarm), four communication protocols (TCP, bus, queue, blackboard), and P2P governance with Contract Net Protocol, consensus voting, and audit logging
+- **Parallel Multi-Agent System** — Visual editor for designing agent teams. Three modes: Auto, Spawn Agent, and Realtime. All agents work in parallel with per-task context isolation. Seven orchestration topologies (hierarchical, flat, mesh, hybrid, pipeline, P2P swarm, P2P orchestrator), four communication protocols (TCP, bus, queue, blackboard), and P2P governance with Contract Net Protocol, combined 50/50 scoring, and audit logging
 - **Long-Running Session Stability** — Three layers of protection for extended conversations:
   - **Sliding Window Compression** — Periodically compresses older messages into concise summaries via LLM, preserving key decisions and findings while freeing context space
   - **Smart Tool Result Compression** — Intelligently compresses tool outputs by type (first/last lines for code output, titles+URLs for search, structure preview for fetched pages) instead of raw truncation
@@ -93,9 +98,9 @@ Agents don't query a registry at runtime. Instead, the server loads your YAML co
 | **TCP** | Point-to-point | Ephemeral bidirectional channels between agent pairs via localhost sockets. Newline-delimited JSON. | Direct messaging between two specific agents |
 | **Bus** | Pub/Sub broadcast | In-process EventEmitter with topic-based subscriptions and 500-message history per session. | Status updates, findings broadcast to all listeners |
 | **Queue** | FIFO ordered | Per-channel message queue (max 200 messages). | Sequential task delivery, ordered handoffs |
-| **Blackboard** | Shared workspace | Session-scoped task board with proposals, bids, votes, and an append-only audit log (P2P mode). | P2P task negotiation, consensus, Contract Net Protocol |
+| **Blackboard** | Shared workspace | Session-scoped task board with proposals, bids, combined scoring, and an append-only audit log (P2P mode). | P2P task negotiation, Contract Net Protocol with 50/50 scoring |
 
-Agents access these via tool calls: `proto_tcp_send`/`proto_tcp_read`, `proto_bus_publish`/`proto_bus_history`, `proto_queue_send`/`proto_queue_receive`, and `bb_propose`/`bb_bid`/`bb_award`/`bb_vote`/`bb_complete`/`bb_read`/`bb_log` (P2P blackboard).
+Agents access these via tool calls: `proto_tcp_send`/`proto_tcp_read`, `proto_bus_publish`/`proto_bus_history`, `proto_queue_send`/`proto_queue_receive`, and `bb_propose`/`bb_bid`/`bb_award`/`bb_complete`/`bb_read`/`bb_log` (P2P blackboard).
 
 ### Task Delegation (send_task / wait_result)
 
@@ -118,7 +123,7 @@ Agent A                          Agent B
 
 Agents can send tasks to **multiple agents in a single response** for parallel execution.
 
-### Six Orchestration Topologies
+### Seven Orchestration Topologies
 
 Configure via `system.orchestration_mode` in your YAML:
 
@@ -130,14 +135,15 @@ Configure via `system.orchestration_mode` in your YAML:
 | **Mesh** | All agents can send tasks to any other agent. Fully connected. | Every agent gets `send_task`/`wait_result` |
 | **Pipeline** | Sequential chain: agent_1 → agent_2 → agent_3. | Each agent passes output to the next |
 | **P2P Swarm** | Autonomous peers self-organize via shared blackboard and Contract Net Protocol. No persistent authority. | All peers get blackboard tools + `send_task`/`wait_result` |
+| **P2P Orchestrator** | Orchestrator delegates directly to connected agents OR posts tasks for bidder agents to compete on via blackboard. Combined 50/50 scoring. | Orchestrator gets both `send_task` and blackboard tools; bidders get blackboard tools |
 
 ```
-More Control                                                   More Autonomy
-    |                                                               |
-    Hierarchical → Pipeline → Flat → Hybrid → Mesh → P2P Swarm
-    |                                                               |
-Single boss       Chain      Direct    Mixed    Free    Self-organizing
-controls all      order      assign    mode     talk    with consensus
+More Control                                                              More Autonomy
+    |                                                                          |
+    Hierarchical → Pipeline → Flat → Hybrid → Mesh → P2P Orchestrator → P2P Swarm
+    |                                                                          |
+Single boss       Chain      Direct    Mixed    Free    Boss + bidding    Self-organizing
+controls all      order      assign    mode     talk    with scoring      with consensus
 ```
 
 ### Mesh Networking — Peer-to-Peer Collaboration
@@ -175,13 +181,13 @@ Orchestrator → send_task → Researcher 1 ("investigate topic X")
 
 ### P2P Swarm — Governed Self-Organization
 
-P2P Swarm is the most autonomous orchestration mode. Unlike mesh (which is free-for-all), P2P adds **governance** — agents coordinate through a shared blackboard using the Contract Net Protocol, consensus voting, and an immutable audit log.
+P2P Swarm is the most autonomous orchestration mode. Unlike mesh (which is free-for-all), P2P adds **governance** — agents coordinate through a shared blackboard using the Contract Net Protocol with combined 50/50 scoring and an immutable audit log. For teams that need a central coordinator, use **P2P Orchestrator** mode instead — the orchestrator delegates directly to connected agents and uses blackboard bidding for the rest.
 
 **Key concepts:**
 - **No persistent authority** — all agents are autonomous peers with role `peer`
-- **Shared blackboard** — a workspace where agents post tasks, bids, votes, and results
-- **Contract Net Protocol (CNP)** — structured bidding: propose → bid → award → execute → complete
-- **Consensus mechanisms** — four strategies for group decision-making
+- **Shared blackboard** — a workspace where agents post tasks, bids, and results
+- **Contract Net Protocol (CNP)** — structured bidding: propose → bid → award (50/50 scoring) → execute → complete
+- **Combined scoring** — winner determined by 50% bidder confidence + 50% orchestrator assessment
 - **Audit log** — append-only event trail for full auditability
 
 **How it works:**
@@ -203,40 +209,35 @@ P2P Swarm is the most autonomous orchestration mode. Unlike mesh (which is free-
 **Contract Net Protocol flow:**
 
 ```
-1. PROPOSE  → Agent posts task on blackboard (bb_propose)
-2. BID      → Capable peers submit confidence scores (bb_bid)
-3. AWARD    → Best bid wins the contract (bb_award)
-4. EXECUTE  → Winner performs the task using available tools
-5. COMPLETE → Winner reports result (bb_complete)
+1. PROPOSE  → Agent posts task on blackboard (bb_propose) — bidders auto-notified
+2. BID      → Bidders submit confidence scores (bb_bid)
+3. REVIEW   → Orchestrator reads bids + bidder profiles via bb_read
+4. SCORE    → Orchestrator provides its own score for each bidder
+5. AWARD    → Winner = 50% bidder confidence + 50% orchestrator score (bb_award)
+6. SEND     → Orchestrator sends actual task to winner (send_task)
+7. EXECUTE  → Winner performs the task using available tools
+8. COMPLETE → Winner reports result (bb_complete)
 ```
 
-**Four consensus mechanisms:**
+**Combined scoring example:**
 
-| Mechanism | How It Works | Best For |
-|---|---|---|
-| **Contract Net** (default) | Agents bid with confidence scores; highest score wins | Task allocation with diverse specialties |
-| **Majority Voting** | Each agent votes approve/reject; simple majority wins | Validating plans or results |
-| **Weighted Voting** | Votes weighted by agent reputation (0-1); weighted majority wins | Teams with domain experts |
-| **Blackboard** | Agents self-select tasks from shared workspace; no formal bidding | Loosely-coupled, async work |
+| Bidder | Self Confidence | Orchestrator Score | Reason | Combined (50/50) |
+|---|:-:|:-:|---|:-:|
+| data_analyst | 0.85 | 0.95 | "Data specialist, perfect fit" | **0.900** |
+| web_researcher | 0.92 | 0.70 | "Good but not data-focused" | 0.810 |
+| report_writer | 0.78 | 0.60 | "Writing focus, not analysis" | 0.690 |
 
-**Three tiebreakers** (when bids or votes are equal):
+The orchestrator reviews each bidder's persona, expertise domains, responsibilities, and reputation — then provides an informed score. This prevents bidders from gaming the system with inflated self-confidence.
 
-| Tiebreaker | Behavior |
-|---|---|
-| `agent_id_hash` (default) | Deterministic — hash of agent ID breaks tie consistently |
-| `random` | Random selection — fair over many rounds |
-| `first_bid` | Earliest bidder wins — rewards responsiveness |
-
-**P2P blackboard tools** (available to all peer agents):
+**P2P blackboard tools** (available to all peer/bidder agents):
 
 | Tool | Purpose |
 |---|---|
-| `bb_propose` | Post a new task on the blackboard for peers to bid on |
+| `bb_propose` | Post a new task on the blackboard — bidders are auto-notified and asked to bid |
 | `bb_bid` | Submit a bid with confidence score (0-1) and reasoning |
-| `bb_award` | Award a task to the best bidder (or auto-select highest confidence) |
-| `bb_vote` | Cast approve/reject/abstain vote for consensus decisions |
+| `bb_award` | Award task using combined scoring (orchestrator_scores + bidder confidence) |
 | `bb_complete` | Mark a task as completed with result |
-| `bb_read` | Read the blackboard — all tasks, bids, statuses |
+| `bb_read` | Read the blackboard — tasks, bids with bidder profiles, statuses |
 | `bb_log` | Read the audit log — full event trail for auditability |
 
 **Example YAML configuration:**
@@ -249,7 +250,6 @@ system:
     consensus_mechanism: contract_net
     bid_timeout_seconds: 30
     min_confidence_threshold: 0.5
-    tiebreaker: agent_id_hash
     audit_log: true
 
 agents:
@@ -310,14 +310,13 @@ agents:
 
 **P2P Swarm vs Mesh:**
 
-| | Mesh | P2P Swarm |
-|---|---|---|
-| Connections | None (free-for-all) | None (blackboard) |
-| Coordination | Ad-hoc direct messaging | Governed protocol (CNP) |
-| Task allocation | Agent decides who to ask | Competitive bidding on confidence |
-| Livelock prevention | None | Tiebreakers + bid timeout |
-| Auditability | Bus history only | Full audit log (proposals, bids, votes, awards) |
-| Agent role | Any (worker, researcher, etc.) | `peer` |
+| | Mesh | P2P Swarm | P2P Orchestrator |
+|---|---|---|---|
+| Connections | None (free-for-all) | None (blackboard) | Orchestrator → direct agents + blackboard for bidders |
+| Coordination | Ad-hoc direct messaging | Governed protocol (CNP) | Hybrid: direct delegation + CNP bidding |
+| Task allocation | Agent decides who to ask | Competitive bidding | 50/50 combined scoring (bidder + orchestrator) |
+| Auditability | Bus history only | Full audit log | Full audit log with scoring details |
+| Agent role | Any (worker, researcher, etc.) | `peer` | `orchestrator` + `bidder` agents |
 
 P2P Swarm is essentially **Mesh with governance**.
 
@@ -358,6 +357,7 @@ connections:
 | Agent has `mesh.enabled: true` | Yes — to any peer |
 | Global `orchestration_mode: mesh` | Yes — to any peer |
 | Global `orchestration_mode: p2p` | Yes — to any peer (+ blackboard tools) |
+| Global `orchestration_mode: p2p_orchestrator` + orchestrator role | Yes — to connected agents directly; bidder-only agents require blackboard bidding first |
 | Agent has explicit `outputs_to` or `connections` to target | Yes — to listed targets only |
 | Hybrid orchestrator | Yes — to connected agents |
 | None of the above | No — `send_task` tool is not available |
@@ -429,6 +429,7 @@ agents:
 - **Use `hybrid` mode** when you want structured orchestration but also want specialist agents to collaborate freely — set `mesh.enabled: true` on the collaborating agents.
 - **Use `mesh` mode** for flat, fully connected teams where any agent can ask any other for help.
 - **Use `p2p` mode** when agents have diverse specialties and you want them to self-organize — tasks go to whoever is most qualified via competitive bidding. The blackboard provides structure that mesh lacks.
+- **Use `p2p_orchestrator` mode** when you want a central coordinator but also competitive task allocation — the orchestrator delegates directly to connected agents and uses blackboard bidding (with 50/50 scoring) for bidder agents it has no direct connection to.
 - **Add `mesh.enabled: true`** to any agent that might need to request help mid-task (e.g., a code engineer that might need research data, or a quality checker that might need clarification from an engineer).
 - **Bus topics** are useful for monitoring — the orchestrator can watch `proto_bus_history` to see what all agents are doing without blocking on `wait_result`.
 - **P2P confidence_domains** — set distinct expertise domains per peer agent so they bid accurately. Overlapping domains mean multiple agents compete, which improves task quality through selection pressure.

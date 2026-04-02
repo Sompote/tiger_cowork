@@ -260,6 +260,14 @@
   left: -8px;
 }
 
+.agent-node-bidder-badge {
+  background: #00bcd4;
+  top: auto;
+  bottom: -8px;
+  right: auto;
+  left: -8px;
+}
+
 /* Mesh mode banner */
 .mesh-mode-banner {
   position: absolute;

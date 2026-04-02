@@ -11,9 +11,9 @@ import {
   busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busLoadHistory,
   queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
   getProtocolStatus, cleanupSessionProtocols,
-  blackboardPropose, blackboardBid, blackboardAward, blackboardVote,
-  blackboardStartTask, blackboardCompleteTask, blackboardGetTask, blackboardGetTasks,
-  blackboardGetConsensus, blackboardGetLog,
+  blackboardPropose, blackboardBid, blackboardAward,
+  blackboardStartTask, blackboardCompleteTask, blackboardGet, blackboardGetTask, blackboardGetTasks,
+  blackboardGetLog,
 } from "./protocols";
 
 
@@ -373,30 +373,27 @@ const blackboardTools = [
     type: "function" as const,
     function: {
       name: "bb_award",
-      description: "Award a task to the best bidder. If no agent is specified, the highest-confidence bidder wins automatically.",
+      description: "Award a task to the best bidder. Review bidder profiles from bb_read first, then provide your orchestrator_scores to evaluate each bidder. Final score = 50% bidder confidence + 50% your score. Highest combined score wins. You can also use award_to to override.",
       parameters: {
         type: "object",
         properties: {
           task_id: { type: "string", description: "Task ID to award" },
-          award_to: { type: "string", description: "Optional: specific agent ID to award to" },
+          award_to: { type: "string", description: "Optional: specific agent ID to award to (overrides scoring)" },
+          orchestrator_scores: {
+            type: "array",
+            description: "Your assessment scores for each bidder based on their profile, expertise, and fit for this task. Each entry: {agent_id, score (0-1), reason}",
+            items: {
+              type: "object",
+              properties: {
+                agent_id: { type: "string", description: "Bidder agent ID" },
+                score: { type: "number", description: "Your score 0-1 for how well this bidder fits the task" },
+                reason: { type: "string", description: "Brief reason for your score" },
+              },
+              required: ["agent_id", "score"],
+            },
+          },
         },
         required: ["task_id"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "bb_vote",
-      description: "Cast a vote on a task proposal or result (approve/reject/abstain). Used for consensus-based decisions.",
-      parameters: {
-        type: "object",
-        properties: {
-          task_id: { type: "string", description: "Task ID to vote on" },
-          vote: { type: "string", enum: ["approve", "reject", "abstain"], description: "Your vote" },
-          weight: { type: "number", description: "Optional vote weight (default 1)" },
-        },
-        required: ["task_id", "vote"],
       },
     },
   },
@@ -488,9 +485,10 @@ export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connecti
     tools.push(...tcpTools, ...queueTools);
   }
 
-  // P2P: if agent is a peer or system is in p2p mode, add blackboard tools
+  // P2P: if agent is a peer or system is in p2p/p2p_orchestrator mode, add blackboard tools
   const isP2P = systemConfig?.system?.orchestration_mode === "p2p";
-  if (isP2P || agentDef.role === "peer") {
+  const isP2POrch = systemConfig?.system?.orchestration_mode === "p2p_orchestrator";
+  if (isP2P || isP2POrch || agentDef.role === "peer") {
     tools.push(...blackboardTools);
   }
 
@@ -1264,25 +1262,25 @@ interface AgentConfig {
     enabled: boolean;
   };
   p2p?: {
+    bidder?: boolean;                // whether this agent can bid on blackboard tasks
     confidence_domains?: string[];   // domains this agent is confident in
     reputation_score?: number;       // 0-1, initial reputation
   };
 }
 
 interface P2PGovernanceConfig {
-  consensus_mechanism: "majority_voting" | "weighted_voting" | "contract_net" | "blackboard";
+  consensus_mechanism: "contract_net";
   bid_timeout_seconds?: number;      // how long to wait for bids (default 30)
   vote_timeout_seconds?: number;     // how long to wait for votes (default 30)
   min_confidence_threshold?: number; // minimum confidence to accept a bid (0-1)
   max_task_retries?: number;         // max retries if task fails (default 2)
-  tiebreaker?: "agent_id_hash" | "random" | "first_bid";
   audit_log?: boolean;               // enable append-only event log (default true)
 }
 
 interface AgentSystemConfig {
   system: {
     name: string;
-    orchestration_mode: string;  // hierarchical, flat, mesh, hybrid, pipeline, p2p
+    orchestration_mode: string;  // hierarchical, flat, mesh, hybrid, pipeline, p2p, p2p_orchestrator
     p2p_governance?: P2PGovernanceConfig;
   };
   agents: AgentConfig[];
@@ -1700,6 +1698,7 @@ function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemCo
   const downstream = [...new Set([...outputsTo, ...connTargets])];
 
   const isP2P = systemConfig.system?.orchestration_mode === "p2p";
+  const isP2POrchestrator = systemConfig.system?.orchestration_mode === "p2p_orchestrator";
 
   if (isP2P) {
     const allPeers = (systemConfig.agents || [])
@@ -1720,6 +1719,57 @@ function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemCo
     prompt += `- Yield tasks to peers with higher confidence\n`;
     prompt += `- Complete awarded tasks promptly and report results via bb_complete\n`;
     prompt += `- You can also use spawn_subagent to directly delegate to any peer\n`;
+  } else if (isP2POrchestrator && agentDef.role === "orchestrator") {
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    const bidderAgents = (systemConfig.agents || [])
+      .filter((a: AgentConfig) => a.id !== agentDef.id && a.role !== "human" && a.p2p?.bidder === true)
+      .map((a: AgentConfig) => `  - ${a.id} ("${a.name}", role: ${a.role})`)
+      .join("\n");
+    prompt += `P2P ORCHESTRATOR MODE:\n`;
+    prompt += `You control the team via two strategies: direct delegation and P2P blackboard bidding.\n`;
+    prompt += `Consensus mechanism: ${mechanism}\n`;
+    prompt += `\nDirect downstream agents:\n${downstream.map(id => {
+      const a = systemConfig.agents?.find((ag: AgentConfig) => ag.id === id);
+      return a ? `  - ${a.id} ("${a.name}", role: ${a.role})` : `  - ${id}`;
+    }).join("\n") || "  (none)"}\n`;
+    prompt += `\nP2P Bidder agents:\n${bidderAgents || "  (none)"}\n`;
+    prompt += `\nP2P BIDDING WORKFLOW:\n`;
+    prompt += `  1. bb_propose("task description") — post the job on the blackboard (bidders are notified via bus)\n`;
+    prompt += `  2. bb_read(task_id) — check for incoming bids\n`;
+    prompt += `  3. bb_award(task_id, orchestrator_scores=[...]) — review bids via bb_read (includes bidder profiles). Provide YOUR score (0-1) for each bidder. Winner = 50% bidder confidence + 50% your score.\n`;
+    prompt += `  4. spawn_subagent({agentId: "winner_id", task: "..."}) — SEND the task to the winner so they actually execute it\n`;
+    prompt += `  5. Collect the result from spawn_subagent, then bb_complete if needed\n`;
+    prompt += `\nRULES:\n- Use spawn_subagent for direct delegation to connected agents\n`;
+    prompt += `- Use the P2P bidding workflow above when the best agent isn't clear\n`;
+    prompt += `- IMPORTANT: After bb_award, you MUST spawn_subagent to the winner — the award alone does NOT send the task\n`;
+    prompt += `- Mix both strategies as needed for optimal task routing\n`;
+  } else if (isP2POrchestrator && agentDef.p2p?.bidder === true) {
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    prompt += `P2P ORCHESTRATOR MODE — BIDDER AGENT:\n`;
+    prompt += `You receive tasks directly from the orchestrator and can bid on blackboard tasks.\n`;
+    prompt += `Consensus mechanism: ${mechanism}\n`;
+    if (agentDef.p2p?.confidence_domains?.length) {
+      prompt += `Your expertise: ${agentDef.p2p.confidence_domains.join(", ")}\n`;
+    }
+    // Mesh-enabled bidder can delegate to other agents
+    if (agentDef.mesh?.enabled === true) {
+      const meshTargets = (systemConfig.agents || [])
+        .filter((a: AgentConfig) => a.id !== agentDef.id && a.role !== "human")
+        .map((a: AgentConfig) => `  - ${a.id} ("${a.name}", role: ${a.role})`)
+        .join("\n");
+      prompt += `\nMESH ENABLED — You can delegate sub-tasks to any agent using spawn_subagent:\n${meshTargets || "  (none)"}\n`;
+      prompt += `Use this when a task requires expertise outside your domains — ask other agents for help.\n`;
+    }
+    prompt += `\nRULES:\n- Use blackboard tools (bb_read, bb_bid, bb_complete) to participate in P2P bidding\n`;
+    prompt += `- Bid only on tasks matching your expertise with honest confidence scores\n`;
+    prompt += `- Yield tasks to peers with higher confidence\n`;
+    prompt += `- Complete awarded tasks promptly and report results via bb_complete\n`;
+    prompt += `- Handle direct tasks from the orchestrator normally\n`;
+    if (agentDef.mesh?.enabled === true) {
+      prompt += `- When you need help, use spawn_subagent to delegate sub-tasks to other agents\n`;
+    }
   } else if (downstream.length > 0) {
     const downstreamInfo = downstream.map(id => {
       const a = systemConfig.agents?.find((ag: AgentConfig) => ag.id === id);
@@ -2364,6 +2414,7 @@ async function realtimeAgentLoop(
   const isGlobalMesh = orchMode === "mesh";
   const isHybrid = orchMode === "hybrid";
   const isP2P = orchMode === "p2p";
+  const isP2POrchestrator = orchMode === "p2p_orchestrator";
   const agentMeshEnabled = agentDef.mesh?.enabled === true;
   const hasMesh = isGlobalMesh || agentMeshEnabled;
 
@@ -2395,15 +2446,14 @@ async function realtimeAgentLoop(
       systemPrompt += `\nYour expertise domains: ${agentDef.p2p.confidence_domains.join(", ")}`;
     }
     systemPrompt += `\n\nCOORDINATION PROTOCOL (Contract Net Protocol):`;
-    systemPrompt += `\n  1. PROPOSE: When you identify work, use bb_propose to post it on the shared blackboard`;
-    systemPrompt += `\n  2. BID: When you see open tasks matching your capabilities, use bb_bid with your confidence score`;
-    systemPrompt += `\n  3. AWARD: Tasks are awarded to the highest-confidence bidder via bb_award`;
-    systemPrompt += `\n  4. EXECUTE: The winning agent executes the task using available tools`;
-    systemPrompt += `\n  5. COMPLETE: Report results via bb_complete`;
+    systemPrompt += `\n  1. PROPOSE: Use bb_propose to post work on the blackboard (all peers are notified via bus topic "bb:new_task")`;
+    systemPrompt += `\n  2. BID: When you see a "bb:new_task" bus message or open tasks via bb_read, use bb_bid with your confidence score`;
+    systemPrompt += `\n  3. AWARD: The proposer calls bb_award — highest-confidence bidder wins`;
+    systemPrompt += `\n  4. SEND: After awarding, the proposer MUST send_task to the winner to actually deliver the work`;
+    systemPrompt += `\n  5. EXECUTE: The winning agent executes the task using available tools`;
+    systemPrompt += `\n  6. COMPLETE: Report results via bb_complete AND reply to the proposer`;
     systemPrompt += `\n\nBLACKBOARD: Use bb_read to check for open tasks. Use bb_log to review the audit trail.`;
-    if (mechanism === "majority_voting" || mechanism === "weighted_voting") {
-      systemPrompt += `\nVOTING: Use bb_vote to approve/reject proposals. Decisions require majority approval.`;
-    }
+    systemPrompt += `\nBUS NOTIFICATIONS: Watch for "bb:new_task" (new proposals) and "bb:task_awarded" (award results) on the bus.`;
     systemPrompt += `\nYou can also use send_task for direct peer-to-peer delegation when you already know who should handle something.`;
     systemPrompt += `\n\nRULES:`;
     systemPrompt += `\n  - Only bid on tasks you are confident you can complete well`;
@@ -2411,6 +2461,83 @@ async function realtimeAgentLoop(
     systemPrompt += `\n  - Avoid livelock: if you've been negotiating for too long, accept the current best bid`;
     systemPrompt += `\n  - Complete your awarded tasks promptly and report results`;
     systemPrompt += `\n  - Do NOT loop indefinitely — complete your part and report back`;
+  } else if (isP2POrchestrator && agentDef.role === "orchestrator") {
+    // P2P Orchestrator: controls hierarchical flow + can post jobs to blackboard for P2P bidding
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    agentTools.push(...blackboardTools);
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    const bidderAgents = (systemConfig.agents || [])
+      .filter((a: AgentConfig) => a.id !== agentId && a.role !== "human" && a.p2p?.bidder === true)
+      .map((a: AgentConfig) => a.id);
+    // Separate bidders that are NOT in downstream (must use blackboard) from those that are (can use direct)
+    const directAgents = downstream.filter(id => !bidderAgents.includes(id));
+    const bidOnlyAgents = bidderAgents.filter(id => !downstream.includes(id));
+    const bidAndDirect = bidderAgents.filter(id => downstream.includes(id));
+
+    systemPrompt += `\n\nP2P ORCHESTRATOR MODE: You control the team and coordinate all work.`;
+
+    if (directAgents.length > 0 || bidAndDirect.length > 0) {
+      systemPrompt += `\n\n  STRATEGY 1 — DIRECT DELEGATION:`;
+      systemPrompt += `\n  Use send_task to assign work to your CONNECTED downstream agents: ${[...directAgents, ...bidAndDirect].join(", ")}`;
+      systemPrompt += `\n  Use this for agents you have a direct connection to.`;
+    }
+
+    if (bidOnlyAgents.length > 0) {
+      systemPrompt += `\n\n  STRATEGY 2 — P2P BIDDING (Blackboard) — REQUIRED for these agents:`;
+      systemPrompt += `\n  You have NO direct connection to these bidder agents: ${bidOnlyAgents.join(", ")}`;
+      systemPrompt += `\n  You MUST use the blackboard bidding workflow to assign tasks to them.`;
+      systemPrompt += `\n  Do NOT use send_task directly to bidder agents — they can only receive work through bidding.`;
+    } else {
+      systemPrompt += `\n\n  STRATEGY 2 — P2P BIDDING (Blackboard) — Optional:`;
+      systemPrompt += `\n  All bidder agents are also directly connected, so bidding is optional.`;
+    }
+    systemPrompt += `\n  P2P bidder agents: ${bidderAgents.join(", ") || "(none)"}`;
+    systemPrompt += `\n  Consensus mechanism: ${mechanism}`;
+    systemPrompt += `\n\n  P2P BIDDING WORKFLOW:`;
+    systemPrompt += `\n    1. bb_propose("task description") — post the job. Bidder agents are AUTOMATICALLY woken up and asked to bid.`;
+    systemPrompt += `\n    2. Use bb_read to check for bids. Bidders need time to respond — if no bids yet, call bb_read again after a moment.`;
+    systemPrompt += `\n    3. bb_award(task_id, orchestrator_scores=[{agent_id, score, reason}, ...]) — review bids via bb_read (includes bidder profiles: persona, expertise, reputation). Then provide YOUR score (0-1) for each bidder. Final winner = 50% bidder confidence + 50% your score. Example: orchestrator_scores=[{agent_id:"web_researcher_1", score:0.9, reason:"best fit for data tasks"}, ...]`;
+    systemPrompt += `\n    4. send_task({to: "winner_id", task: "full task details"}) — SEND the actual task to the winner`;
+    systemPrompt += `\n    5. wait_result({from: "winner_id"}) — collect the result`;
+    systemPrompt += `\n    IMPORTANT: After bb_award, you MUST send_task to the winner — the award alone does NOT execute the task.`;
+    systemPrompt += `\n    IMPORTANT: Do NOT skip bidding. Do NOT do the work yourself. Post tasks, wait for bids, award, then send_task.`;
+
+    if (bidOnlyAgents.length > 0) {
+      systemPrompt += `\n\n  CRITICAL: Agents ${bidOnlyAgents.join(", ")} are ONLY reachable via blackboard bidding. Do NOT send_task to them without first going through bb_propose → bb_award.`;
+    }
+    systemPrompt += `\nFor DIRECT agents: send_task({to: "agent_id", task: "..."}) then wait_result({from: "agent_id"}).`;
+    systemPrompt += `\nSend tasks to MULTIPLE agents in a SINGLE response for parallel execution.`;
+  } else if (isP2POrchestrator && agentDef.p2p?.bidder === true) {
+    // P2P Bidder agent in p2p_orchestrator mode: can bid on blackboard tasks + receive direct tasks
+    agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    agentTools.push(...blackboardTools);
+    const governance = systemConfig.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    systemPrompt += `\n\nP2P ORCHESTRATOR MODE — BIDDER AGENT: You are a P2P bidder in this system.`;
+    systemPrompt += `\nYou can receive tasks in TWO ways:`;
+    systemPrompt += `\n  1. DIRECT: The orchestrator sends you tasks via send_task (you receive and execute)`;
+    systemPrompt += `\n  2. BIDDING: You monitor the blackboard for open tasks and bid on ones matching your expertise`;
+    systemPrompt += `\nConsensus mechanism: ${mechanism}`;
+    if (agentDef.p2p?.confidence_domains?.length) {
+      systemPrompt += `\nYour expertise domains: ${agentDef.p2p.confidence_domains.join(", ")}`;
+    }
+    systemPrompt += `\n\nBIDDING PROTOCOL:`;
+    systemPrompt += `\n  When you receive a task that mentions "blackboard" and "bb_bid" — this is a BID REQUEST, not a real task:`;
+    systemPrompt += `\n  1. Use bb_read to review the open task on the blackboard`;
+    systemPrompt += `\n  2. Use bb_bid(task_id, confidence) to submit your bid — pick a confidence score (0-1) based on how well the task matches your expertise`;
+    systemPrompt += `\n  3. STOP — do NOT execute the task. Just bid and finish. The orchestrator will award and send the real task later.`;
+    systemPrompt += `\n\n  When you receive a REAL task (after being awarded via bb_award):`;
+    systemPrompt += `\n  1. Execute the task using your available tools`;
+    systemPrompt += `\n  2. Report completion via bb_complete(task_id, result)`;
+    systemPrompt += `\n\nRULES:`;
+    systemPrompt += `\n  - Only bid on tasks you are confident you can complete well`;
+    systemPrompt += `\n  - Yield tasks to peers with higher confidence scores`;
+    systemPrompt += `\n  - Complete your awarded tasks promptly and report results`;
+    systemPrompt += `\n  - You can also receive direct tasks from the orchestrator — handle those normally`;
+    if (downstream.length > 0) {
+      systemPrompt += `\nYour downstream agents (for sub-delegation): ${downstream.join(", ")}`;
+    }
   } else if (isHybrid && agentDef.role === "orchestrator") {
     // Hybrid orchestrator: controls flow via connections, monitors bus, can stop mesh agents
     agentTools.push(sendTaskTool, waitResultTool, checkAgentsTool);
@@ -2552,6 +2679,9 @@ async function realtimeAgentLoop(
           signal,
           finalTools,
           realtimeAgentModel,
+          undefined,  // sessionId (for checkpoint)
+          undefined,  // onRetry
+          rtTaskId,   // taskId — so callTool resolves the correct call context
         );
       }
 
@@ -2792,7 +2922,8 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   if (callerId === "main") {
     // P2P mode: main can send to any peer agent (no orchestrator hierarchy)
     const isP2PMode = session.systemConfig.system?.orchestration_mode === "p2p";
-    if (!isP2PMode) {
+    const isP2POrchMode = session.systemConfig.system?.orchestration_mode === "p2p_orchestrator";
+    if (!isP2PMode && !isP2POrchMode) {
       // Main LLM must respect hierarchy — if there's an orchestrator, only send to it
       const orchestrator = session.systemConfig.agents?.find((a: AgentConfig) => a.role === "orchestrator");
       if (orchestrator && args.to !== orchestrator.id) {
@@ -2805,8 +2936,33 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
     const globalMesh = session.systemConfig.system?.orchestration_mode === "mesh";
     const globalP2P = session.systemConfig.system?.orchestration_mode === "p2p";
     const isHybridOrch = session.systemConfig.system?.orchestration_mode === "hybrid" && callerDef?.role === "orchestrator";
+    const isP2POrchMode = session.systemConfig.system?.orchestration_mode === "p2p_orchestrator";
+    const isP2POrch = isP2POrchMode && callerDef?.role === "orchestrator";
+    const callerIsBidder = callerDef?.p2p?.bidder === true && isP2POrchMode;
 
-    if (!callerHasMesh && !globalMesh && !globalP2P && !isHybridOrch) {
+    if (isP2POrch) {
+      // P2P Orchestrator: can send_task to connected agents freely,
+      // but bidder-only agents (not in connections) must go through blackboard first
+      const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
+      const allowedTargets: string[] = callerStep?.outputs_to || [];
+      const connTargets = (session.systemConfig.connections || [])
+        .filter((c: any) => c.from === callerId)
+        .map((c: any) => c.to);
+      const directTargets = [...new Set([...allowedTargets, ...connTargets])];
+
+      const targetDef = session.systemConfig.agents?.find((a: AgentConfig) => a.id === args.to);
+      const targetIsBidderOnly = targetDef?.p2p?.bidder === true && !directTargets.includes(args.to);
+
+      if (targetIsBidderOnly) {
+        // Check if this bidder was awarded a task on the blackboard
+        const bb = blackboardGet(sessionId);
+        const allTasks = bb.getTasks();
+        const wasAwarded = allTasks.some((t: any) => t.awardedTo === args.to && (t.status === "awarded" || t.status === "in_progress"));
+        if (!wasAwarded) {
+          return { ok: false, error: `Agent "${args.to}" is a P2P bidder with no direct connection. You must use blackboard bidding first: bb_propose → wait for bids → bb_award → then send_task to the winner. Direct targets: ${directTargets.join(", ") || "(none)"}` };
+        }
+      }
+    } else if (!callerHasMesh && !globalMesh && !globalP2P && !isHybridOrch && !callerIsBidder) {
       // Strict access control via connections
       const callerStep = session.systemConfig.workflow?.sequence?.find((s: any) => s.agent === callerId);
       const allowedTargets: string[] = callerStep?.outputs_to || [];
@@ -3065,6 +3221,7 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
 
   const isHybrid = config.system?.orchestration_mode === "hybrid";
   const isP2P = config.system?.orchestration_mode === "p2p";
+  const isP2POrch = config.system?.orchestration_mode === "p2p_orchestrator";
 
   if (isP2P) {
     const peerAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human");
@@ -3075,6 +3232,17 @@ export async function getRealtimeAgentConfigSummary(): Promise<string | null> {
     summary += `Peer agents: ${peerAgents.map(a => `${a.id} ("${a.name}")`).join(", ")}\n\n`;
     summary += `COORDINATION: Agents use the shared BLACKBOARD to propose tasks, bid with confidence scores, and award work via ${mechanism}.\n`;
     summary += `You can send tasks to ANY peer agent. The swarm will self-organize via the Contract Net Protocol.\n\n`;
+  } else if (isP2POrch && orchestrator) {
+    const bidderAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human" && a.p2p?.bidder === true);
+    const governance = config.system?.p2p_governance;
+    const mechanism = governance?.consensus_mechanism || "contract_net";
+    summary += `P2P ORCHESTRATOR MODE: Combines hierarchical delegation with P2P competitive bidding.\n`;
+    summary += `ORCHESTRATOR: ${orchestrator.id} ("${orchestrator.name}") — controls task routing.\n`;
+    summary += `P2P Bidder agents: ${bidderAgents.map(a => `${a.id} ("${a.name}")`).join(", ") || "(none)"}\n`;
+    summary += `Consensus mechanism: ${mechanism}\n\n`;
+    summary += `You MUST send ALL tasks to the orchestrator agent "${orchestrator.id}" ONLY.\n`;
+    summary += `The orchestrator will decide whether to delegate directly or post to the P2P blackboard for bidding.\n`;
+    summary += `Do NOT send tasks directly to worker or bidder agents — that is the orchestrator's job.\n\n`;
   } else if (orchestrator) {
     summary += `ORCHESTRATOR AGENT: ${orchestrator.id} ("${orchestrator.name}")\n`;
     summary += `You MUST send ALL tasks to the orchestrator agent ONLY. The orchestrator will coordinate and delegate to the team.\n`;
@@ -3274,26 +3442,95 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     case "bb_propose": {
       const sessionId = _currentParentSessionId || "default";
       const task = blackboardPropose(sessionId, _currentAgentId, args.description, args.task_id);
-      return { ok: true, protocol: "blackboard", action: "propose", task };
+      // Notify all agents via bus so bidders can discover the new task
+      const proposedTaskId = task.taskId;
+      busPublish(sessionId, _currentAgentId, "bb:new_task", {
+        task_id: proposedTaskId,
+        description: args.description,
+        proposed_by: _currentAgentId,
+      });
+      // Wake up bidder agents in realtime mode by sending them a task on their task: topic
+      const rtSession = realtimeSessions.get(sessionId);
+      const wokenBidders: string[] = [];
+      console.log(`[bb_propose] sessionId=${sessionId}, rtSession=${!!rtSession}, caller=${_currentAgentId}, taskId=${proposedTaskId}`);
+      if (rtSession) {
+        const allAgents = rtSession.systemConfig.agents || [];
+        const bidderAgents = allAgents
+          .filter((a: AgentConfig) => a.id !== _currentAgentId && a.role !== "human" && a.p2p?.bidder === true);
+        console.log(`[bb_propose] Total agents: ${allAgents.length}, bidders found: ${bidderAgents.length}, ids: ${bidderAgents.map((a: AgentConfig) => a.id).join(", ")}`);
+        for (const bidder of bidderAgents) {
+          console.log(`[bb_propose] Waking bidder ${bidder.id} via task:${bidder.id}`);
+          busPublish(sessionId, _currentAgentId, `task:${bidder.id}`, {
+            task: `A new task has been posted on the blackboard (task_id: "${proposedTaskId}"): "${args.description}". Use bb_read to review it, then use bb_bid(task_id="${proposedTaskId}", confidence=<your_confidence_score>) to bid if it matches your expertise. Do NOT execute the task yet — only bid.`,
+            context: `Blackboard bidding request from ${_currentAgentId}. This is a bid request, not a direct task assignment.`,
+            from: _currentAgentId,
+          });
+          wokenBidders.push(bidder.id);
+        }
+      }
+      return { ok: true, protocol: "blackboard", action: "propose", task,
+        bidders_notified: wokenBidders,
+        hint: `Task posted to blackboard. ${wokenBidders.length} bidder agent(s) notified: ${wokenBidders.join(", ") || "none"}. Wait briefly, then use bb_read to check for bids before calling bb_award.` };
     }
     case "bb_bid": {
       const sessionId = _currentParentSessionId || "default";
       const result = blackboardBid(sessionId, _currentAgentId, args.task_id, args.confidence, args.cost, args.reasoning);
+      // Notify proposer that a bid arrived
+      if (result.ok) {
+        busPublish(sessionId, _currentAgentId, "bb:bid_received", {
+          task_id: args.task_id,
+          bidder: _currentAgentId,
+          confidence: args.confidence,
+        });
+      }
       return { ...result, protocol: "blackboard", action: "bid" };
     }
     case "bb_award": {
       const sessionId = _currentParentSessionId || "default";
-      const result = blackboardAward(sessionId, args.task_id, args.award_to);
+      // If orchestrator_scores provided, compute combined scores and determine winner
+      let awardTo = args.award_to;
+      let scoringDetails: any[] | undefined;
+      if (!awardTo && args.orchestrator_scores?.length > 0) {
+        const task = blackboardGetTask(sessionId, args.task_id);
+        if (task && task.bids?.length > 0) {
+          const orchScoreMap = new Map<string, { score: number; reason?: string }>();
+          for (const s of args.orchestrator_scores) {
+            orchScoreMap.set(s.agent_id, { score: s.score, reason: s.reason });
+          }
+          scoringDetails = task.bids.map((bid: any) => {
+            const orchEntry = orchScoreMap.get(bid.agentId);
+            const orchScore = orchEntry?.score ?? 0.5;
+            const combined = (bid.confidence * 0.5) + (orchScore * 0.5);
+            return {
+              agent_id: bid.agentId,
+              bidder_confidence: bid.confidence,
+              orchestrator_score: orchScore,
+              orchestrator_reason: orchEntry?.reason || "",
+              combined_score: Math.round(combined * 1000) / 1000,
+            };
+          });
+          // Pick the highest combined score
+          scoringDetails.sort((a: any, b: any) => b.combined_score - a.combined_score);
+          awardTo = scoringDetails[0].agent_id;
+        }
+      }
+      const result = blackboardAward(sessionId, args.task_id, awardTo);
       if (result.ok && result.awardedTo) {
         blackboardStartTask(sessionId, result.awardedTo, args.task_id);
+        // Notify the winner via bus with the task details
+        const awardedTask = blackboardGetTask(sessionId, args.task_id);
+        busPublish(sessionId, _currentAgentId, "bb:task_awarded", {
+          task_id: args.task_id,
+          awarded_to: result.awardedTo,
+          description: awardedTask?.description || "",
+          scoring: scoringDetails || undefined,
+        });
       }
-      return { ...result, protocol: "blackboard", action: "award" };
-    }
-    case "bb_vote": {
-      const sessionId = _currentParentSessionId || "default";
-      const result = blackboardVote(sessionId, _currentAgentId, args.task_id, args.vote, args.weight);
-      const consensus = blackboardGetConsensus(sessionId, args.task_id);
-      return { ...result, protocol: "blackboard", action: "vote", consensus };
+      return { ...result, protocol: "blackboard", action: "award",
+        scoring: scoringDetails || undefined,
+        next_step: result.ok && result.awardedTo
+          ? `Task awarded to "${result.awardedTo}". NOW send the task to the winner: use send_task({to: "${result.awardedTo}", task: "..."}) in realtime mode, or spawn_subagent({agentId: "${result.awardedTo}", task: "..."}) in manual mode. Then collect results.`
+          : undefined };
     }
     case "bb_complete": {
       const sessionId = _currentParentSessionId || "default";
@@ -3302,12 +3539,33 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     }
     case "bb_read": {
       const sessionId = _currentParentSessionId || "default";
+      // Helper: enrich bids with bidder profile info from agent config
+      const enrichTask = (task: any) => {
+        if (!task || !task.bids || task.bids.length === 0) return task;
+        const rtSession = realtimeSessions.get(sessionId);
+        const agents = rtSession?.systemConfig?.agents || [];
+        const enrichedBids = task.bids.map((bid: any) => {
+          const agentDef = agents.find((a: AgentConfig) => a.id === bid.agentId);
+          return {
+            ...bid,
+            bidder_profile: agentDef ? {
+              name: agentDef.name,
+              role: agentDef.role,
+              persona: agentDef.persona,
+              confidence_domains: agentDef.p2p?.confidence_domains || [],
+              reputation_score: agentDef.p2p?.reputation_score ?? null,
+              responsibilities: agentDef.responsibilities || [],
+            } : undefined,
+          };
+        });
+        return { ...task, bids: enrichedBids };
+      };
       if (args.task_id) {
         const task = blackboardGetTask(sessionId, args.task_id);
-        return { ok: true, protocol: "blackboard", action: "read", task: task || null };
+        return { ok: true, protocol: "blackboard", action: "read", task: task ? enrichTask(task) : null };
       }
       const tasks = blackboardGetTasks(sessionId, args.status);
-      return { ok: true, protocol: "blackboard", action: "read", tasks, count: tasks.length };
+      return { ok: true, protocol: "blackboard", action: "read", tasks: tasks.map(enrichTask), count: tasks.length };
     }
     case "bb_log": {
       const sessionId = _currentParentSessionId || "default";
