@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$REPO_URL = "https://github.com/Sompote/tiger_cowork.git"
+$REPO_URL = "https://github.com/Sompote/Tigrimos.git"
 $APP_URL  = "http://localhost:3001"
 $PORT     = 3001
 $LOG_FILE = "$env:TEMP\tigrimos-install.log"

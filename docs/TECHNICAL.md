@@ -2,7 +2,7 @@
 
 ## Architecture
 
-![Tigrimos Agent Workflow](../picture/tiger_cowork_workflow.png)
+![Tigrimos Agent Workflow](../picture/Tigrimos_workflow.png)
 
 The diagram above illustrates the **Tool Use & Reasoning Loop** at the core of Tigrimos's AI agent:
 
@@ -329,8 +329,8 @@ apt-get install -y nodejs
 
 node --version
 
-git clone https://github.com/Sompote/tiger_cowork.git
-cd tiger_cowork
+git clone https://github.com/Sompote/Tigrimos.git
+cd Tigrimos
 bash setup.sh
 
 # Set access token (recommended)
@@ -482,7 +482,7 @@ ACCESS_TOKEN=mysecret PORT=8080 SANDBOX_DIR=/home/user/workspace npm run dev
 ## Project Structure
 
 ```
-tiger_cowork/
+Tigrimos/
 ├── server/
 │   ├── index.ts                    # Fastify + Socket.IO + Vite dev server entry
 │   ├── routes/

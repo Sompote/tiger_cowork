@@ -5,7 +5,7 @@
 set -e
 
 APP_NAME="Tigrimos"
-REPO_URL="https://github.com/Sompote/tiger_cowork.git"
+REPO_URL="https://github.com/Sompote/Tigrimos.git"
 INSTALL_DIR="$HOME/Tigrimos"
 
 echo ""

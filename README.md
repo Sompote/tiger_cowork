@@ -37,11 +37,11 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 ### One-Click Installers
 
 **Mac:**
-1. Download [`Tigrimos.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+1. Download [`Tigrimos.zip`](https://github.com/Sompote/Tigrimos/releases/latest)
 2. Unzip, right-click `Tigrimos.app` and select **Open**
 
 **Windows:**
-1. Download [`TigrimosInstaller.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+1. Download [`TigrimosInstaller.zip`](https://github.com/Sompote/Tigrimos/releases/latest)
 2. Unzip and run `TigrimosInstaller.bat`
 
 **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running.
@@ -55,12 +55,12 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 **Mac/Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Sompote/Tigrimos/main/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sompote/Tigrimos/main/install.ps1 | iex
 ```
 
 ### Manual Install
@@ -68,8 +68,8 @@ irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | ie
 **Prerequisites:** Node.js >= 18, npm, Python 3 (optional)
 
 ```bash
-git clone https://github.com/Sompote/tiger_cowork.git
-cd tiger_cowork
+git clone https://github.com/Sompote/Tigrimos.git
+cd Tigrimos
 bash setup.sh        # installs deps, prompts for ClawHub token
 npm run dev          # development → http://localhost:3001
 ```
