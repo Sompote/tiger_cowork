@@ -16,19 +16,9 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 *Visual Agent Editor — drag-and-drop multi-agent design with mesh networking and YAML export.*
 
-![Tiger Cowork — Skills management page](picture/screen_shot2.png)
-
-*Skills marketplace — install and manage skills from built-in catalog and ClawHub community.*
-
 ![Tiger Cowork — Minecraft Task Monitor](picture/screentask.png)
 
 *Minecraft Task Monitor — live pixel-art agents with speech bubbles, walking animations, and inter-agent interactions.*
-
-## Demo
-
-[![Auto Generate Swarm Agent Architecture](https://img.youtube.com/vi/1Ke2dxha1og/maxresdefault.jpg)](https://youtu.be/1Ke2dxha1og)
-
-*Auto-generate a complete multi-agent architecture from a natural language description.*
 
 ## Key Features
 
