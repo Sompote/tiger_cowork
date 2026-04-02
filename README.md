@@ -1,6 +1,6 @@
-![Tiger Cowork Banner](picture/banner2.jpg)
+![Tigrimos Banner](picture/banner2.jpg)
 
-# Tiger Cowork v0.4.3
+# Tigrimos v0.4.3
 
 A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
 
@@ -8,15 +8,15 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 ## Screenshots
 
-![Tiger Cowork — AI chat with output panel](picture/screen3.jpg)
+![Tigrimos — AI chat with output panel](picture/screen3.jpg)
 
 *AI Chat with tool-calling — generates React/Recharts visualizations rendered in the output panel.*
 
-![Tiger Cowork — Agent System Editor](picture/agent2.jpg)
+![Tigrimos — Agent System Editor](picture/agent2.jpg)
 
 *Visual Agent Editor — drag-and-drop multi-agent design with mesh networking and YAML export.*
 
-![Tiger Cowork — Minecraft Task Monitor](picture/screentask.png)
+![Tigrimos — Minecraft Task Monitor](picture/screentask.png)
 
 *Minecraft Task Monitor — live pixel-art agents with speech bubbles, walking animations, and inter-agent interactions.*
 
@@ -37,19 +37,19 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 ### One-Click Installers
 
 **Mac:**
-1. Download [`TigerCowork.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
-2. Unzip, right-click `TigerCowork.app` and select **Open**
+1. Download [`Tigrimos.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+2. Unzip, right-click `Tigrimos.app` and select **Open**
 
 **Windows:**
-1. Download [`TigerCoworkInstaller.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
-2. Unzip and run `TigerCoworkInstaller.bat`
+1. Download [`TigrimosInstaller.zip`](https://github.com/Sompote/tiger_cowork/releases/latest)
+2. Unzip and run `TigrimosInstaller.bat`
 
 **Prerequisite:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) must be installed and running.
 
 | | Mac | Windows |
 |---|---|---|
-| **Start** | Double-click `TigerCowork.app` | Double-click `TigerCoworkStart.bat` |
-| **Stop** | Docker Desktop → Containers → Stop | Double-click `TigerCoworkStop.bat` |
+| **Start** | Double-click `Tigrimos.app` | Double-click `TigrimosStart.bat` |
+| **Stop** | Docker Desktop → Containers → Stop | Double-click `TigrimosStop.bat` |
 
 ### Terminal Install
 
