@@ -879,14 +879,39 @@ function sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
     }
   }
 
-  // Ensure a user message exists before the first assistant message
-  // Some APIs (zAi/GLM) reject system→assistant without a user message in between
-  let firstNonSystem = merged.findIndex((m) => m.role !== "system");
-  if (firstNonSystem >= 0 && merged[firstNonSystem].role !== "user") {
-    merged.splice(firstNonSystem, 0, { role: "user", content: "Continue with the task." });
+  // Convert mid-conversation system messages to user messages.
+  // Many APIs (MiniMax, DeepSeek, etc.) only allow role=system at position 0.
+  // Keep the first system message as-is; convert all others to user role.
+  let seenFirstSystem = false;
+  for (const msg of merged) {
+    if (msg.role === "system") {
+      if (seenFirstSystem) {
+        msg.role = "user";
+        msg.content = `[System Instructions]\n${msg.content || ""}`;
+      }
+      seenFirstSystem = true;
+    }
   }
 
-  return merged;
+  // Merge consecutive user messages — some APIs reject user→user sequences
+  const deduped: ChatMessage[] = [];
+  for (const msg of merged) {
+    const last = deduped[deduped.length - 1];
+    if (msg.role === "user" && last?.role === "user" && typeof msg.content === "string" && typeof last.content === "string") {
+      last.content = last.content + "\n\n" + msg.content;
+    } else {
+      deduped.push(msg);
+    }
+  }
+
+  // Ensure a user message exists before the first assistant message
+  // Some APIs (zAi/GLM) reject system→assistant without a user message in between
+  let firstNonSystem = deduped.findIndex((m) => m.role !== "system");
+  if (firstNonSystem >= 0 && deduped[firstNonSystem].role !== "user") {
+    deduped.splice(firstNonSystem, 0, { role: "user", content: "Continue with the task." });
+  }
+
+  return deduped;
 }
 
 // Convert OpenAI-format messages to Anthropic format
