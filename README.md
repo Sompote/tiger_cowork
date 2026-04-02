@@ -20,6 +20,10 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 *Skills marketplace — install and manage skills from built-in catalog and ClawHub community.*
 
+![Tiger Cowork — Minecraft Task Monitor](picture/screentask.png)
+
+*Minecraft Task Monitor — live pixel-art agents with speech bubbles, walking animations, and inter-agent interactions.*
+
 ## Demo
 
 [![Auto Generate Swarm Agent Architecture](https://img.youtube.com/vi/1Ke2dxha1og/maxresdefault.jpg)](https://youtu.be/1Ke2dxha1og)
@@ -31,6 +35,7 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 - **AI Chat with 16 Built-in Tools** — web search, Python, React, shell, files, skills, sub-agents
 - **Mix Any Model per Agent** — assign different AI providers per agent (API, Claude Code CLI, Codex CLI)
 - **Parallel Multi-Agent System** — 7 orchestration topologies, 4 communication protocols, P2P swarm governance
+- **Minecraft Task Monitor** — live pixel-art characters (Steve, Creeper, Enderman, etc.) with speech bubbles showing agent activity, walking animations when agents interact
 - **Long-Running Session Stability** — sliding window compression, smart tool result handling, checkpoint recovery
 - **MCP Integration** — connect any Model Context Protocol server (Stdio, SSE, StreamableHTTP)
 - **Output Panel** — renders React components, charts, HTML, PDF, Word, Excel, images, and Markdown
