@@ -1,8 +1,16 @@
 system:
   name: Web_Research_Swarm
-  orchestration_mode: hybrid
+  orchestration_mode: p2p
   communication_protocol: structured_handoff
   context_passing: full_chain
+  p2p_governance:
+    consensus_mechanism: majority_voting
+    bid_timeout_seconds: 30
+    vote_timeout_seconds: 30
+    min_confidence_threshold: 0.5
+    max_task_retries: 2
+    tiebreaker: agent_id_hash
+    audit_log: true
 agents:
   - id: human
     name: Human User
@@ -12,6 +20,8 @@ agents:
       - Provide research queries and objectives
       - Review and give feedback on findings
       - Approve final deliverables
+    p2p:
+      reputation_score: 0.8
   - id: research_orchestrator
     name: Research Orchestrator
     role: orchestrator
@@ -28,6 +38,8 @@ agents:
       topics:
         - research_status
         - findings_updates
+    p2p:
+      reputation_score: 0.8
   - id: web_researcher_1
     name: Primary Web Researcher
     role: researcher
@@ -46,6 +58,8 @@ agents:
         - source_updates
     mesh:
       enabled: true
+    p2p:
+      reputation_score: 0.8
   - id: web_researcher_2
     name: Exploratory Web Researcher
     role: researcher
@@ -64,6 +78,8 @@ agents:
         - source_updates
     mesh:
       enabled: true
+    p2p:
+      reputation_score: 0.8
   - id: web_researcher_3
     name: Data Web Researcher
     role: researcher
@@ -82,6 +98,8 @@ agents:
         - source_updates
     mesh:
       enabled: true
+    p2p:
+      reputation_score: 0.8
   - id: research_synthesizer
     name: Research Synthesizer
     role: reporter
@@ -97,6 +115,8 @@ agents:
       enabled: true
       topics:
         - final_report
+    p2p:
+      reputation_score: 0.8
 workflow:
   sequence:
     - step: 1

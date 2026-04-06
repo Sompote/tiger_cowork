@@ -1,8 +1,8 @@
 ![Tiger CoWork Banner](picture/banner2.jpg)
 
-# Tiger CoWork v0.4.3
+# Tiger CoWork v0.5.0
 
-A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
+A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, cross-machine agent connection, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect agents across machines on your network so distributed teams can collaborate in real time. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 
@@ -25,6 +25,7 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 - **AI Chat with 16 Built-in Tools** — web search, Python, React, shell, files, skills, sub-agents
 - **Mix Any Model per Agent** — assign different AI providers per agent (API, Claude Code CLI, Codex CLI)
 - **Parallel Multi-Agent System** — 7 orchestration topologies, 4 communication protocols, P2P swarm governance
+- **Cross-Machine Agent Connection** — connect agents running on different machines over the network, enabling distributed multi-agent collaboration across your infrastructure
 - **Minecraft Task Monitor** — live pixel-art characters (Steve, Creeper, Enderman, etc.) with speech bubbles showing agent activity, walking animations when agents interact
 - **Long-Running Session Stability** — sliding window compression, smart tool result handling, checkpoint recovery
 - **MCP Integration** — connect any Model Context Protocol server (Stdio, SSE, StreamableHTTP)

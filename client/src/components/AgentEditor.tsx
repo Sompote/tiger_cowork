@@ -20,6 +20,10 @@ interface AgentNode {
   p2pConfidenceDomains: string[];
   p2pReputationScore: number;
   p2pBidder: boolean;
+  isRemote: boolean;
+  remoteInstance: string;
+  remoteUrl: string;
+  remoteToken: string;
 }
 
 interface P2PGovernance {
@@ -56,6 +60,7 @@ const ROLE_COLORS: Record<string, string> = {
   reporter: "#9c27b0",
   researcher: "#00bcd4",
   peer: "#ff9800",
+  remote: "#6366f1",
   default: "#607d8b",
 };
 
@@ -190,8 +195,60 @@ function AgentDefPanel({
               ))}
             </select>
           </div>
-          {/* Model, Persona, Responsibilities — hidden for human nodes */}
+          {/* Remote Agent Toggle */}
           {agent.role !== "human" && (
+            <div className="form-group">
+              <label className="bus-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={agent.isRemote}
+                  onChange={(e) => onUpdate({
+                    ...agent,
+                    isRemote: e.target.checked,
+                    color: e.target.checked ? ROLE_COLORS.remote : (ROLE_COLORS[agent.role] || agent.color),
+                  })}
+                />
+                <span>Remote Agent (runs on another machine)</span>
+              </label>
+            </div>
+          )}
+
+          {/* Remote Agent Config */}
+          {agent.isRemote && (
+            <>
+              <div className="agent-def-divider">remote instance</div>
+              <div className="form-group">
+                <label>Remote Instance (from Settings)</label>
+                <input
+                  value={agent.remoteInstance}
+                  onChange={(e) => onUpdate({ ...agent, remoteInstance: e.target.value })}
+                  placeholder="e.g. cloud-pc"
+                />
+                <p className="bus-hint">Name/ID of a Remote Instance configured in Settings</p>
+              </div>
+              <div className="agent-def-divider">or use inline URL</div>
+              <div className="form-group">
+                <label>URL</label>
+                <input
+                  value={agent.remoteUrl}
+                  onChange={(e) => onUpdate({ ...agent, remoteUrl: e.target.value })}
+                  placeholder="http://192.168.1.x:3001"
+                />
+              </div>
+              <div className="form-group">
+                <label>Token</label>
+                <input
+                  type="password"
+                  value={agent.remoteToken}
+                  onChange={(e) => onUpdate({ ...agent, remoteToken: e.target.value })}
+                  placeholder="Remote machine's ACCESS_TOKEN"
+                />
+              </div>
+            </>
+          )}
+
+          {/* Model, Persona, Responsibilities — hidden for human and remote nodes */}
+          {agent.role !== "human" && !agent.isRemote && (
             <>
               <div className="form-group">
                 <label className="model-checkbox-label">
@@ -327,7 +384,9 @@ function AgentDefPanel({
             </>
           )}
 
-          {/* Bus Connection */}
+          {/* Bus/Mesh/P2P — hidden for remote agents */}
+          {!agent.isRemote && (
+            <>
           <div className="agent-def-divider">communication</div>
           <div className="form-group">
             <label className="bus-toggle-label">
@@ -434,6 +493,8 @@ function AgentDefPanel({
                   </div>
                 </>
               )}
+            </>
+          )}
             </>
           )}
         </div>
@@ -640,13 +701,17 @@ export default function AgentEditor({
       responsibilities: a.responsibilities || [],
       x: a.role === "human" ? 50 : a.role === "orchestrator" ? 300 : 150 + (i % 3) * 250,
       y: a.role === "human" ? 200 : a.role === "orchestrator" ? 80 : 100 + Math.floor(i / 3) * 180,
-      color: ROLE_COLORS[a.role] || ROLE_COLORS.default,
+      color: a.type === "remote" ? ROLE_COLORS.remote : (ROLE_COLORS[a.role] || ROLE_COLORS.default),
       busEnabled: a.bus?.enabled || false,
       busTopics: a.bus?.topics || [],
       meshEnabled: a.mesh?.enabled || false,
       p2pConfidenceDomains: a.p2p?.confidence_domains || [],
       p2pReputationScore: a.p2p?.reputation_score ?? 0.8,
       p2pBidder: a.p2p?.bidder === true,
+      isRemote: a.type === "remote",
+      remoteInstance: a.remote_instance || "",
+      remoteUrl: a.remote_url || "",
+      remoteToken: a.remote_token || "",
     }));
 
     const connections: Connection[] = (sys.connections || []).map((c: any) => ({
@@ -768,13 +833,17 @@ export default function AgentEditor({
             responsibilities: a.responsibilities || [],
             x: 100 + (i % 3) * 250,
             y: 80 + Math.floor(i / 3) * 200,
-            color: ROLE_COLORS[a.role] || ROLE_COLORS.default,
+            color: a.type === "remote" ? ROLE_COLORS.remote : (ROLE_COLORS[a.role] || ROLE_COLORS.default),
             busEnabled: a.bus?.enabled || false,
             busTopics: a.bus?.topics || [],
             meshEnabled: a.mesh?.enabled || false,
             p2pConfidenceDomains: a.p2p?.confidence_domains || [],
             p2pReputationScore: a.p2p?.reputation_score ?? 0.8,
             p2pBidder: a.p2p?.bidder === true,
+            isRemote: a.type === "remote",
+            remoteInstance: a.remote_instance || "",
+            remoteUrl: a.remote_url || "",
+            remoteToken: a.remote_token || "",
           }));
 
           // Extract connections: prefer explicit connections array, fall back to workflow
@@ -864,6 +933,10 @@ export default function AgentEditor({
       p2pConfidenceDomains: [],
       p2pReputationScore: 0.8,
       p2pBidder: false,
+      isRemote: false,
+      remoteInstance: "",
+      remoteUrl: "",
+      remoteToken: "",
     };
     setState((s) => ({ ...s, agents: [...s.agents, newAgent] }));
     setSelectedAgent(newAgent.id);
@@ -1015,7 +1088,13 @@ export default function AgentEditor({
           name: a.name,
           role: a.role,
         };
-        if (a.model) agentDef.model = a.model;
+        if (a.isRemote) {
+          agentDef.type = "remote";
+          if (a.remoteInstance) agentDef.remote_instance = a.remoteInstance;
+          if (a.remoteUrl) agentDef.remote_url = a.remoteUrl;
+          if (a.remoteToken) agentDef.remote_token = a.remoteToken;
+        }
+        if (a.model && !a.isRemote) agentDef.model = a.model;
         if (a.persona) agentDef.persona = a.persona;
         if (a.responsibilities.length > 0) agentDef.responsibilities = a.responsibilities;
         if (a.busEnabled) {
@@ -1259,6 +1338,10 @@ export default function AgentEditor({
                   p2pConfidenceDomains: [],
                   p2pReputationScore: 1.0,
                   p2pBidder: false,
+                  isRemote: false,
+                  remoteInstance: "",
+                  remoteUrl: "",
+                  remoteToken: "",
                 };
                 setState((s) => ({ ...s, agents: [humanNode, ...s.agents] }));
                 setSelectedAgent(humanNode.id);
@@ -1551,7 +1634,10 @@ export default function AgentEditor({
                     </div>
                     <div className="agent-node-body">
                       <div className="agent-node-name">{agent.name || agent.id}</div>
-                      {agent.role !== "human" && (
+                      {agent.isRemote && (
+                        <div className="agent-node-model" style={{ color: "#6366f1", fontSize: "9px" }}>{agent.remoteInstance || agent.remoteUrl || "remote"}</div>
+                      )}
+                      {!agent.isRemote && agent.role !== "human" && (
                         <div className="agent-node-model">{agent.model.split("-").slice(-2).join("-")}</div>
                       )}
                       {agent.role === "human" && (
@@ -1576,6 +1662,11 @@ export default function AgentEditor({
                     {agent.p2pBidder && state.orchestrationMode === "p2p_orchestrator" && (
                       <div className="agent-node-mesh-badge agent-node-bidder-badge" title="P2P Bidder: can bid on blackboard tasks">
                         BIDDER
+                      </div>
+                    )}
+                    {agent.isRemote && (
+                      <div className="agent-node-mesh-badge" style={{ background: "#6366f1" }} title={`Remote → ${agent.remoteInstance || agent.remoteUrl || "?"}`}>
+                        ↗ REMOTE
                       </div>
                     )}
                     {state.orchestrationMode !== "mesh" && state.orchestrationMode !== "p2p" && (

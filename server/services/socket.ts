@@ -45,9 +45,16 @@ export interface ActiveTask {
   activeAgent?: string;          // last active agent (for backward compat)
   activeAgents: Set<string>;     // all currently working agents
   doneAgents: Set<string>;       // agents that have finished
-  agentTools: Record<string, string[]>; // agent name → tools used
+  agentTools: Record<string, string[]>; // agent name → tools used (capped)
   startedAt: string;
   lastUpdate: string;
+}
+
+const MAX_TOOL_HISTORY = 100; // cap per-agent tool list to prevent memory growth
+
+function pushToolCapped(arr: string[], tool: string) {
+  arr.push(tool);
+  if (arr.length > MAX_TOOL_HISTORY) arr.splice(0, arr.length - MAX_TOOL_HISTORY);
 }
 
 const activeTasks = new Map<string, ActiveTask>();
@@ -74,7 +81,7 @@ export function killActiveTask(taskId: string): boolean {
   return false;
 }
 
-async function buildSystemPrompt(filterSkillIds?: string[]): Promise<string> {
+export async function buildSystemPrompt(filterSkillIds?: string[]): Promise<string> {
   // Gather installed clawhub skills
   const clawhubDir = path.resolve("Tiger_bot/skills");
   let clawhubSkills: string[] = [];
@@ -209,9 +216,56 @@ Output files:
 // Store io reference for broadcasting status to all connected clients
 let ioRef: Server | null = null;
 
-// Broadcast status to ALL connected sockets (so reconnected clients get updates)
+// Throttle status broadcasts per session — at most once every 150ms
+// Important events (done, job_complete, thinking) bypass the throttle
+const statusThrottleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingStatus = new Map<string, Record<string, any>>();
+const BYPASS_STATUSES = new Set(["done", "job_complete", "thinking", "retrying"]);
+
 function broadcastStatus(data: Record<string, any>) {
-  if (ioRef) ioRef.emit("chat:status", data);
+  if (!ioRef) return;
+  const key = data.sessionId || "__global__";
+
+  // Important events go through immediately
+  if (BYPASS_STATUSES.has(data.status)) {
+    // Flush any pending throttled status first
+    if (statusThrottleTimers.has(key)) {
+      clearTimeout(statusThrottleTimers.get(key)!);
+      statusThrottleTimers.delete(key);
+      pendingStatus.delete(key);
+    }
+    ioRef.emit("chat:status", data);
+    return;
+  }
+
+  // Throttle: store latest and schedule flush
+  pendingStatus.set(key, data);
+  if (!statusThrottleTimers.has(key)) {
+    statusThrottleTimers.set(key, setTimeout(() => {
+      statusThrottleTimers.delete(key);
+      const pending = pendingStatus.get(key);
+      pendingStatus.delete(key);
+      if (pending && ioRef) ioRef.emit("chat:status", pending);
+    }, 150));
+  }
+}
+
+// Throttle sub-agent chat chunk emissions per session — at most once every 200ms
+const chunkThrottleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingChunks = new Map<string, string>();
+
+function emitThrottledChunk(sessionId: string, content: string) {
+  if (!ioRef) return;
+  const existing = pendingChunks.get(sessionId) || "";
+  pendingChunks.set(sessionId, existing + content);
+  if (!chunkThrottleTimers.has(sessionId)) {
+    chunkThrottleTimers.set(sessionId, setTimeout(() => {
+      chunkThrottleTimers.delete(sessionId);
+      const text = pendingChunks.get(sessionId);
+      pendingChunks.delete(sessionId);
+      if (text && ioRef) ioRef.emit("chat:chunk", { sessionId, content: text });
+    }, 200));
+  }
 }
 
 export function setupSocket(io: Server): void {
@@ -236,8 +290,8 @@ export function setupSocket(io: Server): void {
           task.activeAgents.add(agentLabel);
           task.activeAgent = agentLabel;
           if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
-          task.agentTools[agentLabel].push(data.tool);
-          task.toolCalls.push(data.tool);
+          pushToolCapped(task.agentTools[agentLabel], data.tool);
+          pushToolCapped(task.toolCalls, data.tool);
         } else if (data.status === "subagent_done" || data.status === "realtime_agent_done") {
           // Agent finished — remove from active set, add to done set
           task.activeAgents.delete(agentLabel);
@@ -337,7 +391,7 @@ export function setupSocket(io: Server): void {
         }).catch(() => {});
       }
       if (progressText) {
-        ioRef.emit("chat:chunk", { sessionId: data.sessionId, content: progressText });
+        emitThrottledChunk(data.sessionId, progressText);
       }
     }
   });
@@ -816,10 +870,10 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             } else {
               activeTask.status = `Running: ${name}`;
             }
-            activeTask.toolCalls.push(name);
+            pushToolCapped(activeTask.toolCalls, name);
             activeTask.activeAgent = "Orchestrator";
             if (!activeTask.agentTools["Orchestrator"]) activeTask.agentTools["Orchestrator"] = [];
-            activeTask.agentTools["Orchestrator"].push(name);
+            pushToolCapped(activeTask.agentTools["Orchestrator"], name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           // onToolResult — collect output files, show status only
@@ -1493,10 +1547,10 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             } else {
               activeTask.status = `Running: ${name}`;
             }
-            activeTask.toolCalls.push(name);
+            pushToolCapped(activeTask.toolCalls, name);
             activeTask.activeAgent = "Orchestrator";
             if (!activeTask.agentTools["Orchestrator"]) activeTask.agentTools["Orchestrator"] = [];
-            activeTask.agentTools["Orchestrator"].push(name);
+            pushToolCapped(activeTask.agentTools["Orchestrator"], name);
             activeTask.lastUpdate = new Date().toISOString();
           },
           (name, toolResult) => {

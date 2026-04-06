@@ -535,7 +535,8 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
       if (!agent) continue;
       const tools = agentTools[name] || [];
       const prevCount = prevCounts[name] || 0;
-      const newTools = tools.slice(prevCount);
+      // Handle server-side trimming: if count went down, treat all as new
+      const newTools = tools.length >= prevCount ? tools.slice(prevCount) : tools.slice(-1);
 
       if (activeSet.has(name)) {
         agent.status = "active";
@@ -605,6 +606,7 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
     canvas.width = canvasWidth;
     canvas.height = CANVAS_H;
     let running = true;
+    const sortBuf: AgentState[] = []; // reusable buffer for sorting
 
     const render = () => {
       if (!running) return;
@@ -627,8 +629,10 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
         }
       }
 
-      // Sort by Y for depth
-      const agents = Array.from(agentsRef.current.values());
+      // Sort by Y for depth (reuse array to reduce GC pressure)
+      const agents = sortBuf;
+      agents.length = 0;
+      for (const a of agentsRef.current.values()) agents.push(a);
       agents.sort((a, b) => a.y - b.y);
 
       for (const agent of agents) {

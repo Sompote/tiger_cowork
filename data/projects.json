@@ -164,5 +164,36 @@
     "skills": [],
     "createdAt": "2026-04-01T22:24:38.566Z",
     "updatedAt": "2026-04-01T22:24:47.655Z"
+  },
+  {
+    "id": "d35fe45d-b7dc-47c6-98ad-9fef62cda648",
+    "name": "Tiger cowork",
+    "description": "",
+    "workingFolder": "Tiger",
+    "memory": "",
+    "skills": [],
+    "createdAt": "2026-04-02T14:14:01.593Z",
+    "updatedAt": "2026-04-02T14:14:15.517Z"
+  },
+  {
+    "id": "4c0eafc8-6297-4dd5-9a27-b849c0e095fb",
+    "name": "PiNNs",
+    "description": "",
+    "workingFolder": "/root/cowork/PiNNs",
+    "memory": "",
+    "skills": [
+      "b336a1f9-e173-4b60-8ef1-4d11eebc8b26",
+      "19c484fd-fb78-47fe-b849-bd3d1276a7ab",
+      "95067b76-80ec-4389-9874-ac607a4a8d0e",
+      "25d0b6bb-537e-4e29-9565-ca48ad4041fa",
+      "ec08d2f3-f693-4670-bb91-ce013cc2e602",
+      "d812629d-1160-4e8a-a199-e67a7f132057",
+      "db7ef2ef-afb4-451c-8c47-105b90a3c3d4",
+      "c317a611-412c-42bd-812c-e4e3ec01bf33",
+      "36481539-981e-4207-b7eb-34550ce6ac0d",
+      "8495d368-4261-4d8d-b924-26a45fd29896"
+    ],
+    "createdAt": "2026-04-03T11:04:25.967Z",
+    "updatedAt": "2026-04-03T11:06:26.883Z"
   }
 ]

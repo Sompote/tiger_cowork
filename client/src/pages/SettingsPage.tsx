@@ -43,11 +43,24 @@ export default function SettingsPage() {
   const [_oauthStatus, _setOauthStatus] = useState<{ message: string; success: boolean } | null>(null); // reserved for future use
   const yamlUploadRef = useRef<HTMLInputElement>(null);
 
+  // Remote Token (this machine's token for incoming remote connections)
+  const [remoteTokenValue, setRemoteTokenValue] = useState("");
+  const [remoteTokenVisible, setRemoteTokenVisible] = useState(false);
+  const [remoteTokenCopied, setRemoteTokenCopied] = useState(false);
+
+  // Remote Instances
+  const [newRemoteName, setNewRemoteName] = useState("");
+  const [newRemoteUrl, setNewRemoteUrl] = useState("");
+  const [newRemoteToken, setNewRemoteToken] = useState("");
+  const [remoteTestResults, setRemoteTestResults] = useState<Record<string, { ok: boolean; message: string } | null>>({});
+  const [remoteTesting, setRemoteTesting] = useState<string | null>(null);
+
   useEffect(() => {
     api.getSettings().then(setSettings);
     api.mcpStatus().then(setMcpStatuses).catch(() => {});
     api.getFileTokens().then(setFileTokens).catch(() => {});
     api.getAgentConfigs().then(setAgentConfigs).catch(() => {});
+    api.getRemoteToken().then((res: any) => setRemoteTokenValue(res.token || "")).catch(() => {});
   }, []);
 
   const handleYamlUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -783,6 +796,175 @@ export default function SettingsPage() {
             <button className="btn btn-primary" onClick={createFileToken}>Create Token</button>
           </div>
         </section>
+
+        <section className="card">
+          <h3 style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            Remote Agent
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 400, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={!!settings.remoteEnabled}
+                onChange={(e) => setSettings({ ...settings, remoteEnabled: e.target.checked })}
+              />
+              Enable
+            </label>
+          </h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Allow this instance to accept peer-to-peer connections from other Tiger CoWork machines. When disabled, remote token authentication is rejected and the remote menu is hidden.
+          </p>
+        </section>
+
+        {settings.remoteEnabled && (<><section className="card">
+          <h3>Remote Agent Mode</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Choose how incoming remote tasks are processed. &quot;Simple Chat&quot; uses a single LLM call.
+            Selecting an agent config runs the full realtime swarm architecture with progress reporting.
+          </p>
+          <div className="form-group">
+            <label>Agent Configuration for Incoming Tasks</label>
+            <select
+              value={settings.remoteAgentConfig || ""}
+              onChange={(e) => setSettings({ ...settings, remoteAgentConfig: e.target.value })}
+            >
+              <option value="">Simple Chat (no agents)</option>
+              {agentConfigs.map((cfg: any) => (
+                <option key={cfg.filename} value={cfg.filename}>
+                  {cfg.name} ({cfg.filename}) — {cfg.agentCount} agents
+                </option>
+              ))}
+            </select>
+          </div>
+        </section>
+
+        <section className="card">
+          <h3>Remote Token</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            This machine&apos;s remote token. Share it with other machines so they can connect to this instance.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              readOnly
+              type={remoteTokenVisible ? "text" : "password"}
+              value={remoteTokenValue}
+              style={{ flex: 1, fontFamily: "monospace", fontSize: 13 }}
+              onClick={(e) => (e.target as HTMLInputElement).select()}
+            />
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setRemoteTokenVisible(!remoteTokenVisible)}
+            >
+              {remoteTokenVisible ? "Hide" : "Show"}
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                navigator.clipboard.writeText(remoteTokenValue);
+                setRemoteTokenCopied(true);
+                setTimeout(() => setRemoteTokenCopied(false), 2000);
+              }}
+            >
+              {remoteTokenCopied ? "Copied!" : "Copy"}
+            </button>
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={async () => {
+                if (!confirm("Regenerate remote token? All existing remote connections using the old token will break.")) return;
+                const res = await api.regenerateRemoteToken();
+                setRemoteTokenValue(res.token);
+                setRemoteTokenVisible(true);
+              }}
+            >
+              Regenerate
+            </button>
+          </div>
+        </section>
+
+        <section className="card">
+          <h3>Remote Instances</h3>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Delegate tasks to Tiger Cowork running on other machines. Both machines run the same codebase — either can be orchestrator or worker.
+          </p>
+
+          {/* Existing instances */}
+          {(settings.remoteInstances || []).map((ri: any) => (
+            <div key={ri.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+              <strong style={{ minWidth: 100 }}>{ri.name || ri.id}</strong>
+              <span style={{ flex: 1, opacity: 0.7, fontFamily: "monospace", fontSize: 12 }}>{ri.url}</span>
+              <span style={{ opacity: 0.5, fontFamily: "monospace", fontSize: 11 }}>{ri.token}</span>
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={remoteTesting === ri.id}
+                onClick={async () => {
+                  setRemoteTesting(ri.id);
+                  setRemoteTestResults((prev) => ({ ...prev, [ri.id]: null }));
+                  try {
+                    const res = await api.testRemoteInstance(ri.id);
+                    setRemoteTestResults((prev) => ({ ...prev, [ri.id]: res }));
+                  } catch (err: any) {
+                    setRemoteTestResults((prev) => ({ ...prev, [ri.id]: { ok: false, message: err.message } }));
+                  }
+                  setRemoteTesting(null);
+                }}
+              >
+                {remoteTesting === ri.id ? "Testing..." : "Test"}
+              </button>
+              {remoteTestResults[ri.id] && (
+                <span style={{ fontSize: 11, color: remoteTestResults[ri.id]!.ok ? "#34a853" : "#ea4335" }}>
+                  {remoteTestResults[ri.id]!.ok ? "✓" : "✗"} {remoteTestResults[ri.id]!.message?.slice(0, 40)}
+                </span>
+              )}
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={() => {
+                  const updated = (settings.remoteInstances || []).filter((r: any) => r.id !== ri.id);
+                  setSettings({ ...settings, remoteInstances: updated });
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+
+          {/* Add new instance */}
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <input
+              placeholder="Name (e.g. cloud-pc)"
+              value={newRemoteName}
+              onChange={(e) => setNewRemoteName(e.target.value)}
+              style={{ width: 140 }}
+            />
+            <input
+              placeholder="URL (e.g. http://192.168.1.x:3001)"
+              value={newRemoteUrl}
+              onChange={(e) => setNewRemoteUrl(e.target.value)}
+              style={{ flex: 1, minWidth: 200 }}
+            />
+            <input
+              type="password"
+              placeholder="Token (ACCESS_TOKEN of remote)"
+              value={newRemoteToken}
+              onChange={(e) => setNewRemoteToken(e.target.value)}
+              style={{ width: 200 }}
+            />
+            <button
+              className="btn btn-primary"
+              disabled={!newRemoteName.trim() || !newRemoteUrl.trim()}
+              onClick={() => {
+                const id = newRemoteName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+                const instance = { id, name: newRemoteName.trim(), url: newRemoteUrl.trim(), token: newRemoteToken.trim() };
+                setSettings({ ...settings, remoteInstances: [...(settings.remoteInstances || []), instance] });
+                setNewRemoteName("");
+                setNewRemoteUrl("");
+                setNewRemoteToken("");
+              }}
+            >
+              Add Instance
+            </button>
+          </div>
+          <p className="hint" style={{ marginTop: 8, fontSize: 11 }}>
+            Instances are saved when you click "Save Settings". Use the Test button after saving to verify connectivity.
+          </p>
+        </section></>)}
 
         <section className="card">
           <h3>MCP Servers</h3>

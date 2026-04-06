@@ -6,6 +6,7 @@ import yaml from "js-yaml";
 import { runPython } from "./python";
 import { getSettings, appendAgentHistory, flushAgentHistory } from "./data";
 import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
+import { remoteTask, RemoteInstance } from "./remote";
 import {
   tcpOpen, tcpSend, tcpRead, tcpClose,
   busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busLoadHistory,
@@ -213,6 +214,26 @@ const spawnSubagentTool = {
         agentId: { type: "string", description: "Optional agent ID from manual YAML config to use specific agent definition" },
       },
       required: ["task"],
+    },
+  },
+};
+
+// ─── Remote Task Tool ───
+
+const remoteTaskTool = {
+  type: "function" as const,
+  function: {
+    name: "remote_task",
+    description: "Delegate a task to a Tiger Cowork instance running on another machine. The remote instance processes the task with its own LLM and tools, then returns the result. Use this for offloading work to a cloud PC, lab server, or any peer machine running Tiger Cowork.",
+    parameters: {
+      type: "object",
+      properties: {
+        instance: { type: "string", description: "Remote instance name/id (from Settings > Remote Instances), or inline JSON {url, token}" },
+        task: { type: "string", description: "The task to send to the remote instance" },
+        idle_timeout: { type: "number", description: "Seconds to wait with no activity before aborting (default: 60)" },
+        max_timeout: { type: "number", description: "Maximum seconds to wait for a result (default: 1800)" },
+      },
+      required: ["instance", "task"],
     },
   },
 };
@@ -513,6 +534,10 @@ export async function getTools(opts?: { excludeSubagent?: boolean }) {
   if (settings.subAgentEnabled) {
     tools.push(...protocolTools);
   }
+  // Remote task tool is available whenever remote instances are configured
+  if (settings.remoteInstances && settings.remoteInstances.length > 0) {
+    tools.push(remoteTaskTool);
+  }
   return [...tools, ...getMcpTools()];
 }
 
@@ -530,7 +555,12 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
     summary += `P2P governance: ${config.system?.p2p_governance?.consensus_mechanism || "contract_net"} — coordination via blackboard.\n`;
   }
   for (const a of config.agents || []) {
-    const flags = [a.bus?.enabled && "bus", a.mesh?.enabled && "mesh", a.role === "peer" && "peer"].filter(Boolean).join(",");
+    const flags = [
+      a.bus?.enabled && "bus",
+      a.mesh?.enabled && "mesh",
+      a.role === "peer" && "peer",
+      a.type === "remote" && `REMOTE → ${a.remote_instance || a.remote_url || "?"}`,
+    ].filter(Boolean).join(",");
     summary += `- ${a.id} ("${a.name}"): ${a.role}${flags ? ` [${flags}]` : ""}${a.persona ? ` — ${a.persona}` : ""}\n`;
   }
 
@@ -542,7 +572,11 @@ export async function getManualAgentConfigSummary(): Promise<string | null> {
     }
   }
 
+  const hasRemote = (config.agents || []).some((a: AgentConfig) => a.type === "remote");
   summary += `\nSpawn agents with agentId parameter. Follow workflow order. Synthesize results into a clear response with headings.\n`;
+  if (hasRemote) {
+    summary += `Note: Remote agents run on another machine — spawn them normally with agentId. They are dispatched automatically.\n`;
+  }
   return summary;
 }
 
@@ -1236,6 +1270,10 @@ interface AgentConfig {
   responsibilities: string[];
   constraints?: string[];
   tools_allowed?: string[];
+  type?: "remote";              // remote = delegate to another Tiger Cowork instance
+  remote_instance?: string;     // references a saved Remote Instance id/name in settings
+  remote_url?: string;          // inline URL fallback (no saved instance needed)
+  remote_token?: string;        // inline token fallback
   bus?: {
     enabled: boolean;
     topics?: string[];
@@ -1928,7 +1966,48 @@ export async function spawnSubagent(
     resolvedConnections = systemConfig?.connections;
     resolvedSystemConfig = systemConfig;
 
-    if (agentDef && systemConfig) {
+    if (agentDef && agentDef.type === "remote") {
+      // ─── Remote agent: delegate to another Tiger Cowork instance ───
+      console.log(`[SubAgent:${label}] Remote agent — delegating to remote instance`);
+      let instance: RemoteInstance | undefined;
+      if (agentDef.remote_instance && settings.remoteInstances) {
+        instance = settings.remoteInstances.find(
+          (ri) => ri.id === agentDef.remote_instance || ri.name === agentDef.remote_instance
+        );
+      }
+      if (!instance && agentDef.remote_url) {
+        instance = { id: agentDef.id, name: agentDef.name, url: agentDef.remote_url, token: agentDef.remote_token || "" };
+      }
+      if (!instance) {
+        const run = activeSubagents.get(subagentId);
+        if (run) { run.status = "error"; run.result = `Remote instance "${agentDef.remote_instance}" not found`; }
+        return { ok: false, error: `Remote instance "${agentDef.remote_instance}" not found in settings` };
+      }
+      const fullTask = args.context ? `${args.task}\n\nADDITIONAL CONTEXT:\n${args.context}` : args.task;
+      const result = await remoteTask(instance, fullTask, { signal });
+      const run = activeSubagents.get(subagentId);
+      if (run) {
+        run.status = result.ok ? "completed" : "error";
+        run.result = result.ok ? result.result : result.error;
+        run.completedAt = new Date().toISOString();
+      }
+      if (parentSessionId) {
+        appendAgentHistory(parentSessionId, "spawn.jsonl", {
+          id: subagentId, label, status: result.ok ? "done" : "error",
+          result: (result.ok ? result.result : result.error)?.slice(0, 2000),
+          finishedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId: parentSessionId,
+          status: result.ok ? "subagent_done" : "subagent_error",
+          subagentId, label,
+          result: (result.ok ? result.result : result.error)?.slice(0, 500),
+        });
+      }
+      return result;
+    } else if (agentDef && systemConfig) {
       resolvedAgentDef = agentDef;
       subPrompt = getManualAgentPrompt(agentDef, systemConfig);
       subPrompt += `\nYOUR TASK:\n${args.task}\n`;
@@ -3347,7 +3426,43 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     case "load_skill": return loadSkillTool(args);
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
-    case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth);
+    case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth, signal);
+
+    // ─── Remote Task Tool ───
+    case "remote_task": {
+      const settings = await getSettings();
+      let instance: RemoteInstance | undefined;
+
+      // Try to resolve instance by name/id from settings
+      if (settings.remoteInstances && typeof args.instance === "string") {
+        instance = settings.remoteInstances.find(
+          (ri) => ri.id === args.instance || ri.name === args.instance
+        );
+      }
+
+      // Fallback: parse as inline JSON { url, token }
+      if (!instance && typeof args.instance === "string") {
+        try {
+          const parsed = JSON.parse(args.instance);
+          if (parsed.url) {
+            instance = { id: "inline", name: "inline", url: parsed.url, token: parsed.token || "" };
+          }
+        } catch {
+          // not JSON, already tried name lookup
+        }
+      }
+
+      if (!instance) {
+        const available = settings.remoteInstances?.map((ri) => ri.name || ri.id).join(", ") || "none";
+        return { ok: false, error: `Remote instance "${args.instance}" not found. Available: ${available}` };
+      }
+
+      return remoteTask(instance, args.task, {
+        idleTimeoutMs: (args.idle_timeout || 60) * 1000,
+        maxTimeoutMs: (args.max_timeout || 1800) * 1000,
+        signal,
+      });
+    }
 
     // ─── Realtime Agent Tools ───
     case "send_task": return realtimeSendTask(args, signal);

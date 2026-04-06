@@ -19,10 +19,11 @@ import { toolsRoutes } from "./routes/tools";
 import { clawhubRoutes } from "./routes/clawhub";
 import { projectsRoutes } from "./routes/projects";
 import { agentsRoutes } from "./routes/agents";
+import { remoteRoutes } from "./routes/remote";
 import { setupSocket } from "./services/socket";
 import { initMcpServers } from "./services/mcp";
 import { initScheduler } from "./services/scheduler";
-import { getFileTokens, saveFileTokens, generateToken, isValidFileToken } from "./services/data";
+import { getFileTokens, saveFileTokens, generateToken, isValidFileToken, getSettings } from "./services/data";
 
 dotenv.config();
 
@@ -108,6 +109,13 @@ async function start() {
     if (token === ACCESS_TOKEN) {
       return { ok: true };
     }
+    // Also accept remoteToken for remote instance connections (only when remote is enabled)
+    if (token) {
+      const settings = await getSettings();
+      if (settings.remoteEnabled && settings.remoteToken && token === settings.remoteToken) {
+        return { ok: true };
+      }
+    }
     reply.code(401);
     return { ok: false, error: "Invalid access token" };
   });
@@ -122,6 +130,11 @@ async function start() {
         if (!ACCESS_TOKEN) return;
         const token = request.headers.authorization?.replace("Bearer ", "") || (request.query as any).token;
         if (token === ACCESS_TOKEN) return;
+        // Allow remote token for incoming remote instance connections (only when remote is enabled)
+        if (token) {
+          const settings = await getSettings();
+          if (settings.remoteEnabled && settings.remoteToken && token === settings.remoteToken) return;
+        }
         // Allow file token for /files routes
         if (request.url.startsWith("/api/files") && token && (await isValidFileToken(token))) return;
         reply.code(401);
@@ -139,6 +152,7 @@ async function start() {
       api.register(clawhubRoutes, { prefix: "/clawhub" });
       api.register(projectsRoutes, { prefix: "/projects" });
       api.register(agentsRoutes, { prefix: "/agents" });
+      api.register(remoteRoutes, { prefix: "/remote" });
     },
     { prefix: "/api" }
   );
@@ -173,11 +187,20 @@ async function start() {
     { prefix: "/sandbox" }
   );
 
-  // Socket.io access token auth
+  // Socket.io access token auth (accepts ACCESS_TOKEN or remoteToken)
   if (ACCESS_TOKEN) {
-    io.use((socket, next) => {
+    io.use(async (socket, next) => {
       const token = socket.handshake.auth?.token;
       if (token === ACCESS_TOKEN) return next();
+      // Also accept remoteToken for remote instance connections
+      if (token) {
+        try {
+          const settings = await getSettings();
+          if (settings.remoteEnabled && settings.remoteToken && token === settings.remoteToken) {
+            return next();
+          }
+        } catch {}
+      }
       return next(new Error("Unauthorized — invalid or missing access token"));
     });
   }

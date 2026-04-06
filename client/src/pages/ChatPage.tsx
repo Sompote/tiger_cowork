@@ -416,13 +416,34 @@ export default function ChatPage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [activeSession, connected]);
 
+  // Buffer incoming chunks and flush to state at most every 100ms to avoid flooding React
+  const chunkBufferRef = useRef("");
+  const chunkFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
+    const flushChunks = () => {
+      chunkFlushTimerRef.current = null;
+      if (chunkBufferRef.current) {
+        const buf = chunkBufferRef.current;
+        chunkBufferRef.current = "";
+        setStreaming((prev) => prev + buf);
+      }
+    };
+
     const unsub1 = onChunk((data: any) => {
       if (data.sessionId === activeSession) {
         if (data.clear) {
+          chunkBufferRef.current = "";
+          if (chunkFlushTimerRef.current) {
+            clearTimeout(chunkFlushTimerRef.current);
+            chunkFlushTimerRef.current = null;
+          }
           setStreaming("");
         } else {
-          setStreaming((prev) => prev + data.content);
+          chunkBufferRef.current += data.content;
+          if (!chunkFlushTimerRef.current) {
+            chunkFlushTimerRef.current = setTimeout(flushChunks, 100);
+          }
         }
       }
     });
@@ -541,11 +562,22 @@ export default function ChatPage() {
         setStatus("");
       }
     });
-    return () => { unsub1(); unsub2(); unsub3(); };
+    return () => {
+      unsub1(); unsub2(); unsub3();
+      if (chunkFlushTimerRef.current) clearTimeout(chunkFlushTimerRef.current);
+      chunkBufferRef.current = "";
+    };
   }, [activeSession, onChunk, onResponse, onStatus]);
 
+  // Throttle scrollIntoView to at most once every 200ms to avoid layout thrashing
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!scrollTimerRef.current) {
+      scrollTimerRef.current = setTimeout(() => {
+        scrollTimerRef.current = null;
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 200);
+    }
   }, [messages, streaming]);
 
   const createNewSession = async () => {

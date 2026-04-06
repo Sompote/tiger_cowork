@@ -73,6 +73,10 @@ export interface Settings {
   subAgentMaxConcurrent?: number;
   subAgentTimeout?: number;
   subAgentConfigFile?: string;
+  remoteEnabled?: boolean; // master toggle – when false, remote token auth and remote UI are disabled
+  remoteAgentConfig?: string; // YAML config file for incoming remote tasks ("" = simple chat)
+  remoteInstances?: Array<{ id: string; name: string; url: string; token: string }>;
+  remoteToken?: string;  // this machine's token for incoming remote connections (separate from accessToken)
   [key: string]: any;
 }
 

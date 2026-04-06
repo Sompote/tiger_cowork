@@ -166,6 +166,14 @@ export const api = {
   deleteFileToken: (id: string) => request(`/settings/file-tokens/${id}`, { method: "DELETE" }),
   regenerateFileToken: (id: string) => request(`/settings/file-tokens/${id}/regenerate`, { method: "POST" }),
 
+  // Remote Token (this machine's token for incoming remote connections)
+  getRemoteToken: () => request("/settings/remote-token"),
+  regenerateRemoteToken: () => request("/settings/remote-token/regenerate", { method: "POST" }),
+
+  // Remote Instances
+  testRemoteInstance: (id: string) =>
+    request("/settings/remote-instances/test", { method: "POST", body: JSON.stringify({ id }) }),
+
   // MCP
   mcpStatus: () => request("/settings/mcp/status"),
   mcpConnect: (name: string, url: string, type?: string, headers?: Record<string, string>) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url, type, headers }) }),

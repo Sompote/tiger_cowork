@@ -1,6 +1,6 @@
 system:
   name: 'Model researchers '
-  orchestration_mode: hierarchical
+  orchestration_mode: hybrid
   communication_protocol: structured_handoff
   context_passing: full_chain
 agents:

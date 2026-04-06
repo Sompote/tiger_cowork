@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { getSettings, saveSettings, getFileTokens, saveFileTokens, generateToken } from "../services/data";
 import { connectServer, disconnectServer, getMcpStatus, initMcpServers } from "../services/mcp";
+import { remoteTask } from "../services/remote";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
@@ -39,6 +40,19 @@ export async function settingsRoutes(fastify: FastifyInstance) {
         }
         return { ...tool, headers: maskedHeaders };
       });
+    }
+    // Mask the remote token
+    if (masked.remoteToken) {
+      masked.remoteToken = masked.remoteToken.slice(0, 8) + "..." + masked.remoteToken.slice(-4);
+    }
+    // Mask remote instance tokens
+    if (masked.remoteInstances && Array.isArray(masked.remoteInstances)) {
+      masked.remoteInstances = masked.remoteInstances.map((ri: any) => ({
+        ...ri,
+        token: ri.token && ri.token.length > 12
+          ? ri.token.slice(0, 8) + "..." + ri.token.slice(-4)
+          : ri.token,
+      }));
     }
     return masked;
   });
@@ -79,6 +93,20 @@ export async function settingsRoutes(fastify: FastifyInstance) {
           }
         }
         return { ...tool, headers: restored };
+      });
+    }
+    // Don't overwrite remote token with masked value
+    if (body.remoteToken?.includes("...")) {
+      updated.remoteToken = current.remoteToken;
+    }
+    // Don't overwrite remote instance tokens with masked values
+    if (body.remoteInstances && Array.isArray(body.remoteInstances) && current.remoteInstances && Array.isArray(current.remoteInstances)) {
+      updated.remoteInstances = body.remoteInstances.map((ri: any) => {
+        if (ri.token?.includes("...")) {
+          const orig = current.remoteInstances!.find((o: any) => o.id === ri.id);
+          return orig ? { ...ri, token: orig.token } : ri;
+        }
+        return ri;
       });
     }
     await saveSettings(updated);
@@ -137,6 +165,43 @@ export async function settingsRoutes(fastify: FastifyInstance) {
       }
     } catch (err: any) {
       return { success: false, message: err.message };
+    }
+  });
+
+  // --- Remote Token (this machine's token for incoming remote connections) ---
+
+  fastify.get("/remote-token", async (request, reply) => {
+    const settings = await getSettings();
+    if (!settings.remoteToken) {
+      // Auto-generate on first access
+      settings.remoteToken = generateToken();
+      await saveSettings(settings);
+    }
+    return { token: settings.remoteToken };
+  });
+
+  fastify.post("/remote-token/regenerate", async (request, reply) => {
+    const settings = await getSettings();
+    settings.remoteToken = generateToken();
+    await saveSettings(settings);
+    return { token: settings.remoteToken };
+  });
+
+  // --- Remote Instance Test ---
+  fastify.post("/remote-instances/test", async (request, reply) => {
+    const { id } = request.body as any;
+    if (!id) { reply.code(400); return { error: "id is required" }; }
+    const settings = await getSettings();
+    const instance = settings.remoteInstances?.find((ri) => ri.id === id);
+    if (!instance) { reply.code(404); return { ok: false, message: `Remote instance "${id}" not found` }; }
+    try {
+      const result = await remoteTask(instance, "Hello, reply with just pong", {
+        idleTimeoutMs: 15_000,
+        maxTimeoutMs: 30_000,
+      });
+      return { ok: result.ok, message: result.ok ? result.result : result.error };
+    } catch (err: any) {
+      return { ok: false, message: err.message };
     }
   });
 
