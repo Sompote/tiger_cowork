@@ -479,6 +479,14 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
   const tickRef = useRef<number>(0);
   const [canvasWidth, setCanvasWidth] = useState(800);
   const prevToolCountsRef = useRef<Record<string, number>>({});
+  const bgImageRef = useRef<HTMLImageElement | null>(null);
+
+  // Load background image once
+  useEffect(() => {
+    const img = new Image();
+    img.src = "/minecraft-bg.webp";
+    img.onload = () => { bgImageRef.current = img; };
+  }, []);
 
   const initAgents = useCallback(() => {
     const names = Object.keys(agentTools);
@@ -615,18 +623,23 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
 
       ctx.clearRect(0, 0, canvasWidth, CANVAS_H);
 
-      // Pixelated grass ground
-      for (let gx = 0; gx < canvasWidth; gx += 4) {
-        const shade = 80 + (gx * 7 % 50);
-        ctx.fillStyle = `rgb(${30 + (gx * 3 % 25)}, ${shade}, ${30 + (gx * 11 % 20)})`;
-        ctx.fillRect(gx, CANVAS_H - GROUND_H, 4, GROUND_H);
-      }
-      // Grass top edge
-      for (let gx = 0; gx < canvasWidth; gx += 4) {
-        if ((gx * 13) % 8 < 5) {
-          ctx.fillStyle = `rgb(${50 + (gx * 5 % 30)}, ${120 + (gx * 9 % 40)}, ${40 + (gx * 7 % 25)})`;
-          ctx.fillRect(gx, CANVAS_H - GROUND_H - 3 + ((gx * 3) % 4), 3, 4);
-        }
+      // Draw background image (cover-fit) or fallback to gradient
+      const bgImg = bgImageRef.current;
+      if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
+        const scale = Math.max(canvasWidth / bgImg.naturalWidth, CANVAS_H / bgImg.naturalHeight);
+        const sw = canvasWidth / scale;
+        const sh = CANVAS_H / scale;
+        const sx = (bgImg.naturalWidth - sw) / 2;
+        const sy = (bgImg.naturalHeight - sh) / 2;
+        ctx.drawImage(bgImg, sx, sy, sw, sh, 0, 0, canvasWidth, CANVAS_H);
+      } else {
+        // Fallback: original gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+        grad.addColorStop(0, "rgba(10,14,25,0.97)");
+        grad.addColorStop(0.7, "rgba(20,28,40,0.97)");
+        grad.addColorStop(1, "rgba(30,50,30,0.97)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvasWidth, CANVAS_H);
       }
 
       // Sort by Y for depth (reuse array to reduce GC pressure)
@@ -745,7 +758,7 @@ export default function AgentGraphic({ agentTools, activeAgents, doneAgents }: A
 
   return (
     <div style={{
-      background: "linear-gradient(180deg, rgba(10,14,25,0.97) 0%, rgba(20,28,40,0.97) 70%, rgba(30,50,30,0.97) 100%)",
+      background: "transparent",
       borderRadius: 8,
       border: "1px solid rgba(255,255,255,0.1)",
       overflow: "hidden",
@@ -790,6 +803,7 @@ function formatToolText(tool: string): string {
     clawhub_search: "Searching ClawHub...", clawhub_install: "Installing skill...",
     spawn_subagent: "Spawning helper!",
   };
+  if (tool.startsWith("remote:")) return `📡 ${tool.slice(7)}`;
   return m[tool] || `Using ${tool}...`;
 }
 

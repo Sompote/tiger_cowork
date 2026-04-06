@@ -534,6 +534,10 @@ export default function ChatPage() {
         // silent — keep current status
       } else if (data.status === "realtime_agent_done") {
         setStatus(`Agent "${data.label}" completed`);
+      } else if (data.status === "running" && data.content) {
+        setStatus(`📡 ${data.label}: ${(data.content || "").slice(0, 80)}`);
+      } else if (data.status === "done" && data.label) {
+        setStatus(`Agent "${data.label}" remote task completed`);
       } else if (data.status === "retrying") {
         setStatus(`Retrying (${data.attempt}/${data.maxRetries})...`);
       } else if (data.status === "job_complete") {

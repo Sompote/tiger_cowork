@@ -286,13 +286,22 @@ export function setupSocket(io: Server): void {
           task.activeAgents.add(agentLabel);
           task.activeAgent = agentLabel;
           if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
+        } else if (data.status === "running" && data.content) {
+          // Remote agent progress — push tool entry with content so graphic shows bubble
+          task.activeAgents.add(agentLabel);
+          task.activeAgent = agentLabel;
+          if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
+          // Encode remote content as "remote:<text>" so client can display it in bubble
+          const shortContent = data.content.replace(/^\[.*?\]\s*/, "").slice(0, 80);
+          pushToolCapped(task.agentTools[agentLabel], `remote:${shortContent}`);
+          pushToolCapped(task.toolCalls, "remote_progress");
         } else if ((data.status === "subagent_tool" || data.status === "realtime_agent_tool") && data.tool) {
           task.activeAgents.add(agentLabel);
           task.activeAgent = agentLabel;
           if (!task.agentTools[agentLabel]) task.agentTools[agentLabel] = [];
           pushToolCapped(task.agentTools[agentLabel], data.tool);
           pushToolCapped(task.toolCalls, data.tool);
-        } else if (data.status === "subagent_done" || data.status === "realtime_agent_done") {
+        } else if (data.status === "subagent_done" || data.status === "realtime_agent_done" || data.status === "done") {
           // Agent finished — remove from active set, add to done set
           task.activeAgents.delete(agentLabel);
           task.doneAgents.add(agentLabel);
@@ -357,6 +366,12 @@ export function setupSocket(io: Server): void {
         // silent — avoid flooding
       } else if (data.status === "realtime_agent_done") {
         progressText = `> **✅ ${data.label}** task completed\n`;
+
+      // ─── Remote agent progress (streamed from polling) ───
+      } else if (data.status === "running" && data.content) {
+        progressText = `> **📡 ${data.label}** — _${data.content.replace(/^\[.*?\]\s*/, "").slice(0, 500)}_\n`;
+      } else if (data.status === "done" && data.label) {
+        progressText = `> **✅ ${data.label}** remote task completed\n`;
 
       // ─── Human Node messages (agent → human) ───
       } else if (data.status === "human_node_message") {
@@ -503,7 +518,7 @@ export function setupSocket(io: Server): void {
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 500)}_\n`,
           });
 
-          const result = humanSendToAgent(sessionId, targetId, prompt);
+          const result = await humanSendToAgent(sessionId, targetId, prompt);
           if (!result.ok) {
             const errMsg = `Failed to send to ${targetId}: ${result.error}`;
             session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
@@ -551,7 +566,7 @@ export function setupSocket(io: Server): void {
           });
 
           const broadcastStartTime = Date.now();
-          const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
+          const broadcastResult = await humanBroadcastToAgents(sessionId, prompt);
           if (!broadcastResult.ok) {
             const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
             session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
@@ -1242,7 +1257,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             content: `> <span class="proto-tag proto-bus">HUMAN</span> → **${agentName}** (\`${targetId}\`): _${prompt.slice(0, 500)}_\n`,
           });
 
-          const result = humanSendToAgent(sessionId, targetId, prompt);
+          const result = await humanSendToAgent(sessionId, targetId, prompt);
           if (!result.ok) {
             const errMsg = `Failed: ${result.error}`;
             session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });
@@ -1285,7 +1300,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           });
 
           const projBcStartTime = Date.now();
-          const broadcastResult = humanBroadcastToAgents(sessionId, prompt);
+          const broadcastResult = await humanBroadcastToAgents(sessionId, prompt);
           if (!broadcastResult.ok) {
             const errMsg = `Broadcast failed: ${broadcastResult.errors.join("; ")}`;
             session.messages.push({ role: "assistant", content: errMsg, timestamp: new Date().toISOString() });

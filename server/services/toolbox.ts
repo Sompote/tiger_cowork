@@ -2907,7 +2907,7 @@ export function getHumanConnectedAgents(sessionId: string): string[] {
 }
 
 /** Send a task from the human to a specific agent */
-export function humanSendToAgent(sessionId: string, targetAgentId: string, task: string, context?: string): { ok: boolean; error?: string } {
+export async function humanSendToAgent(sessionId: string, targetAgentId: string, task: string, context?: string): Promise<{ ok: boolean; error?: string }> {
   const session = realtimeSessions.get(sessionId);
   if (!session) return { ok: false, error: "No realtime session active." };
 
@@ -2932,6 +2932,58 @@ export function humanSendToAgent(sessionId: string, targetAgentId: string, task:
     }
   }
 
+  // Remote agent routing — delegate to remote instance instead of local bus
+  if (targetAgent.agentDef.type === "remote") {
+    const rtSettings = await getSettings();
+    const instances = rtSettings.remoteInstances || [];
+    let instance: RemoteInstance | undefined;
+    if (targetAgent.agentDef.remote_instance) {
+      instance = instances.find((i: RemoteInstance) => i.id === targetAgent.agentDef.remote_instance || i.name === targetAgent.agentDef.remote_instance);
+    }
+    if (!instance && targetAgent.agentDef.remote_url && targetAgent.agentDef.remote_token) {
+      instance = { id: "inline", name: targetAgent.agentDef.id, url: targetAgent.agentDef.remote_url, token: targetAgent.agentDef.remote_token };
+    }
+    if (!instance) {
+      return { ok: false, error: `Remote agent "${targetAgentId}" has no resolvable instance.` };
+    }
+    console.log(`[Realtime:Human] Human → REMOTE ${targetAgentId} (${instance.url}): ${task.slice(0, 100)}`);
+    const remoteLabel = targetAgent.agentDef.name || targetAgentId;
+    if (subagentStatusCallback) {
+      subagentStatusCallback({ sessionId, status: "running", agentId: targetAgentId, label: remoteLabel, content: `Remote task → ${instance.name || instance.url}` });
+    }
+    // Run remote task in background — don't block the human send
+    remoteTask(instance, context ? `${task}\n\nADDITIONAL CONTEXT:\n${context}` : task, {
+      idleTimeoutMs: (rtSettings.subAgentTimeout || 120) * 1000,
+      maxTimeoutMs: (rtSettings.subAgentTimeout || 1800) * 1000,
+      onProgress: (progressMsg: string) => {
+        if (subagentStatusCallback) {
+          if (/Still working\.\.\./.test(progressMsg)) return;
+          subagentStatusCallback({ sessionId, status: "running", agentId: targetAgentId, label: remoteLabel, content: progressMsg });
+        }
+      },
+    }).then((result) => {
+      // Publish result to bus so waiting agents can pick it up
+      busPublish(sessionId, targetAgentId, `result:${targetAgentId}`, {
+        result: result.ok ? result.result : `Remote error: ${result.error}`,
+        outputFiles: [],
+      });
+      if (subagentStatusCallback) {
+        subagentStatusCallback({
+          sessionId,
+          status: result.ok ? "realtime_agent_done" : "error",
+          agentId: targetAgentId,
+          label: remoteLabel,
+          content: result.ok ? (result.result || "").slice(0, 200) : result.error,
+        });
+      }
+    }).catch((err) => {
+      if (subagentStatusCallback) {
+        subagentStatusCallback({ sessionId, status: "error", agentId: targetAgentId, label: remoteLabel, content: err.message });
+      }
+    });
+    return { ok: true };
+  }
+
   // Publish task to the agent's bus topic
   const humanNodeForPublish = humanNode || session.systemConfig.agents?.find((a: AgentConfig) => a.role === "human");
   busPublish(sessionId, humanNodeForPublish?.id || "human", `task:${targetAgentId}`, {
@@ -2945,7 +2997,7 @@ export function humanSendToAgent(sessionId: string, targetAgentId: string, task:
 }
 
 /** Send a task from human to ALL connected agents (broadcast) */
-export function humanBroadcastToAgents(sessionId: string, task: string, context?: string): { ok: boolean; sent: string[]; errors: string[] } {
+export async function humanBroadcastToAgents(sessionId: string, task: string, context?: string): Promise<{ ok: boolean; sent: string[]; errors: string[] }> {
   const connectedAgents = getHumanConnectedAgents(sessionId);
   if (connectedAgents.length === 0) {
     return { ok: false, sent: [], errors: ["No agents connected to the human node"] };
@@ -2955,7 +3007,7 @@ export function humanBroadcastToAgents(sessionId: string, task: string, context?
   const errors: string[] = [];
 
   for (const agentId of connectedAgents) {
-    const result = humanSendToAgent(sessionId, agentId, task, context);
+    const result = await humanSendToAgent(sessionId, agentId, task, context);
     if (result.ok) {
       sent.push(agentId);
     } else {
@@ -3060,6 +3112,50 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
       if (allAllowed.length > 0 && !allAllowed.includes(args.to)) {
         return { ok: false, error: `Agent "${callerId}" is not connected to "${args.to}". Allowed targets: ${allAllowed.join(", ")}` };
       }
+    }
+  }
+
+  // Remote agent routing — delegate to remote instance instead of local bus
+  if (targetAgent.agentDef.type === "remote") {
+    const rtSettings = await getSettings();
+    const instances = rtSettings.remoteInstances || [];
+    let instance: RemoteInstance | undefined;
+    if (targetAgent.agentDef.remote_instance) {
+      instance = instances.find((i: RemoteInstance) => i.id === targetAgent.agentDef.remote_instance || i.name === targetAgent.agentDef.remote_instance);
+    }
+    if (!instance && targetAgent.agentDef.remote_url && targetAgent.agentDef.remote_token) {
+      instance = { id: "inline", name: targetAgent.agentDef.id, url: targetAgent.agentDef.remote_url, token: targetAgent.agentDef.remote_token };
+    }
+    if (!instance) {
+      return { ok: false, error: `Remote agent "${args.to}" has no resolvable instance. Configure remote_instance or remote_url+remote_token.` };
+    }
+    console.log(`[Realtime] ${_currentAgentId} → send_task → REMOTE ${args.to} (${instance.url})`);
+    const remoteLabel = targetAgent.agentDef.name || args.to;
+    if (subagentStatusCallback) {
+      subagentStatusCallback({ sessionId, status: "running", agentId: args.to, label: remoteLabel, content: `Remote task → ${instance.name || instance.url}` });
+    }
+    try {
+      const result = await remoteTask(instance, args.task, {
+        idleTimeoutMs: (rtSettings.subAgentTimeout || 120) * 1000,
+        maxTimeoutMs: (rtSettings.subAgentTimeout || 1800) * 1000,
+        signal,
+        onProgress: (progressMsg: string) => {
+          if (subagentStatusCallback) {
+            // Skip heartbeat entries
+            if (/Still working\.\.\./.test(progressMsg)) return;
+            subagentStatusCallback({ sessionId, status: "running", agentId: args.to, label: remoteLabel, content: progressMsg });
+          }
+        },
+      });
+      if (subagentStatusCallback) {
+        subagentStatusCallback({ sessionId, status: "done", agentId: args.to, label: remoteLabel, content: result.ok ? (result.result || "").slice(0, 200) : result.error });
+      }
+      return { ok: result.ok, agentId: args.to, agentName: targetAgent.agentDef.name, result: result.result, error: result.error };
+    } catch (err: any) {
+      if (subagentStatusCallback) {
+        subagentStatusCallback({ sessionId, status: "error", agentId: args.to, label: remoteLabel, content: err.message });
+      }
+      return { ok: false, agentId: args.to, error: err.message };
     }
   }
 

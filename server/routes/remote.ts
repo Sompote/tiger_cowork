@@ -278,7 +278,7 @@ async function processRemoteTask(
       targetAgentId = connected[0];
       waitTopic = `result:${connected[0]}`;
       addProgress(entry, `Broadcasting task to ${connected.length} agents: ${connected.join(", ")}`);
-      humanBroadcastToAgents(sessionId, task);
+      await humanBroadcastToAgents(sessionId, task);
     }
   }
 
