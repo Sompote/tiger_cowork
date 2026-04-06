@@ -1,4 +1,4 @@
-![Tiger CoWork Banner](picture/banner2.jpg)
+![Tiger CoWork Banner](picture/screen_read.png)
 
 # Tiger CoWork v0.5.0
 
