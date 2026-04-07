@@ -89,7 +89,8 @@ export default function SettingsPage() {
   };
 
   const save = async () => {
-    await api.saveSettings(settings);
+    const { _soulOpen, ...settingsToSave } = settings;
+    await api.saveSettings(settingsToSave);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -389,6 +390,68 @@ export default function SettingsPage() {
             <label>Python Path</label>
             <input value={settings.pythonPath || ""} onChange={(e) => setSettings({ ...settings, pythonPath: e.target.value })} placeholder="python3" />
           </div>
+        </section>
+
+        <section className="card">
+          <h3
+            style={{ cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 8 }}
+            onClick={() => setSettings({ ...settings, _soulOpen: !settings._soulOpen })}
+          >
+            Orchestrator Soul & Identity
+            <span style={{ fontSize: 12, opacity: 0.6 }}>{settings._soulOpen ? "▼" : "▶"}</span>
+            {(settings.orchestratorSoul || settings.orchestratorIdentity) && (
+              <span style={{ fontSize: 11, opacity: 0.5, fontWeight: 400 }}>(configured)</span>
+            )}
+          </h3>
+          {!settings._soulOpen && (
+            <p className="hint">Click to configure the orchestrator's internal cognition (SOUL.md) and external presentation (IDENTITY.md). These are injected into the system prompt when chatting with humans.</p>
+          )}
+          {settings._soulOpen && (
+            <>
+              <div className="form-group">
+                <label>SOUL.md — Internal Cognition, Values & Behavior</label>
+                <textarea
+                  value={settings.orchestratorSoul || ""}
+                  onChange={(e) => setSettings({ ...settings, orchestratorSoul: e.target.value.slice(0, 3000) })}
+                  rows={10}
+                  maxLength={3000}
+                  placeholder={"Define the orchestrator's internal cognition:\n- Core values and principles\n- Decision-making heuristics\n- Behavioral priors and communication style\n- Ethical boundaries\n- How to handle ambiguity\n\nThis is injected as a behavioral prior — it directly shapes model outputs."}
+                  style={{ fontFamily: "monospace", fontSize: 13 }}
+                />
+                <p className="hint">{(settings.orchestratorSoul || "").length}/3,000 chars — Directly affects model outputs. Modifiable by agent with user notification.</p>
+              </div>
+              <div className="form-group">
+                <label>IDENTITY.md — External Presentation</label>
+                <textarea
+                  value={settings.orchestratorIdentity || ""}
+                  onChange={(e) => setSettings({ ...settings, orchestratorIdentity: e.target.value.slice(0, 200) })}
+                  rows={3}
+                  maxLength={200}
+                  placeholder={"Display name, avatar description, external persona.\nTypically static — used for image generation and display."}
+                  style={{ fontFamily: "monospace", fontSize: 13 }}
+                />
+                <p className="hint">{(settings.orchestratorIdentity || "").length}/200 chars — Affects display name, avatar, image generation. Typically static.</p>
+              </div>
+              <div style={{ background: "var(--bg-secondary, #1a1a2e)", borderRadius: 8, padding: 12, fontSize: 12, opacity: 0.8 }}>
+                <strong>Key Distinction:</strong>
+                <table style={{ width: "100%", marginTop: 8, borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border, #333)" }}>
+                      <th style={{ textAlign: "left", padding: "4px 8px" }}>Dimension</th>
+                      <th style={{ textAlign: "left", padding: "4px 8px" }}>SOUL.md</th>
+                      <th style={{ textAlign: "left", padding: "4px 8px" }}>IDENTITY.md</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr><td style={{ padding: "4px 8px" }}>Concern</td><td style={{ padding: "4px 8px" }}>Internal cognition, values, behavior</td><td style={{ padding: "4px 8px" }}>External presentation, name, avatar</td></tr>
+                    <tr><td style={{ padding: "4px 8px" }}>Token allocation</td><td style={{ padding: "4px 8px" }}>~3,000 chars</td><td style={{ padding: "4px 8px" }}>~200 chars</td></tr>
+                    <tr><td style={{ padding: "4px 8px" }}>Modifiable by agent</td><td style={{ padding: "4px 8px" }}>Yes (with user notification)</td><td style={{ padding: "4px 8px" }}>Typically static</td></tr>
+                    <tr><td style={{ padding: "4px 8px" }}>Affects model outputs</td><td style={{ padding: "4px 8px" }}>Directly (behavioral prior)</td><td style={{ padding: "4px 8px" }}>Indirectly (display, image gen)</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="card">

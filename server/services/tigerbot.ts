@@ -776,11 +776,15 @@ interface TigerBotResponse {
   toolResults?: Array<{ tool: string; result: any }>;
 }
 
-// Strip internal tool call markers from LLM responses before showing to users
-// Handles various formats the LLM may use to represent tool calls inline
+// Strip internal tool call markers and model thinking/reasoning from LLM responses
 function sanitizeToolCallContent(content: string): string {
   if (!content) return content;
   let cleaned = content;
+  // Remove model thinking/reasoning blocks (e.g. <think>...</think>, <thinking>...</thinking>, <reasoning>...</reasoning>)
+  cleaned = cleaned.replace(/<think(?:ing)?>\s*[\s\S]*?<\/think(?:ing)?>\s*/gi, "");
+  cleaned = cleaned.replace(/<reasoning>\s*[\s\S]*?<\/reasoning>\s*/gi, "");
+  cleaned = cleaned.replace(/<reflection>\s*[\s\S]*?<\/reflection>\s*/gi, "");
+  cleaned = cleaned.replace(/<inner_monologue>\s*[\s\S]*?<\/inner_monologue>\s*/gi, "");
   // Remove [tool_name]({"param": "value", ...}) style markers (JSON args)
   cleaned = cleaned.replace(/\[(\w+)\]\s*\(\s*\{[^}]*\}\s*\)/g, "");
   // Remove [tool_name](<parameter name="...">...</parameter>) style markers (XML-like, single line)
@@ -994,6 +998,7 @@ function toAnthropicTools(tools: any[]): any[] {
 // Convert Anthropic response to OpenAI-compatible format
 function fromAnthropicResponse(data: any): any {
   const content = data.content || [];
+  // Only include text blocks — exclude thinking, redacted_thinking, etc.
   const textParts = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
   const toolUses = content.filter((b: any) => b.type === "tool_use");
   const toolCalls = toolUses.map((tu: any) => ({

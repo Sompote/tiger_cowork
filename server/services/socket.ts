@@ -81,7 +81,7 @@ export function killActiveTask(taskId: string): boolean {
   return false;
 }
 
-export async function buildSystemPrompt(filterSkillIds?: string[]): Promise<string> {
+export async function buildSystemPrompt(filterSkillIds?: string[], options?: { includeAgentConfig?: boolean }): Promise<string> {
   // Gather installed clawhub skills
   const clawhubDir = path.resolve("Tiger_bot/skills");
   let clawhubSkills: string[] = [];
@@ -174,29 +174,41 @@ export async function buildSystemPrompt(filterSkillIds?: string[]): Promise<stri
   }
 
   const settings = await getSettings();
+  const includeAgents = options?.includeAgentConfig ?? false;
   const isManualSubAgent = settings.subAgentEnabled && settings.subAgentMode === "manual";
   const isRealtimeAgent = settings.subAgentEnabled && settings.subAgentMode === "realtime";
 
-  // Mode-specific delegation rules
+  // Mode-specific delegation rules — only include when agents are actually active
   let delegationRules = "";
-  if (isRealtimeAgent) {
-    delegationRules = `
+  if (includeAgents) {
+    if (isRealtimeAgent) {
+      delegationRules = `
 REALTIME AGENT MODE: All agents are already alive. Delegate ALL work to the agent team via send_task/wait_result.
 - If an orchestrator exists, send tasks ONLY to the orchestrator — it manages all sub-delegation.
 - Workflow: send_task → wait_result → synthesize response. Only use run_python/write_file for formatting final output.
 - Always delegate, even for follow-ups or corrections. Include chat context so agents know what to fix.`;
-  } else if (isManualSubAgent) {
-    delegationRules = `
+    } else if (isManualSubAgent) {
+      delegationRules = `
 MANUAL SUB-AGENT MODE: Delegate ALL tasks via spawn_subagent with agentId matching the YAML config.
 - Follow the workflow sequence strictly. Spawn independent downstream agents in parallel.
 - Always delegate, even for simple tasks or follow-ups. Include chat context so agents know what to fix.`;
-  } else if (settings.subAgentEnabled) {
-    delegationRules = `
+    } else if (settings.subAgentEnabled) {
+      delegationRules = `
 SUB-AGENTS: Use spawn_subagent for complex multi-part tasks. Each sub-agent runs independently with full tool access.`;
+    }
+  }
+
+  // SOUL.md & IDENTITY.md — orchestrator behavioral priors
+  let soulBlock = "";
+  if (settings.orchestratorSoul) {
+    soulBlock += `\n\n=== SOUL.md (Internal Cognition & Behavioral Prior) ===\n${settings.orchestratorSoul}`;
+  }
+  if (settings.orchestratorIdentity) {
+    soulBlock += `\n\n=== IDENTITY.md (External Presentation) ===\n${settings.orchestratorIdentity}`;
   }
 
   return `You are Tigrimos, an AI assistant with tools for search, code execution, files, and skills.
-${delegationRules}
+${delegationRules}${soulBlock}
 
 Rules:
 - Always use tools to produce real results — never just describe what you would do.
@@ -210,7 +222,7 @@ Output files:
 - Save charts as .png (plt.savefig, never plt.show). Save reports as .html or .pdf. Use python-docx for .docx files (never write_file for binary formats).
 - Generate actual output files — don't just print data. Combine data processing and chart generation in one run_python call when possible.
 - For interactive visualizations, use run_react. Globals (React, hooks, Recharts components) are pre-loaded — do not use import/export statements.
-- MCP tools (prefixed "mcp_") are available when connected via Settings.${skillsList}${await getManualAgentConfigSummary() || ""}`;
+- MCP tools (prefixed "mcp_") are available when connected via Settings.${skillsList}${includeAgents ? (await getManualAgentConfigSummary() || "") : ""}`;
 }
 
 // Store io reference for broadcasting status to all connected clients
@@ -854,7 +866,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
         const result = await callTigerBotWithTools(
           chatMessages,
-          await buildSystemPrompt(),
+          await buildSystemPrompt(undefined, { includeAgentConfig: !!realtimeTools }),
           // onToolCall — show status + protocol tags
           (name, args) => {
             toolsUsed.push(name);
@@ -940,11 +952,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
 
-        // Clear streaming progress and show final AI response
+        // Clear streaming progress — final response is delivered via chat:response
         socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-        if (result.content) {
-          socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
-        }
 
         const fullResponse = result.content + pendingResultText +
           (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
@@ -987,7 +996,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
           // Fallback to simple call without tools — still include any outputFiles collected during tool calls
           try {
-            const result = await callTigerBot(chatMessages, await buildSystemPrompt());
+            const result = await callTigerBot(chatMessages, await buildSystemPrompt(undefined, { includeAgentConfig: !!realtimeTools }));
             const fallbackContent = result.content + pendingOnError +
               (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");
             session.messages.push({
@@ -1130,7 +1139,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         : "";
 
       // Build project-aware system prompt (filter skills to only project-selected ones)
-      let projectPrompt = await buildSystemPrompt(project.skills && project.skills.length > 0 ? project.skills : undefined);
+      // Determine if realtime agents will be active for this project chat
+      const projSettings = await getSettings();
+      const projHasRealtime = projSettings.subAgentEnabled && projSettings.subAgentMode === "realtime" && !!projSettings.subAgentConfigFile;
+      let projectPrompt = await buildSystemPrompt(
+        project.skills && project.skills.length > 0 ? project.skills : undefined,
+        { includeAgentConfig: projHasRealtime }
+      );
 
       // Read project memory fresh from {workingFolder}/memory.md every time
       let projectMemory = "";
@@ -1614,11 +1629,8 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
 
-        // Clear streaming progress and show final AI response
+        // Clear streaming progress — final response is delivered via chat:response
         socket.emit("chat:chunk", { sessionId, content: "", clear: true });
-        if (result.content) {
-          socket.emit("chat:chunk", { sessionId, content: "\n" + result.content });
-        }
 
         const fullResponse = result.content + projPendingText +
           (outputFiles.length > 0 ? `\n\nGenerated files: ${outputFiles.join(", ")}` : "");

@@ -97,6 +97,15 @@ function AgentDefPanel({
   const [showModelInput, setShowModelInput] = useState(!!agent.model);
   const [modelValidating, setModelValidating] = useState(false);
   const [modelValid, setModelValid] = useState<boolean | null>(null);
+  const [remoteInstancesList, setRemoteInstancesList] = useState<Array<{ id: string; name: string; url: string }>>([]);
+
+  useEffect(() => {
+    api.getSettings().then((s: any) => {
+      if (Array.isArray(s.remoteInstances)) {
+        setRemoteInstancesList(s.remoteInstances);
+      }
+    }).catch(() => {});
+  }, []);
 
   // Reset model UI state when switching to a different agent
   useEffect(() => {
@@ -219,12 +228,24 @@ function AgentDefPanel({
               <div className="agent-def-divider">remote instance</div>
               <div className="form-group">
                 <label>Remote Instance (from Settings)</label>
-                <input
-                  value={agent.remoteInstance}
-                  onChange={(e) => onUpdate({ ...agent, remoteInstance: e.target.value })}
-                  placeholder="e.g. cloud-pc"
-                />
-                <p className="bus-hint">Name/ID of a Remote Instance configured in Settings</p>
+                {remoteInstancesList.length > 0 ? (
+                  <select
+                    value={agent.remoteInstance}
+                    onChange={(e) => onUpdate({ ...agent, remoteInstance: e.target.value })}
+                  >
+                    <option value="">— select remote instance —</option>
+                    {remoteInstancesList.map((ri) => (
+                      <option key={ri.id} value={ri.id}>{ri.name} ({ri.url})</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={agent.remoteInstance}
+                    onChange={(e) => onUpdate({ ...agent, remoteInstance: e.target.value })}
+                    placeholder="e.g. cloud-pc"
+                  />
+                )}
+                <p className="bus-hint">Select a Remote Instance configured in Settings → Remote Instances</p>
               </div>
               <div className="agent-def-divider">or use inline URL</div>
               <div className="form-group">
@@ -247,9 +268,8 @@ function AgentDefPanel({
             </>
           )}
 
-          {/* Model, Persona, Responsibilities — hidden for human and remote nodes */}
+          {/* Model — hidden for human and remote nodes */}
           {agent.role !== "human" && !agent.isRemote && (
-            <>
               <div className="form-group">
                 <label className="model-checkbox-label">
                   <input
@@ -363,14 +383,24 @@ function AgentDefPanel({
                   </>
                 )}
               </div>
+          )}
+
+          {/* Persona & Responsibilities — shown for all non-human agents including remote */}
+          {agent.role !== "human" && (
+            <>
               <div className="form-group">
                 <label>Persona</label>
                 <textarea
                   value={agent.persona}
                   onChange={(e) => onUpdate({ ...agent, persona: e.target.value })}
                   rows={4}
-                  placeholder="Describe the agent's personality, expertise, and behavior..."
+                  placeholder={agent.isRemote
+                    ? "Describe the remote agent's expertise — the orchestrator uses this to decide which tasks to route here..."
+                    : "Describe the agent's personality, expertise, and behavior..."}
                 />
+                {agent.isRemote && (
+                  <p className="bus-hint">The orchestrator uses Persona to decide which agent gets which task</p>
+                )}
               </div>
               <div className="form-group">
                 <label>Responsibilities (one per line)</label>
@@ -378,8 +408,13 @@ function AgentDefPanel({
                   value={agent.responsibilities.join("\n")}
                   onChange={(e) => onUpdate({ ...agent, responsibilities: e.target.value.split("\n").filter(Boolean) })}
                   rows={4}
-                  placeholder="- Parse and interpret requirements&#10;- Assign tasks to sub-agents&#10;- Review outputs"
+                  placeholder={agent.isRemote
+                    ? "- Handle data processing tasks\n- Execute heavy computations\n- Generate reports from remote resources"
+                    : "- Parse and interpret requirements\n- Assign tasks to sub-agents\n- Review outputs"}
                 />
+                {agent.isRemote && (
+                  <p className="bus-hint">Responsibilities are checked first when routing tasks — be specific</p>
+                )}
               </div>
             </>
           )}
