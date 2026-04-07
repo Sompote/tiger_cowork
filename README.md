@@ -66,6 +66,13 @@ irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | ie
 
 ### Manual Install
 
+Log in to your Linux server directly or via SSH:
+```bash
+ssh root@<your-server-ip>
+```
+
+> **⚠️ Security Warning:** AI agents can execute arbitrary code and shell commands that may modify or delete files on the host system. It is strongly recommended to run Tiger CoWork on a **VPS or dedicated machine that contains no important data**. Do not run it on a machine with sensitive or irreplaceable information.
+
 **Prerequisites:** Node.js >= 18, npm, Python 3 (optional)
 
 ```bash
