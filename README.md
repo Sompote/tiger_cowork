@@ -72,13 +72,26 @@ irm https://raw.githubusercontent.com/Sompote/tiger_cowork/main/install.ps1 | ie
 git clone https://github.com/Sompote/tiger_cowork.git
 cd tiger_cowork
 bash setup.sh        # installs deps, prompts for ClawHub token
-npm run dev          # development → http://localhost:3001
+npm run build && npm start   # → http://localhost:3001
 ```
 
-**Production:**
-```bash
-npm run build && npm start
-```
+> **Running in background (recommended):** Use [PM2](https://pm2.keymetrics.io/) to keep Tiger CoWork running after you close the terminal.
+>
+> ```bash
+> npm install -g pm2          # install PM2 globally
+> npm run build               # build production bundle
+> pm2 start npm --name "tiger-cowork" -- start   # start in background
+> pm2 save                    # save process list for auto-restart
+> pm2 startup                 # enable auto-start on system boot
+> ```
+>
+> Useful PM2 commands:
+> ```bash
+> pm2 status                  # check running processes
+> pm2 logs tiger-cowork       # view logs
+> pm2 restart tiger-cowork    # restart
+> pm2 stop tiger-cowork       # stop
+> ```
 
 ## Quick Start
 
