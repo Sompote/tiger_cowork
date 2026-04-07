@@ -100,6 +100,8 @@ npm run build && npm start   # → http://localhost:3001
 > pm2 stop tiger-cowork       # stop
 > ```
 
+> **First-time token:** The default token is `your-secret-token-here` in the UI. Please change it later in `.env` for your security.
+
 ## Quick Start
 
 1. Open `http://localhost:3001`
