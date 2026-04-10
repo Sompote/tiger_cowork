@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { v4 as uuid } from "uuid";
 import { getTasks, saveTasks } from "../services/data";
 import { scheduleTask, stopTask } from "../services/scheduler";
-import { getActiveTasks, killActiveTask } from "../services/socket";
+import { getActiveTasks, killActiveTask, getFinishedTasks } from "../services/socket";
 
 export async function tasksRoutes(fastify: FastifyInstance) {
   fastify.get("/", async (request, reply) => {
@@ -11,6 +11,10 @@ export async function tasksRoutes(fastify: FastifyInstance) {
 
   fastify.get("/active", async (request, reply) => {
     return getActiveTasks();
+  });
+
+  fastify.get("/finished", async (request, reply) => {
+    return getFinishedTasks();
   });
 
   fastify.post("/active/:id/kill", async (request, reply) => {

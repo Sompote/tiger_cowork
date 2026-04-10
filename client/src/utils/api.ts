@@ -79,6 +79,7 @@ export const api = {
   // Tasks
   getTasks: () => request("/tasks"),
   getActiveTasks: () => request("/tasks/active"),
+  getFinishedTasks: () => request("/tasks/finished"),
   killActiveTask: (id: string) => request(`/tasks/active/${id}/kill`, { method: "POST" }),
   createTask: (data: any) => request("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: any) => request(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
@@ -179,6 +180,10 @@ export const api = {
   mcpConnect: (name: string, url: string, type?: string, headers?: Record<string, string>) => request("/settings/mcp/connect", { method: "POST", body: JSON.stringify({ name, url, type, headers }) }),
   mcpDisconnect: (name: string) => request("/settings/mcp/disconnect", { method: "POST", body: JSON.stringify({ name }) }),
   mcpReconnectAll: () => request("/settings/mcp/reconnect-all", { method: "POST" }),
+
+  // Activity log
+  getActivityLog: (id: string) => request(`/chat/sessions/${id}/activity`),
+  getChatLog: (id: string) => request(`/chat/sessions/${id}/chatlog`),
 
   // Agent configs
   getAgentConfigs: () => request("/agents"),

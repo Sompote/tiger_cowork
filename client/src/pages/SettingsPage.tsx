@@ -584,22 +584,166 @@ export default function SettingsPage() {
                   value={settings.subAgentMode || "auto"}
                   onChange={(e) => setSettings({ ...settings, subAgentMode: e.target.value })}
                 >
-                  <option value="auto">Auto (AI decides)</option>
+                  <option value="auto">Auto Spawn</option>
+                  <option value="auto_create">Auto (AI create architecture)</option>
                   <option value="manual">Spawn Agent (YAML config file)</option>
                   <option value="realtime">Realtime Agent (YAML config file)</option>
+                  <option value="auto_swarm">Auto Choose Swarm (AI picks config)</option>
                 </select>
                 <p className="hint">
                   {settings.subAgentMode === "realtime"
                     ? "All agents boot at session start and stay alive — tasks are sent via bus for true parallel execution"
                     : settings.subAgentMode === "manual"
                     ? "Agents are defined by a YAML configuration file you provide"
-                    : "The AI automatically spawns and manages sub-agents as needed"}
+                    : settings.subAgentMode === "auto_create"
+                    ? "The AI analyzes your task, designs a custom multi-agent architecture (YAML), saves it, and boots all agents in realtime mode"
+                    : settings.subAgentMode === "auto_swarm"
+                    ? "The AI reviews all your saved YAML architectures and selects the best one for the current task, then boots in realtime mode"
+                    : "The AI freely spawns sub-agents as needed — no configuration required"}
                 </p>
               </div>
 
-              {(settings.subAgentMode === "manual" || settings.subAgentMode === "realtime") ? (
+              {(settings.subAgentMode === "manual" || settings.subAgentMode === "realtime" || settings.subAgentMode === "auto_swarm" || settings.subAgentMode === "auto_create") ? (
                 <>
-                  {/* Manual YAML Config */}
+                  {/* Auto Create Settings */}
+                  {settings.subAgentMode === "auto_create" && (
+                    <>
+                      {/* Collapsible AI Architecture Settings */}
+                      <details style={{ marginTop: 4, marginBottom: 8, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "8px 12px", background: "rgba(255,255,255,0.03)" }}>
+                        <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13, opacity: 0.85, userSelect: "none" }}>
+                          AI Architecture Settings
+                          <span style={{ fontWeight: 400, opacity: 0.6, marginLeft: 8, fontSize: 12 }}>
+                            ({settings.autoArchitectureType || "auto"} / {settings.autoAgentCount || "3-8"} agents / {(settings.autoProtocols || ["tcp"]).join(", ")})
+                          </span>
+                        </summary>
+                        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+                          {/* Architecture Type */}
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label>Architecture Type</label>
+                            <select
+                              value={settings.autoArchitectureType || "auto"}
+                              onChange={(e) => setSettings({ ...settings, autoArchitectureType: e.target.value })}
+                            >
+                              <option value="auto">Auto (AI decides)</option>
+                              <option value="hierarchical">Hierarchical — orchestrator delegates to workers</option>
+                              <option value="flat">Flat — human controls all agents directly</option>
+                              <option value="mesh">Mesh — free collaboration, no preset connections</option>
+                              <option value="hybrid">Hybrid — orchestrator + mesh-enabled workers</option>
+                              <option value="pipeline">Pipeline — sequential chain of agents</option>
+                              <option value="p2p">P2P — peer swarm with blackboard consensus</option>
+                            </select>
+                          </div>
+
+                          {/* Agent Count */}
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label>Agent Count</label>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              <input
+                                type="number"
+                                min={1}
+                                max={20}
+                                value={settings.autoAgentCount || ""}
+                                placeholder="3-8"
+                                onChange={(e) => setSettings({ ...settings, autoAgentCount: e.target.value ? Number(e.target.value) : "" })}
+                                style={{ width: 80 }}
+                              />
+                              <span style={{ fontSize: 12, opacity: 0.6 }}>default: 3–8 (AI decides if empty)</span>
+                            </div>
+                          </div>
+
+                          {/* Protocol */}
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label>Connection Protocol</label>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+                              {[
+                                { value: "tcp", label: "TCP", desc: "point-to-point" },
+                                { value: "queue", label: "Queue", desc: "async queue" },
+                                { value: "bus", label: "Bus", desc: "pub/sub" },
+                                { value: "mesh", label: "Mesh", desc: "peer-to-peer" },
+                              ].map((proto) => {
+                                const protocols: string[] = settings.autoProtocols || ["tcp"];
+                                const selected = protocols.includes(proto.value);
+                                return (
+                                  <button
+                                    key={proto.value}
+                                    type="button"
+                                    onClick={() => {
+                                      const next = selected
+                                        ? protocols.filter((p) => p !== proto.value)
+                                        : [...protocols, proto.value];
+                                      setSettings({ ...settings, autoProtocols: next.length > 0 ? next : ["tcp"] });
+                                    }}
+                                    style={{
+                                      padding: "6px 14px",
+                                      borderRadius: 20,
+                                      border: selected ? "2px solid #7c4dff" : "2px solid rgba(255,255,255,0.25)",
+                                      background: selected ? "rgba(124,77,255,0.25)" : "transparent",
+                                      color: selected ? "#d4c4ff" : "rgba(255,255,255,0.75)",
+                                      cursor: "pointer",
+                                      fontSize: 12,
+                                      fontWeight: selected ? 600 : 400,
+                                      transition: "all 0.15s ease",
+                                    }}
+                                  >
+                                    {proto.label} <span style={{ opacity: 0.6, fontSize: 11 }}>{proto.desc}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <p className="hint">Select one or more protocols for agent connections.</p>
+                          </div>
+                        </div>
+                      </details>
+
+                      {/* Base Template File */}
+                      <div className="form-group">
+                        <label>Base Template File</label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <select
+                            value={settings.subAgentConfigFile || ""}
+                            onChange={(e) => setSettings({ ...settings, subAgentConfigFile: e.target.value })}
+                          >
+                            <option value="">None (AI creates from scratch)</option>
+                            {agentConfigs.map((cfg: any) => (
+                              <option key={cfg.filename} value={cfg.filename}>
+                                {cfg.name} ({cfg.filename}) — {cfg.agentCount} agents
+                              </option>
+                            ))}
+                          </select>
+                          {settings.subAgentConfigFile && (
+                            <button
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 4,
+                                background: "#9c27b0", color: "#fff", border: "none", borderRadius: 12,
+                                padding: "3px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                                textDecoration: "none", whiteSpace: "nowrap",
+                              }}
+                              title={`Open ${settings.subAgentConfigFile} in Agent System Editor`}
+                              onClick={async () => {
+                                const data = await api.getAgentConfig(settings.subAgentConfigFile);
+                                if (data.content) {
+                                  setAgentEditorInitYaml(data.content);
+                                  setAgentEditorInitFilename(settings.subAgentConfigFile);
+                                  setShowAgentEditor(true);
+                                }
+                              }}
+                            >
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 2l5 5h-5V4zM6 20V4h5v7h7v9H6z"/>
+                              </svg>
+                              {settings.subAgentConfigFile}
+                            </button>
+                          )}
+                        </div>
+                        <p className="hint">
+                          Optionally link an architecture file as a base template. The AI will clone and adapt it for each task, or create from scratch if none selected.
+                        </p>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Manual YAML Config (for manual/realtime/auto_swarm) */}
+                  {settings.subAgentMode !== "auto_create" && (
                   <div className="form-group">
                     <label>Agent Configuration File</label>
                     <select
@@ -617,6 +761,7 @@ export default function SettingsPage() {
                       Select a YAML file that defines your agent team. Create one below or place .yaml files in data/agents/
                     </p>
                   </div>
+                  )}
 
                   {/* Saved configs list */}
                   {agentConfigs.length > 0 && (

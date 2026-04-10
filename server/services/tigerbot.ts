@@ -1144,6 +1144,7 @@ export async function callTigerBotWithTools(
   sessionId?: string,
   onRetry?: (attempt: number, maxRetries: number, error: string) => void,
   taskId?: string,
+  onAgentText?: (text: string) => void,
 ): Promise<TigerBotResponse> {
   // --- Local CLI agent shortcut: delegate entirely to Claude Code or Codex CLI ---
   if (isLocalCliAgent(modelOverride)) {
@@ -1278,7 +1279,7 @@ export async function callTigerBotWithTools(
     let overloadRetryCount = 0;
     for (let llmRetry = 0; llmRetry < llmMaxRetries; llmRetry++) {
       try {
-        data = await llmCall(allMessages, { tools: toolsOverride || await getTools(), signal, model: modelOverride });
+        data = await llmCall(allMessages, { tools: toolsOverride || await getTools({ sessionId }), signal, model: modelOverride });
         break; // success
       } catch (err: any) {
         if (err.name === "AbortError") {
@@ -1455,6 +1456,11 @@ export async function callTigerBotWithTools(
       content: message.content || "",
       tool_calls: truncatedToolCalls,
     });
+
+    // Stream the agent's reasoning text to the callback (for chat log capture)
+    if (onAgentText && message.content && typeof message.content === "string" && message.content.trim()) {
+      onAgentText(message.content);
+    }
 
     // If no tool calls, check if the LLM is giving up after errors — nudge it to retry
     if (!toolCalls.length) {
@@ -1849,7 +1855,7 @@ Scoring guide:
         for (let round = 0; round < retryMaxRounds; round++) {
           let data: any;
           try {
-            data = await llmCall(allMessages, { tools: await getTools() });
+            data = await llmCall(allMessages, { tools: await getTools({ sessionId }) });
           } catch (err: any) {
             console.error(`[Reflection retry] LLM call failed: ${err.message}`);
             break;
@@ -1930,7 +1936,7 @@ Scoring guide:
     const maxNudgeRounds = 3;
     for (let nudgeRound = 0; nudgeRound < maxNudgeRounds; nudgeRound++) {
       try {
-        const nudgeData = await llmCall(allMessages, { tools: await getTools() });
+        const nudgeData = await llmCall(allMessages, { tools: await getTools({ sessionId }) });
         const nudgeChoice = nudgeData.choices?.[0];
         if (!nudgeChoice?.message?.tool_calls?.length) {
           // LLM responded with text instead of tools

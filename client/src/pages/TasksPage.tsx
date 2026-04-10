@@ -32,6 +32,21 @@ interface ActiveTask {
   lastUpdate: string;
 }
 
+interface FinishedTask {
+  id: string;
+  sessionId: string;
+  projectId?: string;
+  projectName?: string;
+  title: string;
+  status: "completed" | "cancelled" | "error";
+  toolCalls: string[];
+  agents: string[];
+  agentTools: Record<string, string[]>;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+}
+
 const CRON_PRESETS = [
   { label: "Every minute", value: "* * * * *" },
   { label: "Every hour", value: "0 * * * *" },
@@ -77,6 +92,7 @@ export default function TasksPage() {
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
+  const [finishedTasks, setFinishedTasks] = useState<FinishedTask[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
   const [refreshing, setRefreshing] = useState(false);
@@ -98,6 +114,8 @@ export default function TasksPage() {
     try {
       const data = await api.getActiveTasks();
       setActiveTasks(data);
+      const fin = await api.getFinishedTasks();
+      setFinishedTasks(fin);
     } catch {
       // ignore
     }
@@ -301,6 +319,84 @@ export default function TasksPage() {
       ) : (
         <div className="empty-state" style={{ marginBottom: 32, padding: "24px 0" }}>
           <p style={{ color: "var(--text-tertiary)", fontSize: 13 }}>No agent tasks running</p>
+        </div>
+      )}
+
+      {/* ─── Finished Tasks ─── */}
+      <div className="page-header" style={{ marginTop: 24 }}>
+        <h1>Finished Tasks <span style={{ fontSize: 12, fontWeight: 400, opacity: 0.6 }}>(last {finishedTasks.length})</span></h1>
+      </div>
+
+      {finishedTasks.length > 0 ? (
+        <div className="card-list" style={{ marginBottom: 32 }}>
+          {finishedTasks.map((task) => {
+            const dur = task.durationMs;
+            const durStr = dur < 1000 ? `${dur}ms` : dur < 60000 ? `${(dur/1000).toFixed(1)}s` : `${Math.floor(dur/60000)}m ${Math.floor((dur%60000)/1000)}s`;
+            const statusColor = task.status === "completed" ? "#4caf50" : task.status === "cancelled" ? "#ff9800" : "#f44336";
+            const statusIcon = task.status === "completed" ? "✓" : task.status === "cancelled" ? "⏹" : "✗";
+            return (
+              <div key={task.id} className="card" style={{ borderLeft: `3px solid ${statusColor}` }}>
+                <div className="card-header">
+                  <div className="card-title-row">
+                    <span style={{ color: statusColor, fontWeight: 700, fontSize: 14 }}>{statusIcon}</span>
+                    <h3 style={{ margin: 0 }}>{task.title}</h3>
+                    {task.projectName && (
+                      <span className="source-badge clawhub">{task.projectName}</span>
+                    )}
+                  </div>
+                  <div className="active-task-actions">
+                    <span className="active-task-elapsed" title={`Started: ${new Date(task.startedAt).toLocaleString()}\nFinished: ${new Date(task.finishedAt).toLocaleString()}`}>
+                      {durStr} · {timeAgo(task.finishedAt)}
+                    </span>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => navigate(task.projectId ? `/projects?session=${task.sessionId}&project=${task.projectId}` : `/?session=${task.sessionId}`)}
+                      title="Open chat session"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 4 }}>
+                        <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
+                      </svg>
+                      Open Chat
+                    </button>
+                  </div>
+                </div>
+                <div className="card-body">
+                  <div className="card-detail">
+                    <strong>Status:</strong> <span style={{ color: statusColor, textTransform: "capitalize" }}>{task.status}</span>
+                  </div>
+                  {task.agents && task.agents.length > 0 && (
+                    <div className="card-detail">
+                      <strong>Agents:</strong>
+                      <div className="active-agents-row">
+                        {task.agents.map((agent, i) => (
+                          <span key={i} className={`active-agent-badge agent-color-${agentColorIndex(agent)}`}>
+                            {agent}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {task.toolCalls && task.toolCalls.length > 0 && (
+                    <div className="card-detail">
+                      <strong>Tools used:</strong>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                        {dedupTools(task.toolCalls).slice(0, 12).map((t) => (
+                          <span key={t.name} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 8, background: "rgba(255,255,255,0.08)", color: "#bbb" }}>
+                            {t.name}{t.count > 1 ? ` ×${t.count}` : ""}
+                          </span>
+                        ))}
+                        {task.toolCalls.length > 12 && <span style={{ fontSize: 10, opacity: 0.5 }}>+{task.toolCalls.length - 12} more</span>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state" style={{ marginBottom: 32, padding: "24px 0" }}>
+          <p style={{ color: "var(--text-tertiary)", fontSize: 13 }}>No finished tasks yet</p>
         </div>
       )}
 

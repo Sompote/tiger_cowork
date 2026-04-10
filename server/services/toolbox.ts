@@ -218,6 +218,98 @@ const spawnSubagentTool = {
   },
 };
 
+// --- Auto Create Architecture: create_architecture tool ---
+const createArchitectureTool = {
+  type: "function" as const,
+  function: {
+    name: "create_architecture",
+    description: "Analyze the user's task and create an appropriate multi-agent architecture to handle it. This generates a YAML agent configuration, saves it, and boots all agents in realtime mode. Call this FIRST before doing any work. Choose the best architecture type for the task.",
+    parameters: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "Description of the task/goal that the agent team needs to accomplish" },
+        architectureType: {
+          type: "string",
+          enum: ["hierarchical", "flat", "mesh", "hybrid", "pipeline", "p2p"],
+          description: "Architecture type: hierarchical (orchestrator delegates), flat (direct control), mesh (free collaboration), hybrid (orchestrator + mesh workers), pipeline (sequential chain), p2p (peer swarm with blackboard)",
+        },
+        agentCount: { type: "string", description: "Number of agents to create, or 'auto' to let AI decide" },
+      },
+      required: ["description"],
+    },
+  },
+};
+
+// Track auto-created architecture filename per session
+const autoCreatedArchitectures = new Map<string, string>(); // sessionId → filename
+
+export function getAutoCreatedArchitecture(sessionId: string): string | undefined {
+  return autoCreatedArchitectures.get(sessionId);
+}
+
+export function clearAutoCreatedArchitecture(sessionId: string) {
+  autoCreatedArchitectures.delete(sessionId);
+}
+
+// --- Auto Choose Swarm: select_swarm tool ---
+const selectSwarmTool = {
+  type: "function" as const,
+  function: {
+    name: "select_swarm",
+    description: "Select the best agent swarm configuration for the current task. You MUST call this FIRST before doing any work. Review the available swarms and pick the one whose description and agents best match the user's request. After selection, agent tools will be injected for you to use.",
+    parameters: {
+      type: "object",
+      properties: {
+        filename: { type: "string", description: "The YAML filename to select (e.g. 'research_team.yaml')" },
+        reason: { type: "string", description: "Brief explanation of why this swarm is the best fit" },
+      },
+      required: ["filename"],
+    },
+  },
+};
+
+// Get summary of all available swarm configs for auto_swarm mode
+export function getAutoSwarmConfigSummary(): string | null {
+  const agentsDir = path.resolve("data/agents");
+  if (!fs.existsSync(agentsDir)) return null;
+  const files = fs.readdirSync(agentsDir).filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
+  if (files.length === 0) return null;
+
+  let summary = `\n\nAVAILABLE SWARM CONFIGURATIONS:\n`;
+  summary += `You MUST call select_swarm first to pick the best config for the user's task.\n\n`;
+  for (const f of files) {
+    try {
+      const content = fs.readFileSync(path.join(agentsDir, f), "utf8");
+      const parsed = yaml.load(content) as AgentSystemConfig;
+      if (!parsed?.agents) continue;
+      const name = parsed.system?.name || f.replace(/\.ya?ml$/, "");
+      const desc = parsed.system?.description || "";
+      const mode = parsed.system?.orchestration_mode || "hierarchical";
+      const agents = (parsed.agents || [])
+        .filter((a: AgentConfig) => a.role !== "human")
+        .map((a: AgentConfig) => `${a.name} (${a.role})`)
+        .join(", ");
+      summary += `- "${f}": ${name} [${mode}]${desc ? ` — ${desc}` : ""}\n  Agents: ${agents}\n`;
+    } catch {}
+  }
+  return summary;
+}
+
+// Track which swarm was selected per session for auto_swarm mode
+const autoSwarmSelections = new Map<string, string>(); // sessionId → filename
+
+export function setAutoSwarmSelection(sessionId: string, filename: string) {
+  autoSwarmSelections.set(sessionId, filename);
+}
+
+export function getAutoSwarmSelection(sessionId: string): string | undefined {
+  return autoSwarmSelections.get(sessionId);
+}
+
+export function clearAutoSwarmSelection(sessionId: string) {
+  autoSwarmSelections.delete(sessionId);
+}
+
 // ─── Remote Task Tool ───
 
 const remoteTaskTool = {
@@ -517,7 +609,7 @@ export function getProtocolToolsForAgent(agentDef?: AgentConfig | null, connecti
 }
 
 // Dynamic tools getter: built-in + MCP tools + conditional OpenRouter search + sub-agent
-export async function getTools(opts?: { excludeSubagent?: boolean }) {
+export async function getTools(opts?: { excludeSubagent?: boolean; sessionId?: string }) {
   const settings = await getSettings();
   const tools: any[] = [...builtinTools];
   if (settings.openRouterSearchEnabled && settings.openRouterSearchApiKey) {
@@ -527,6 +619,28 @@ export async function getTools(opts?: { excludeSubagent?: boolean }) {
     if (settings.subAgentMode === "realtime") {
       // Realtime mode: use send_task/wait_result instead of spawn_subagent
       tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+    } else if (settings.subAgentMode === "auto_create") {
+      // Check if architecture has already been created for this session
+      const createdFile = opts?.sessionId ? getAutoCreatedArchitecture(opts.sessionId) : undefined;
+      if (createdFile) {
+        // Architecture created and agents are running — provide realtime coordination tools
+        tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+        tools.push(createArchitectureTool); // keep for recreating if needed
+      } else {
+        // No architecture yet — return ONLY create_architecture so LLM is forced to create first
+        return [createArchitectureTool, ...getMcpTools()];
+      }
+    } else if (settings.subAgentMode === "auto_swarm") {
+      // Check if a swarm has already been selected for this session
+      const selectedFile = opts?.sessionId ? getAutoSwarmSelection(opts.sessionId) : undefined;
+      if (selectedFile) {
+        // Swarm selected — agents are running in realtime mode
+        tools.push(sendTaskTool, waitResultTool, checkAgentsTool);
+        tools.push(selectSwarmTool); // keep for switching swarms
+      } else {
+        // No swarm selected yet — only offer select_swarm
+        tools.push(selectSwarmTool);
+      }
     } else {
       tools.push(spawnSubagentTool);
     }
@@ -542,10 +656,46 @@ export async function getTools(opts?: { excludeSubagent?: boolean }) {
 }
 
 // Get manual agent config summary for system prompt injection
-export async function getManualAgentConfigSummary(): Promise<string | null> {
+export async function getManualAgentConfigSummary(sessionId?: string): Promise<string | null> {
   const settings = await getSettings();
   // Realtime mode has its own summary
   if (settings.subAgentMode === "realtime") return await getRealtimeAgentConfigSummary();
+  // Auto create mode: show created architecture summary if already created
+  if (settings.subAgentMode === "auto_create") {
+    const createdFile = sessionId ? getAutoCreatedArchitecture(sessionId) : undefined;
+    if (createdFile) {
+      const config = loadAgentConfig(createdFile);
+      if (config) {
+        const mode = config.system?.orchestration_mode || "hierarchical";
+        let summary = `\n\nAUTO-CREATED ARCHITECTURE (${config.system?.name || createdFile}, mode: ${mode}, REALTIME):\n`;
+        summary += `Agents are LIVE. Use send_task/wait_result to delegate work. Do NOT do work yourself.\n\n`;
+        for (const a of (config.agents || []).filter((ag: AgentConfig) => ag.role !== "human")) {
+          summary += `- ${a.id} ("${a.name}", ${a.role}): ${a.persona || ""}\n`;
+        }
+        summary += `\nCall create_architecture again to generate a different architecture.\n`;
+        return summary;
+      }
+    }
+    return null; // No architecture yet — AI will call create_architecture
+  }
+  // Auto swarm mode: show available configs for selection (or realtime summary if already selected)
+  if (settings.subAgentMode === "auto_swarm") {
+    const selectedFile = sessionId ? getAutoSwarmSelection(sessionId) : undefined;
+    if (selectedFile) {
+      const config = loadAgentConfig(selectedFile);
+      if (config) {
+        const mode = config.system?.orchestration_mode || "hierarchical";
+        let summary = `\n\nACTIVE SWARM (${config.system?.name || selectedFile}, mode: ${mode}, REALTIME):\n`;
+        summary += `Agents are LIVE. Use send_task/wait_result to delegate work. Do NOT do work yourself.\n\n`;
+        for (const a of (config.agents || []).filter((ag: AgentConfig) => ag.role !== "human")) {
+          summary += `- ${a.id} ("${a.name}", ${a.role}): ${a.persona || ""}\n`;
+        }
+        summary += `\nCall select_swarm again to switch to a different architecture.\n`;
+        return summary;
+      }
+    }
+    return getAutoSwarmConfigSummary();
+  }
   if (settings.subAgentMode !== "manual" || !settings.subAgentConfigFile) return null;
   const config = loadAgentConfig(settings.subAgentConfigFile);
   if (!config) return null;
@@ -1301,6 +1451,7 @@ interface P2PGovernanceConfig {
 interface AgentSystemConfig {
   system: {
     name: string;
+    description?: string;
     orchestration_mode: string;  // hierarchical, flat, mesh, hybrid, pipeline, p2p, p2p_orchestrator
     p2p_governance?: P2PGovernanceConfig;
   };
@@ -2168,6 +2319,21 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         combinedSignal,
         subagentTools,
         agentModel,
+        undefined,  // sessionId
+        undefined,  // onRetry
+        undefined,  // taskId
+        (text: string) => {
+          // Stream sub-agent's reasoning to chat log
+          if (subagentStatusCallback) {
+            subagentStatusCallback({
+              sessionId: parentSessionId,
+              status: "subagent_text",
+              subagentId,
+              label,
+              text,
+            });
+          }
+        },
       );
     }
 
@@ -2199,6 +2365,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         status: "subagent_done",
         subagentId,
         label,
+        result: result.content,
       });
     }
 
@@ -2759,6 +2926,18 @@ async function realtimeAgentLoop(
           undefined,  // sessionId (for checkpoint)
           undefined,  // onRetry
           rtTaskId,   // taskId — so callTool resolves the correct call context
+          (text: string) => {
+            // Stream agent's intermediate reasoning to chat log
+            if (subagentStatusCallback) {
+              subagentStatusCallback({
+                sessionId,
+                status: "realtime_agent_text",
+                agentId,
+                label: agentDef.name,
+                text,
+              });
+            }
+          },
         );
       }
 
@@ -2788,6 +2967,8 @@ async function realtimeAgentLoop(
           status: "realtime_agent_done",
           agentId,
           label: agentDef.name,
+          result: resultContent,
+          task: msg.payload.task,
         });
       }
 
@@ -3523,6 +3704,197 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
     case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth, signal);
+
+    // ─── Auto Create Architecture Tool ───
+    case "create_architecture": {
+      const { description, architectureType, agentCount } = args;
+      if (!description) return { ok: false, error: "description is required" };
+      const currentSettings = await getSettings();
+      const archType = architectureType || currentSettings.autoArchitectureType || "hierarchical";
+      const count = agentCount || currentSettings.autoAgentCount || "auto";
+      const protocols: string[] = currentSettings.autoProtocols || (currentSettings.autoProtocol ? [currentSettings.autoProtocol] : ["tcp"]);
+      const protocol = protocols.join(", ");
+      const sessionId = _currentParentSessionId || taskId || "default";
+
+      // Load base template if configured (user linked an architecture file in settings)
+      let baseTemplatePrompt = "";
+      if (currentSettings.subAgentConfigFile) {
+        const baseConfig = loadAgentConfig(currentSettings.subAgentConfigFile);
+        if (baseConfig) {
+          const baseAgents = (baseConfig.agents || []).filter((a: any) => a.role !== "human");
+          baseTemplatePrompt = `\n\nBASE TEMPLATE (clone and adapt from "${currentSettings.subAgentConfigFile}"):\nSystem: ${baseConfig.system?.name || "Unknown"}, Mode: ${baseConfig.system?.orchestration_mode || "hierarchical"}\nAgents:\n${baseAgents.map((a: any) => `- ${a.id} (${a.role}): ${a.persona || a.name}`).join("\n")}\n\nUse this template as a starting point. Keep similar agent roles and structure, but adapt names, personas, and responsibilities to match the user's request. You may add/remove agents as needed.`;
+        }
+      }
+
+      // Use LLM to generate architecture
+      const caller = await getSubagentCaller();
+      const genResult = await caller(
+        [{ role: "user", content: `Based on this description, generate a complete multi-agent system configuration as a JSON object.
+
+User Request: ${description}
+${baseTemplatePrompt}
+Architecture Type: ${!archType || archType === "auto" ? "Choose the best architecture for this task (hierarchical, flat, mesh, hybrid, pipeline, or p2p)" : archType}
+Number of Agents: ${!count || count === "auto" ? "Determine the optimal number based on the task (default 3-8)" : count}
+Connection Protocol: ${protocol}
+
+Return ONLY a valid JSON object (no markdown, no code fences) with this exact structure:
+{
+  "system": {
+    "name": "System Name",
+    "orchestration_mode": "${!archType || archType === "auto" ? "chosen_type" : archType}",
+    "communication_protocol": "structured_handoff",
+    "context_passing": "full_chain"
+  },
+  "agents": [
+    {
+      "id": "unique_snake_case_id",
+      "name": "Agent Display Name",
+      "role": "one of: human, orchestrator, worker, checker, reporter, researcher, peer",
+      "persona": "Detailed 2-3 sentence persona description",
+      "responsibilities": ["responsibility 1", "responsibility 2", "responsibility 3"],
+      "bus": { "enabled": true, "topics": ["topic1", "topic2"] },
+      "mesh": { "enabled": false }
+    }
+  ],
+  "connections": [
+    {
+      "from": "source_agent_id",
+      "to": "target_agent_id",
+      "label": "connection_label",
+      "protocol": "${protocol}",
+      "topics": ["topic1"]
+    }
+  ]
+}
+
+IMPORTANT RULES:
+- Always include exactly ONE agent with role "human" and id "human" as the entry point
+- For hierarchical: human connects to orchestrator, orchestrator connects to all workers
+- For flat: human connects to all agents directly
+- For mesh: do NOT generate connections — mesh mode bypasses access control
+- For hybrid: human → orchestrator, workers have mesh.enabled: true
+- For pipeline: agents form a sequential chain
+- For p2p: ALL non-human agents use role "peer", no connections, use blackboard
+- Each non-human agent must have a meaningful persona and 3-5 responsibilities
+- Agent IDs must be snake_case
+- Connections must use "${protocol}" protocol
+- Every non-human agent MUST have at least one incoming connection
+- Generate between 3-8 agents (including human) unless user specifies otherwise` }],
+        "You are an expert multi-agent system architect. Generate complete, well-structured agent system configurations as JSON. Return ONLY valid JSON, nothing else. Do not use any tools.",
+        undefined, undefined, undefined, [], // no tools
+      );
+
+      if (!genResult.content) return { ok: false, error: "No response from LLM" };
+      let jsonStr = genResult.content.trim();
+      const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (jsonMatch) jsonStr = jsonMatch[0];
+      let parsed: any;
+      try { parsed = JSON.parse(jsonStr); } catch {
+        return { ok: false, error: "Failed to parse generated architecture" };
+      }
+      if (!parsed.system || !parsed.agents || !Array.isArray(parsed.agents)) {
+        return { ok: false, error: "Generated architecture has invalid structure" };
+      }
+
+      // Convert to YAML and save
+      const yamlContent = yaml.dump(parsed, { indent: 2, lineWidth: 120, noRefs: true, sortKeys: false });
+      const safeName = (parsed.system.name || "auto_created")
+        .toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+      const filename = `${safeName}_auto.yaml`;
+      const agentsDir = path.resolve("data/agents");
+      if (!fs.existsSync(agentsDir)) fs.mkdirSync(agentsDir, { recursive: true });
+      fs.writeFileSync(path.join(agentsDir, filename), yamlContent, "utf8");
+
+      // Track creation for this session
+      autoCreatedArchitectures.set(sessionId, filename);
+      setAutoSwarmSelection(sessionId, filename);
+
+      // Shutdown any existing realtime session
+      const existingSession = getRealtimeSession(sessionId);
+      if (existingSession) shutdownRealtimeSession(sessionId);
+
+      // Boot realtime session
+      const rtSession = await startRealtimeSession(sessionId, filename, signal);
+      if (!rtSession) {
+        return { ok: false, error: `Architecture created as "${filename}" but failed to boot realtime session` };
+      }
+
+      const allAgents = (parsed.agents || []).filter((a: any) => a.role !== "human");
+      const agentList = allAgents.map((a: any) => ({
+        id: a.id, name: a.name, role: a.role,
+        persona: a.persona || "", responsibilities: a.responsibilities || [],
+      }));
+      const mode = parsed.system.orchestration_mode || archType;
+      const orchestrator = parsed.agents.find((a: any) => a.role === "orchestrator");
+
+      let delegationInstructions: string;
+      if (orchestrator) {
+        delegationInstructions = `Orchestrator "${orchestrator.id}" manages the team. Use send_task({to: "${orchestrator.id}", task: "..."}) then wait_result({from: "${orchestrator.id}"}).`;
+      } else {
+        const workerIds = allAgents.map((a: any) => a.id);
+        delegationInstructions = `Send tasks directly to agents using send_task/wait_result. Available agents: ${workerIds.join(", ")}.`;
+      }
+
+      return {
+        ok: true,
+        created: true,
+        filename,
+        systemName: parsed.system.name || filename,
+        mode,
+        agents: agentList,
+        realtimeMode: true,
+        yamlContent,
+        message: `Architecture "${parsed.system.name || filename}" created and saved as "${filename}" (${mode}). All agents are now LIVE. ${delegationInstructions} Do NOT do any work yourself — delegate everything via send_task/wait_result.`,
+      };
+    }
+
+    // ─── Auto Choose Swarm: select_swarm Tool ───
+    case "select_swarm": {
+      const { filename, reason } = args;
+      if (!filename) return { ok: false, error: "filename is required" };
+      const config = loadAgentConfig(filename);
+      if (!config) return { ok: false, error: `Config file "${filename}" not found or invalid` };
+      const allAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human");
+      if (allAgents.length === 0) return { ok: false, error: "Selected config has no usable agents" };
+      const sessionId = _currentParentSessionId || taskId || "default";
+      setAutoSwarmSelection(sessionId, filename);
+
+      // Shutdown any existing realtime session before booting the new one
+      const existingSession = getRealtimeSession(sessionId);
+      if (existingSession) shutdownRealtimeSession(sessionId);
+
+      // Boot realtime session with the selected YAML config
+      const rtSession = await startRealtimeSession(sessionId, filename, signal);
+      if (!rtSession) {
+        return { ok: false, error: `Failed to start realtime session for "${filename}"` };
+      }
+
+      const agentList = allAgents.map(a => ({
+        id: a.id, name: a.name, role: a.role,
+        persona: a.persona || "", responsibilities: a.responsibilities || [],
+      }));
+      const mode = config.system?.orchestration_mode || "hierarchical";
+      const orchestrator = config.agents?.find((a: AgentConfig) => a.role === "orchestrator");
+
+      let delegationInstructions: string;
+      if (orchestrator) {
+        delegationInstructions = `Orchestrator "${orchestrator.id}" manages the team. Send tasks to the orchestrator and it will delegate to the right agents. Use send_task({to: "${orchestrator.id}", task: "..."}) then wait_result({from: "${orchestrator.id}"}).`;
+      } else {
+        const workerIds = allAgents.filter(a => a.role !== "orchestrator").map(a => a.id);
+        delegationInstructions = `Send tasks directly to agents using send_task({to: "<agentId>", task: "..."}) then wait_result({from: "<agentId>"}). Available agents: ${workerIds.join(", ")}.`;
+      }
+
+      return {
+        ok: true,
+        selected: filename,
+        systemName: config.system?.name || filename,
+        mode,
+        reason,
+        agents: agentList,
+        realtimeMode: true,
+        message: `Swarm "${config.system?.name || filename}" selected (${mode}). All agents are now LIVE in realtime mode. ${delegationInstructions} Do NOT do any work yourself — delegate everything via send_task/wait_result.`,
+      };
+    }
 
     // ─── Remote Task Tool ───
     case "remote_task": {

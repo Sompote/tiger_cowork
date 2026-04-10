@@ -1389,3 +1389,125 @@
   border-radius: 3px;
   font-size: 11px;
 }
+
+/* ─── Chat Top Bar ─── */
+
+.chat-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border, #333);
+  flex-shrink: 0;
+}
+
+/* ─── Activity Log Toggle ─── */
+
+.activity-log-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary, #888);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.activity-log-toggle:hover {
+  color: var(--text-secondary, #ccc);
+  border-color: #f59e0b;
+}
+
+.activity-log-toggle.active {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+/* ─── Activity Log Panel ─── */
+
+.activity-log-panel {
+  border-bottom: 1px solid var(--border, #333);
+  max-height: 200px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.activity-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.activity-log-live {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #22c55e;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.activity-log-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #ccc);
+}
+
+.activity-log-body blockquote {
+  margin: 1px 0;
+  padding: 0;
+  border: none;
+  font-size: 12px;
+  color: var(--text-secondary, #aaa);
+}
+
+.activity-log-body p {
+  margin: 1px 0;
+}
+
+.activity-log-empty {
+  text-align: center;
+  color: var(--text-tertiary, #666);
+  font-size: 12px;
+  padding: 16px;
+  opacity: 0.7;
+}
+
+/* ─── Protocol Tags ─── */
+
+.proto-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.proto-tcp { background: #4285f4; color: #fff; }
+.proto-queue { background: #34a853; color: #fff; }
+.proto-udp { background: #ea4335; color: #fff; }
+.proto-bus { background: #f59e0b; color: #000; }

@@ -2,8 +2,39 @@ import { FastifyInstance } from "fastify";
 import { v4 as uuid } from "uuid";
 import { getChatHistory, saveChatHistory, ChatSession, deleteAgentHistory } from "../services/data";
 import { callTigerBot } from "../services/tigerbot";
+import { getAutoCreatedArchitecture } from "../services/toolbox";
+import yaml from "js-yaml";
+import path from "path";
+import fs from "fs";
+
+const ACTIVITY_LOG_DIR = path.resolve("data", "activity_logs");
+const CHAT_LOG_DIR = path.resolve("data", "chat_logs");
 
 export async function chatRoutes(fastify: FastifyInstance) {
+  // Get activity log for a session
+  fastify.get("/sessions/:id/activity", async (request, reply) => {
+    const sessionId = (request.params as any).id;
+    const logPath = path.join(ACTIVITY_LOG_DIR, `${sessionId}.log`);
+    try {
+      const content = fs.readFileSync(logPath, "utf-8");
+      return { ok: true, content };
+    } catch {
+      return { ok: true, content: "" };
+    }
+  });
+
+  // Get chat log for a session
+  fastify.get("/sessions/:id/chatlog", async (request, reply) => {
+    const sessionId = (request.params as any).id;
+    const logPath = path.join(CHAT_LOG_DIR, `${sessionId}.log`);
+    try {
+      const content = fs.readFileSync(logPath, "utf-8");
+      return { ok: true, content };
+    } catch {
+      return { ok: true, content: "" };
+    }
+  });
+
   // Get all chat sessions
   fastify.get("/sessions", async (request, reply) => {
     const sessions = await getChatHistory();
@@ -12,9 +43,30 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
   // Get single session
   fastify.get("/sessions/:id", async (request, reply) => {
+    const sessionId = (request.params as any).id;
     const sessions = await getChatHistory();
-    const session = sessions.find((s) => s.id === (request.params as any).id);
+    const session = sessions.find((s) => s.id === sessionId);
     if (!session) { reply.code(404); return { error: "Session not found" }; }
+
+    // Include auto-created architecture info if present
+    const autoArchFilename = getAutoCreatedArchitecture(sessionId);
+    if (autoArchFilename) {
+      try {
+        const filePath = path.join(path.resolve("data/agents"), autoArchFilename);
+        const content = fs.readFileSync(filePath, "utf8");
+        const parsed = yaml.load(content) as any;
+        (session as any).autoCreatedArch = {
+          filename: autoArchFilename,
+          systemName: parsed?.system?.name || autoArchFilename.replace(/\.ya?ml$/, ""),
+        };
+      } catch {
+        (session as any).autoCreatedArch = {
+          filename: autoArchFilename,
+          systemName: autoArchFilename.replace(/\.ya?ml$/, ""),
+        };
+      }
+    }
+
     return session;
   });
 

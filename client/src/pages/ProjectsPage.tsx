@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -7,6 +7,8 @@ import { useSocket } from "../hooks/useSocket";
 import { Icon } from "../components/Layout";
 import ReactComponentRenderer from "../components/ReactComponentRenderer";
 import "./ProjectsPage.css";
+
+const AgentEditor = lazy(() => import("../components/AgentEditor"));
 
 interface Project {
   id: string;
@@ -356,9 +358,19 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [mobileSessions, setMobileSessions] = useState(false);
   const [activeTaskSessions, setActiveTaskSessions] = useState<Set<string>>(new Set());
+  const [showActivityLog, setShowActivityLog] = useState(false);
+  const [activityLogContent, setActivityLogContent] = useState("");
+  const [showChatLog, setShowChatLog] = useState(false);
+  const [chatLogContent, setChatLogContent] = useState("");
+  const [autoCreatedArch, setAutoCreatedArch] = useState<{ filename: string; systemName: string } | null>(null);
+  const [showAgentEditor, setShowAgentEditor] = useState(false);
+  const [agentEditorYaml, setAgentEditorYaml] = useState<string | undefined>();
+  const [agentEditorFilename, setAgentEditorFilename] = useState<string | undefined>();
+  const activityLogRef = useRef<HTMLDivElement>(null);
+  const chatLogRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { connected, sendProjectMessage, onChunk, onResponse, onStatus } = useSocket();
+  const { connected, sendProjectMessage, onChunk, onResponse, onStatus, socket: socketRef } = useSocket();
 
   // Collect all output files from messages for the right panel
   const allOutputFiles = messages.reduce<{ files: string[]; msgIndex: number }[]>((acc, msg, i) => {
@@ -381,6 +393,12 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     if (activeSession) {
       api.getSession(activeSession).then((session: any) => {
         setMessages(session.messages || []);
+        // Restore auto-created architecture button if present
+        if (session.autoCreatedArch) {
+          setAutoCreatedArch(session.autoCreatedArch);
+        } else {
+          setAutoCreatedArch(null);
+        }
       });
     }
   }, [activeSession]);
@@ -507,6 +525,61 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     return () => { unsub1(); unsub2(); unsub3(); };
   }, [activeSession, onChunk, onResponse, onStatus]);
 
+  // ─── Listen for auto-created architecture events ───
+  useEffect(() => {
+    const sock = socketRef.current;
+    if (!sock) return;
+    const handler = (data: { sessionId: string; filename: string; systemName: string }) => {
+      if (data.sessionId === activeSession) {
+        setAutoCreatedArch({ filename: data.filename, systemName: data.systemName });
+      }
+    };
+    sock.on("chat:architecture-created", handler);
+    return () => { sock.off("chat:architecture-created", handler); };
+  }, [activeSession, socketRef]);
+
+  // ─── Activity log polling ───
+  useEffect(() => {
+    if (!showActivityLog || !activeSession) { setActivityLogContent(""); return; }
+    let cancelled = false;
+    const fetchLog = () => {
+      api.getActivityLog(activeSession).then((res: any) => {
+        if (!cancelled && res.content) {
+          const el = activityLogRef.current;
+          const wasAtBottom = el ? (el.scrollHeight - el.scrollTop - el.clientHeight < 40) : true;
+          setActivityLogContent(res.content);
+          if (wasAtBottom) {
+            setTimeout(() => el?.scrollTo(0, el.scrollHeight), 50);
+          }
+        }
+      }).catch(() => {});
+    };
+    fetchLog();
+    const iv = setInterval(fetchLog, isLoading ? 2000 : 5000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [showActivityLog, activeSession, isLoading]);
+
+  // ─── Chat log polling ───
+  useEffect(() => {
+    if (!showChatLog || !activeSession) { setChatLogContent(""); return; }
+    let cancelled = false;
+    const fetchLog = () => {
+      api.getChatLog(activeSession).then((res: any) => {
+        if (!cancelled && res.content) {
+          const el = chatLogRef.current;
+          const wasAtBottom = el ? (el.scrollHeight - el.scrollTop - el.clientHeight < 40) : true;
+          setChatLogContent(res.content);
+          if (wasAtBottom) {
+            setTimeout(() => el?.scrollTo(0, el.scrollHeight), 50);
+          }
+        }
+      }).catch(() => {});
+    };
+    fetchLog();
+    const iv = setInterval(fetchLog, isLoading ? 2000 : 5000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [showChatLog, activeSession, isLoading]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streaming]);
@@ -562,6 +635,11 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
         <div className="context-items">
           {project.memory && <span className="context-chip memory">Memory loaded</span>}
           {project.workingFolder && <span className="context-chip folder">{project.workingFolder.split("/").pop()}</span>}
+          {(project as any).agentOverride?.enabled && (
+            <span className="context-chip" style={{ background: "rgba(124,77,255,0.2)", color: "#c8b6ff", borderColor: "rgba(124,77,255,0.4)" }}>
+              Agent: {(project as any).agentOverride.subAgentMode || "auto"}
+            </span>
+          )}
           {selectedSkillNames.map((s) => <span key={s} className="context-chip skill">{s}</span>)}
         </div>
       </div>
@@ -596,6 +674,116 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
 
         {/* Chat area */}
         <div className="project-chat-main">
+          <div className="chat-top-bar">
+            <button
+              className={`activity-log-toggle ${showActivityLog ? "active" : ""}`}
+              onClick={() => { setShowActivityLog(v => !v); setShowChatLog(false); }}
+              title={showActivityLog ? "Hide activity log" : "Show activity log"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+              </svg>
+              <span>Activity</span>
+            </button>
+            <button
+              className={`activity-log-toggle ${showChatLog ? "active" : ""}`}
+              onClick={() => { setShowChatLog(v => !v); setShowActivityLog(false); }}
+              title={showChatLog ? "Hide chat log" : "Show chat log"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+              </svg>
+              <span>Log</span>
+            </button>
+            <button
+              className="activity-log-toggle"
+              onClick={async () => {
+                if (!activeSession) return;
+                try {
+                  const res: any = await api.getChatLog(activeSession);
+                  if (!res.content) { alert("No log content yet for this session."); return; }
+                  const blob = new Blob([res.content], { type: "text/plain" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `chat-log-${project.name}-${activeSession}.txt`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                } catch (err: any) {
+                  alert("Failed to export log: " + (err?.message || "unknown error"));
+                }
+              }}
+              title="Export full chat log as .txt file"
+              disabled={!activeSession}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              <span>Export</span>
+            </button>
+            {autoCreatedArch && (
+              <button
+                className="activity-log-toggle active"
+                onClick={async () => {
+                  try {
+                    const data = await api.getAgentConfig(autoCreatedArch.filename);
+                    setAgentEditorYaml(data.content);
+                    setAgentEditorFilename(autoCreatedArch.filename);
+                    setShowAgentEditor(true);
+                  } catch {}
+                }}
+                title={`View auto-created architecture: ${autoCreatedArch.systemName}`}
+                style={{ borderColor: "#8b5cf6", color: "#8b5cf6", background: "rgba(139, 92, 246, 0.15)" }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-7.07-2.93 2.83-2.83m8.48-8.48 2.83-2.83M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83"/>
+                </svg>
+                <span>{autoCreatedArch.systemName}</span>
+              </button>
+            )}
+          </div>
+          {showActivityLog && (
+            <div className="activity-log-panel">
+              <div className="activity-log-header">
+                <span>Activity Log</span>
+                {isLoading && <span className="activity-log-live">LIVE</span>}
+              </div>
+              <div className="activity-log-body" ref={activityLogRef}>
+                {activityLogContent ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{activityLogContent}</ReactMarkdown>
+                ) : (
+                  <div className="activity-log-empty">No activity yet. Run a task with agents to see logs here.</div>
+                )}
+              </div>
+            </div>
+          )}
+          {showChatLog && (
+            <div className="activity-log-panel">
+              <div className="activity-log-header">
+                <span>Chat Log</span>
+                {isLoading && <span className="activity-log-live">LIVE</span>}
+                <button
+                  onClick={() => {
+                    if (!chatLogContent) return;
+                    const blob = new Blob([chatLogContent], { type: "text/plain" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `chat-log-${project.name}-${activeSession || "session"}.txt`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  style={{ marginLeft: "auto", padding: "2px 10px", fontSize: 11, borderRadius: 6, border: "1px solid rgba(255,255,255,0.2)", background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.8)", cursor: "pointer" }}
+                  title="Save log as text file"
+                >
+                  Save .txt
+                </button>
+              </div>
+              <div className="activity-log-body" ref={chatLogRef} style={{ fontFamily: "monospace", fontSize: 11, whiteSpace: "pre-wrap" }}>
+                {chatLogContent || "No chat log yet. Send a message to start recording."}
+              </div>
+            </div>
+          )}
           {!activeSession && messages.length === 0 ? (
             <div className="project-chat-empty">
               <h3>Chat with {project.name}</h3>
@@ -697,6 +885,23 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
           </button>
         )}
       </div>
+
+      {/* Agent Editor modal for viewing auto-created architectures */}
+      {showAgentEditor && (
+        <Suspense fallback={<div style={{ padding: 40, textAlign: "center" }}>Loading editor...</div>}>
+          <AgentEditor
+            onClose={() => { setShowAgentEditor(false); setAgentEditorYaml(undefined); setAgentEditorFilename(undefined); }}
+            onSave={(filename: string, content: string) => {
+              api.saveAgentConfig(filename, content);
+              setShowAgentEditor(false);
+              setAgentEditorYaml(undefined);
+              setAgentEditorFilename(undefined);
+            }}
+            initialYaml={agentEditorYaml}
+            initialFilename={agentEditorFilename}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -704,6 +909,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
 /* ─── Main ProjectsPage ─── */
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [sortMode, setSortMode] = useState<"name" | "updated">(() => (localStorage.getItem("projectSortMode") as "name" | "updated") || "updated");
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [tab, setTab] = useState<"chat" | "overview" | "memory" | "skills" | "files">("chat");
   const [creating, setCreating] = useState(false);
@@ -724,11 +930,15 @@ export default function ProjectsPage() {
   const [editDesc, setEditDesc] = useState("");
   const [editFolder, setEditFolder] = useState("");
   const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [agentOverride, setAgentOverride] = useState<any>({});
+  const [agentConfigs, setAgentConfigs] = useState<any[]>([]);
+  const [showAgentDetail, setShowAgentDetail] = useState(false);
 
   useEffect(() => {
     api.getProjects().then(setProjects);
     api.getSkills().then(setAllSkills);
     api.getSettings().then((s: any) => setSandboxDir(s.sandboxDir || ""));
+    api.getAgentConfigs().then(setAgentConfigs).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -820,6 +1030,7 @@ export default function ProjectsPage() {
       name: editName.trim() || activeProject.name,
       description: editDesc.trim(),
       workingFolder: editFolder.trim(),
+      agentOverride: agentOverride.enabled ? agentOverride : { enabled: false },
     });
     setActiveProject(project);
     setProjects((prev) => prev.map((p) => p.id === project.id ? project : p));
@@ -831,6 +1042,7 @@ export default function ProjectsPage() {
     setEditName(activeProject.name);
     setEditDesc(activeProject.description);
     setEditFolder(activeProject.workingFolder);
+    setAgentOverride((activeProject as any).agentOverride || {});
     setEditing(true);
   };
 
@@ -939,6 +1151,34 @@ export default function ProjectsPage() {
           <Icon name="add" /> New Project
         </button>
 
+        <div style={{ display: "flex", gap: 4, padding: "8px 8px 4px", fontSize: 11 }}>
+          <span style={{ opacity: 0.7, alignSelf: "center", marginRight: 4, color: "#888" }}>Sort:</span>
+          <button
+            onClick={() => { setSortMode("name"); localStorage.setItem("projectSortMode", "name"); }}
+            style={{
+              padding: "4px 12px", borderRadius: 10,
+              border: sortMode === "name" ? "1.5px solid #7c4dff" : "1.5px solid #555",
+              background: sortMode === "name" ? "#7c4dff" : "#2a2a3a",
+              color: sortMode === "name" ? "#fff" : "#bbb",
+              cursor: "pointer", fontSize: 11, fontWeight: 600,
+            }}
+          >
+            A–Z
+          </button>
+          <button
+            onClick={() => { setSortMode("updated"); localStorage.setItem("projectSortMode", "updated"); }}
+            style={{
+              padding: "4px 12px", borderRadius: 10,
+              border: sortMode === "updated" ? "1.5px solid #7c4dff" : "1.5px solid #555",
+              background: sortMode === "updated" ? "#7c4dff" : "#2a2a3a",
+              color: sortMode === "updated" ? "#fff" : "#bbb",
+              cursor: "pointer", fontSize: 11, fontWeight: 600,
+            }}
+          >
+            Recent
+          </button>
+        </div>
+
         {creating && (
           <div className="project-create-form">
             <input
@@ -969,15 +1209,25 @@ export default function ProjectsPage() {
         )}
 
         <div className="project-list">
-          {projects.map((p) => (
+          {[...projects].sort((a, b) => {
+            if (sortMode === "name") return a.name.localeCompare(b.name);
+            return (b.updatedAt || "").localeCompare(a.updatedAt || "");
+          }).map((p) => (
             <div
               key={p.id}
               className={`project-item ${activeProject?.id === p.id ? "active" : ""}`}
-              onClick={() => { setActiveProject(p); setMobileSidebar(false); setEditing(false); setTab("chat"); }}
+              onClick={() => { setActiveProject(p); setMobileSidebar(false); setEditing(false); setShowAgentDetail(false); setTab("chat"); }}
             >
               <div className="project-item-icon"><Icon name="project" /></div>
               <div className="project-item-info">
-                <span className="project-item-name">{p.name}</span>
+                <span className="project-item-name">
+                  {p.name}
+                  {(p as any).agentOverride?.enabled && (
+                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 8, background: "rgba(124,77,255,0.25)", color: "#c8b6ff", verticalAlign: "middle" }}>
+                      {(p as any).agentOverride.subAgentMode || "auto"}
+                    </span>
+                  )}
+                </span>
                 {p.description && <span className="project-item-desc">{p.description}</span>}
               </div>
               <button className="project-delete btn-icon btn-ghost" onClick={(e) => deleteProject(p.id, e)}>
@@ -1011,6 +1261,57 @@ export default function ProjectsPage() {
               <div className="project-detail-title">
                 <h2>{activeProject.name}</h2>
                 {activeProject.description && <p className="project-detail-desc">{activeProject.description}</p>}
+                {(activeProject as any).agentOverride?.enabled && (() => {
+                  const ao = (activeProject as any).agentOverride;
+                  const modeLabels: Record<string, string> = {
+                    auto: "Auto Spawn", auto_create: "Auto Create", manual: "Manual YAML",
+                    realtime: "Realtime", auto_swarm: "Auto Swarm",
+                  };
+                  return (
+                    <div style={{ position: "relative", display: "inline-block" }}>
+                      <button
+                        onClick={() => setShowAgentDetail(!showAgentDetail)}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          padding: "3px 10px", borderRadius: 12, border: "1.5px solid rgba(124,77,255,0.5)",
+                          background: "rgba(124,77,255,0.15)", color: "#c8b6ff",
+                          fontSize: 11, fontWeight: 600, cursor: "pointer", marginTop: 4,
+                        }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                        Agent: {modeLabels[ao.subAgentMode] || ao.subAgentMode || "Auto"}
+                      </button>
+                      {showAgentDetail && (
+                        <div
+                          style={{
+                            position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 100,
+                            background: "#1e1e2e", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10,
+                            padding: "12px 16px", minWidth: 240, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                            <strong style={{ fontSize: 12, color: "#c8b6ff" }}>Agent Override</strong>
+                            <button onClick={() => setShowAgentDetail(false)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.5)", cursor: "pointer", fontSize: 14 }}>✕</button>
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.8)" }}>
+                            <div><span style={{ opacity: 0.5 }}>Mode:</span> {modeLabels[ao.subAgentMode] || ao.subAgentMode || "Auto"}</div>
+                            {ao.subAgentConfigFile && <div><span style={{ opacity: 0.5 }}>Config:</span> {ao.subAgentConfigFile}</div>}
+                            {ao.autoArchitectureType && <div><span style={{ opacity: 0.5 }}>Architecture:</span> {ao.autoArchitectureType}</div>}
+                            {ao.autoAgentCount && <div><span style={{ opacity: 0.5 }}>Agents:</span> {ao.autoAgentCount}</div>}
+                            {ao.autoProtocols?.length > 0 && <div><span style={{ opacity: 0.5 }}>Protocols:</span> {ao.autoProtocols.join(", ")}</div>}
+                          </div>
+                          <button
+                            onClick={() => { setShowAgentDetail(false); startEdit(); }}
+                            style={{ marginTop: 10, fontSize: 11, padding: "4px 12px", borderRadius: 8, border: "1px solid rgba(124,77,255,0.4)", background: "rgba(124,77,255,0.15)", color: "#c8b6ff", cursor: "pointer", width: "100%" }}
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <button className="btn btn-ghost btn-sm" onClick={startEdit}>Edit</button>
             </div>
@@ -1030,6 +1331,151 @@ export default function ProjectsPage() {
                   <input value={editFolder} onChange={(e) => setEditFolder(e.target.value)} placeholder="Folder name (e.g. my-project)" />
                   {sandboxDir && <span className="hint" style={{ fontSize: 10 }}>Path: {sandboxDir}/{editFolder || "..."}</span>}
                 </div>
+
+                {/* Agent Mode Override */}
+                <details style={{ marginTop: 8, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "8px 12px", background: "rgba(255,255,255,0.03)" }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13, opacity: 0.85, userSelect: "none", display: "flex", alignItems: "center", gap: 8 }}>
+                    Agent Mode Override
+                    {agentOverride.enabled && <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.6 }}>({agentOverride.subAgentMode || "auto"})</span>}
+                  </summary>
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!agentOverride.enabled}
+                        onChange={(e) => setAgentOverride({ ...agentOverride, enabled: e.target.checked })}
+                      />
+                      Override system agent settings for this project
+                    </label>
+
+                    {agentOverride.enabled && (
+                      <>
+                        <div className="form-group" style={{ margin: 0 }}>
+                          <label>Sub-Agent Mode</label>
+                          <select
+                            value={agentOverride.subAgentMode || "auto"}
+                            onChange={(e) => setAgentOverride({ ...agentOverride, subAgentMode: e.target.value })}
+                          >
+                            <option value="auto">Auto Spawn</option>
+                            <option value="auto_create">Auto (AI create architecture)</option>
+                            <option value="manual">Spawn Agent (YAML config file)</option>
+                            <option value="realtime">Realtime Agent (YAML config file)</option>
+                            <option value="auto_swarm">Auto Choose Swarm (AI picks config)</option>
+                          </select>
+                        </div>
+
+                        {(agentOverride.subAgentMode === "manual" || agentOverride.subAgentMode === "realtime" || agentOverride.subAgentMode === "auto_swarm") && (
+                          <div className="form-group" style={{ margin: 0 }}>
+                            <label>Agent Configuration File</label>
+                            <select
+                              value={agentOverride.subAgentConfigFile || ""}
+                              onChange={(e) => setAgentOverride({ ...agentOverride, subAgentConfigFile: e.target.value })}
+                            >
+                              <option value="">Select a config file...</option>
+                              {agentConfigs.map((cfg: any) => (
+                                <option key={cfg.filename} value={cfg.filename}>
+                                  {cfg.name} ({cfg.filename}) — {cfg.agentCount} agents
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+
+                        {agentOverride.subAgentMode === "auto_create" && (
+                          <>
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Architecture Type</label>
+                              <select
+                                value={agentOverride.autoArchitectureType || "auto"}
+                                onChange={(e) => setAgentOverride({ ...agentOverride, autoArchitectureType: e.target.value })}
+                              >
+                                <option value="auto">Auto (AI decides)</option>
+                                <option value="hierarchical">Hierarchical</option>
+                                <option value="flat">Flat</option>
+                                <option value="mesh">Mesh</option>
+                                <option value="hybrid">Hybrid</option>
+                                <option value="pipeline">Pipeline</option>
+                                <option value="p2p">P2P</option>
+                              </select>
+                            </div>
+
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Agent Count</label>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={20}
+                                  value={agentOverride.autoAgentCount || ""}
+                                  placeholder="3-8"
+                                  onChange={(e) => setAgentOverride({ ...agentOverride, autoAgentCount: e.target.value ? Number(e.target.value) : "" })}
+                                  style={{ width: 80 }}
+                                />
+                                <span style={{ fontSize: 12, opacity: 0.6 }}>default: 3–8</span>
+                              </div>
+                            </div>
+
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Connection Protocol</label>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+                                {[
+                                  { value: "tcp", label: "TCP", desc: "point-to-point" },
+                                  { value: "queue", label: "Queue", desc: "async queue" },
+                                  { value: "bus", label: "Bus", desc: "pub/sub" },
+                                  { value: "mesh", label: "Mesh", desc: "peer-to-peer" },
+                                ].map((proto) => {
+                                  const protocols: string[] = agentOverride.autoProtocols || ["tcp"];
+                                  const selected = protocols.includes(proto.value);
+                                  return (
+                                    <button
+                                      key={proto.value}
+                                      type="button"
+                                      onClick={() => {
+                                        const next = selected
+                                          ? protocols.filter((p: string) => p !== proto.value)
+                                          : [...protocols, proto.value];
+                                        setAgentOverride({ ...agentOverride, autoProtocols: next.length > 0 ? next : ["tcp"] });
+                                      }}
+                                      style={{
+                                        padding: "5px 12px",
+                                        borderRadius: 20,
+                                        border: selected ? "2px solid #7c4dff" : "2px solid rgba(255,255,255,0.25)",
+                                        background: selected ? "rgba(124,77,255,0.25)" : "transparent",
+                                        color: selected ? "#d4c4ff" : "rgba(255,255,255,0.75)",
+                                        cursor: "pointer",
+                                        fontSize: 11,
+                                        fontWeight: selected ? 600 : 400,
+                                        transition: "all 0.15s ease",
+                                      }}
+                                    >
+                                      {proto.label} <span style={{ opacity: 0.6, fontSize: 10 }}>{proto.desc}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            <div className="form-group" style={{ margin: 0 }}>
+                              <label>Base Template File</label>
+                              <select
+                                value={agentOverride.subAgentConfigFile || ""}
+                                onChange={(e) => setAgentOverride({ ...agentOverride, subAgentConfigFile: e.target.value })}
+                              >
+                                <option value="">None (AI creates from scratch)</option>
+                                {agentConfigs.map((cfg: any) => (
+                                  <option key={cfg.filename} value={cfg.filename}>
+                                    {cfg.name} ({cfg.filename}) — {cfg.agentCount} agents
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </details>
+
                 <div className="form-actions">
                   <button className="btn btn-primary btn-sm" onClick={saveEdit}>Save</button>
                   <button className="btn btn-ghost btn-sm" onClick={() => setEditing(false)}>Cancel</button>

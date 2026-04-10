@@ -67,7 +67,7 @@ export interface Settings {
   webSearchEngine?: string;
   pythonPath?: string;
   subAgentEnabled?: boolean;
-  subAgentMode?: string; // "auto" | "manual" | "realtime"
+  subAgentMode?: string; // "auto" | "auto_create" | "manual" | "realtime" | "auto_swarm"
   subAgentModel?: string;
   subAgentMaxDepth?: number;
   subAgentMaxConcurrent?: number;
@@ -80,8 +80,21 @@ export interface Settings {
   [key: string]: any;
 }
 
+// Per-project settings overrides using AsyncLocalStorage for proper async scoping
+import { AsyncLocalStorage } from "async_hooks";
+const _settingsOverrideStore = new AsyncLocalStorage<Partial<Settings>>();
+
+export function runWithSettingsOverride<T>(overrides: Partial<Settings>, fn: () => T): T {
+  return _settingsOverrideStore.run(overrides, fn);
+}
+
 export async function getSettings(): Promise<Settings> {
-  return readJSON("settings.json");
+  const settings = await readJSON("settings.json") as Settings;
+  const overrides = _settingsOverrideStore.getStore();
+  if (overrides) {
+    return { ...settings, ...overrides };
+  }
+  return settings;
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
@@ -96,6 +109,15 @@ export interface Project {
   workingFolder: string;
   memory: string;
   skills: string[];
+  // Per-project agent overrides (if set, override system settings)
+  agentOverride?: {
+    enabled?: boolean;
+    subAgentMode?: string;
+    subAgentConfigFile?: string;
+    autoArchitectureType?: string;
+    autoAgentCount?: number | string;
+    autoProtocols?: string[];
+  };
   createdAt: string;
   updatedAt: string;
 }

@@ -1,8 +1,18 @@
 ![Tiger CoWork Banner](picture/screen_read.png)
 
-# Tiger CoWork v0.5.0
+# Tiger CoWork v0.6.0
 
 A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, cross-machine agent connection, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect agents across machines on your network so distributed teams can collaborate in real time. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
+
+## What's New in v0.6.0
+
+- **Per-Project Agent Mode Override** — each project can override the global sub-agent mode (Auto Spawn, Auto Create, Manual, Realtime, Auto Swarm) and pick its own YAML config, architecture type, agent count, and connection protocols. The active override is shown as a clickable purple tag in the project header and chat banner.
+- **Auto Architecture — AI-Decided Settings** — new "Auto (AI decides)" option for architecture type and agent count (3–8 default). Connection protocols are now multi-select toggle buttons instead of a single dropdown.
+- **Full Chat Log with Agent Reasoning** — every chat session now records a complete log file capturing user messages, tool calls (with arguments), sub-agent reasoning text, and final responses. New **Log** button next to Activity opens a live-updating panel; new **Export** button downloads the log as `.txt`.
+- **Finished Tasks History** — Tasks page now shows the last 100 completed/cancelled/errored tasks with status, duration, agents used, and tools called. **Open Chat** button on each finished task jumps directly to that session.
+- **Project List Sorting** — sort projects by **A–Z** or **Recent** (most recently updated). Sort preference persists across reloads.
+- **Sub-Agent Reasoning in Chat Log** — orchestrators and worker agents stream their intermediate thinking text to the chat log between tool calls, giving full visibility into the decision-making chain.
+- **AsyncLocalStorage Settings Override** — project agent overrides now propagate correctly through every async call in the backend, ensuring `getSettings()` returns the project-scoped configuration throughout the entire chat lifecycle.
 
 > **Warning:** This app executes AI-generated code and shell commands. Run it inside Docker or a sandboxed environment. See [Security & Docker Setup](docs/TECHNICAL.md#security-notice).
 

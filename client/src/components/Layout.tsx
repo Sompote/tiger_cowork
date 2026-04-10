@@ -100,8 +100,11 @@ export default function Layout({ children }: { children: ReactNode }) {
           <span className="logo-text">Tiger CoWork</span>
           <span className="logo-badge">AI</span>
           {swarmEnabled && agentMode === "realtime" && <span className="logo-realtime-tag">Realtime Agent</span>}
-          {swarmEnabled && agentMode !== "realtime" && <span className="logo-swarm-tag">Swarm</span>}
-          {swarmEnabled && agentGroupName && (
+          {swarmEnabled && agentMode === "auto_create" && <span className="logo-auto-arch-tag">Auto Create Architecture</span>}
+          {swarmEnabled && agentMode === "auto_swarm" && <span className="logo-auto-swarm-tag">Auto Swarm</span>}
+          {swarmEnabled && agentMode === "manual" && <span className="logo-swarm-tag">Spawn Agent</span>}
+          {swarmEnabled && agentMode === "auto" && <span className="logo-swarm-tag">Auto Agent</span>}
+          {swarmEnabled && agentGroupName && (agentMode === "realtime" || agentMode === "manual") && (
             <div className="agent-group-selector">
               <span
                 className="logo-config-tag clickable"
