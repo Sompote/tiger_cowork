@@ -32,6 +32,18 @@ interface ActiveTask {
   lastUpdate: string;
 }
 
+interface RemoteTask {
+  taskId: string;
+  sessionId: string;
+  status: "running" | "completed" | "error";
+  progress: string[];
+  result?: string;
+  error?: string;
+  startedAt: number;
+  updatedAt: number;
+  elapsed: number;
+}
+
 interface FinishedTask {
   id: string;
   sessionId: string;
@@ -93,6 +105,9 @@ export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTasks, setActiveTasks] = useState<ActiveTask[]>([]);
   const [finishedTasks, setFinishedTasks] = useState<FinishedTask[]>([]);
+  const [remoteTasks, setRemoteTasks] = useState<RemoteTask[]>([]);
+  const [remoteOpen, setRemoteOpen] = useState(false);
+  const [expandedRemote, setExpandedRemote] = useState<Record<string, boolean>>({});
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
   const [refreshing, setRefreshing] = useState(false);
@@ -116,6 +131,12 @@ export default function TasksPage() {
       setActiveTasks(data);
       const fin = await api.getFinishedTasks();
       setFinishedTasks(fin);
+      try {
+        const rem = await api.getRemoteTasks();
+        setRemoteTasks(rem?.tasks || []);
+      } catch {
+        // remote endpoint may be unavailable
+      }
     } catch {
       // ignore
     }
@@ -398,6 +419,88 @@ export default function TasksPage() {
         <div className="empty-state" style={{ marginBottom: 32, padding: "24px 0" }}>
           <p style={{ color: "var(--text-tertiary)", fontSize: 13 }}>No finished tasks yet</p>
         </div>
+      )}
+
+      {/* ─── Remote Tasks (collapsible menu) ─── */}
+      <div className="page-header" style={{ marginTop: 24, cursor: "pointer" }} onClick={() => setRemoteOpen(v => !v)}>
+        <h1 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "inline-block", transform: remoteOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>▶</span>
+          Remote Tasks
+          <span style={{ fontSize: 12, fontWeight: 400, opacity: 0.6 }}>
+            ({remoteTasks.filter(t => t.status === "running").length} running · {remoteTasks.length} total)
+          </span>
+        </h1>
+      </div>
+
+      {remoteOpen && (
+        remoteTasks.length > 0 ? (
+          <div className="card-list" style={{ marginBottom: 32 }}>
+            {remoteTasks.map((task) => {
+              const statusColor = task.status === "running" ? "#2196f3" : task.status === "completed" ? "#4caf50" : "#f44336";
+              const statusIcon = task.status === "running" ? "●" : task.status === "completed" ? "✓" : "✗";
+              const isExpanded = expandedRemote[task.taskId];
+              const firstProgress = task.progress[0] || "";
+              const title = firstProgress.length > 80 ? firstProgress.slice(0, 80) + "…" : firstProgress || `Remote task ${task.taskId.slice(0, 8)}`;
+              return (
+                <div key={task.taskId} className="card" style={{ borderLeft: `3px solid ${statusColor}` }}>
+                  <div className="card-header">
+                    <div className="card-title-row">
+                      <span style={{ color: statusColor, fontWeight: 700, fontSize: 14 }}>{statusIcon}</span>
+                      <h3 style={{ margin: 0 }}>{title}</h3>
+                      <span className="source-badge clawhub">remote</span>
+                    </div>
+                    <div className="active-task-actions">
+                      <span className="active-task-elapsed">
+                        {task.elapsed}s · {timeAgo(new Date(task.updatedAt).toISOString())}
+                      </span>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setExpandedRemote(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
+                      >
+                        {isExpanded ? "Hide" : "Details"}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => navigate(`/?session=${task.sessionId}`)}
+                        title="Open chat session"
+                      >
+                        Chat
+                      </button>
+                    </div>
+                  </div>
+                  <div className="card-body">
+                    <div className="card-detail">
+                      <strong>Status:</strong>{" "}
+                      <span style={{ color: statusColor, textTransform: "capitalize" }}>{task.status}</span>
+                      {" · "}
+                      <strong>Task ID:</strong> <code>{task.taskId.slice(0, 8)}</code>
+                    </div>
+                    {isExpanded && task.progress.length > 0 && (
+                      <pre className="card-result" style={{ maxHeight: 240, overflow: "auto", fontSize: 11 }}>
+                        {task.progress.join("\n")}
+                      </pre>
+                    )}
+                    {isExpanded && task.result && (
+                      <div className="card-detail" style={{ marginTop: 8 }}>
+                        <strong>Result:</strong>
+                        <pre className="card-result" style={{ maxHeight: 200, overflow: "auto" }}>{task.result}</pre>
+                      </div>
+                    )}
+                    {isExpanded && task.error && (
+                      <div className="card-detail" style={{ marginTop: 8, color: "#f44336" }}>
+                        <strong>Error:</strong> {task.error}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-state" style={{ marginBottom: 32, padding: "24px 0" }}>
+            <p style={{ color: "var(--text-tertiary)", fontSize: 13 }}>No remote tasks</p>
+          </div>
+        )
       )}
 
       {/* ─── Scheduled Tasks ─── */}

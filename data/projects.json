@@ -163,7 +163,12 @@
     "memory": "",
     "skills": [],
     "createdAt": "2026-04-01T22:24:38.566Z",
-    "updatedAt": "2026-04-01T22:24:47.655Z"
+    "updatedAt": "2026-04-10T00:32:25.136Z",
+    "agentOverride": {
+      "enabled": true,
+      "subAgentMode": "realtime",
+      "subAgentConfigFile": "github_marketing_analysis_system_auto.yaml"
+    }
   },
   {
     "id": "d35fe45d-b7dc-47c6-98ad-9fef62cda648",
@@ -195,5 +200,20 @@
     ],
     "createdAt": "2026-04-03T11:04:25.967Z",
     "updatedAt": "2026-04-03T11:06:26.883Z"
+  },
+  {
+    "id": "34191bdd-129a-49e0-863f-968731a11676",
+    "name": "Tigrimos",
+    "description": "",
+    "workingFolder": "/root/cowork/Tigrimos",
+    "memory": "",
+    "skills": [],
+    "createdAt": "2026-04-09T14:19:19.340Z",
+    "updatedAt": "2026-04-10T13:53:14.302Z",
+    "agentOverride": {
+      "enabled": true,
+      "subAgentMode": "realtime",
+      "subAgentConfigFile": "github_marketing_analysis_system_auto.yaml"
+    }
   }
 ]

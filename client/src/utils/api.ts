@@ -80,6 +80,7 @@ export const api = {
   getTasks: () => request("/tasks"),
   getActiveTasks: () => request("/tasks/active"),
   getFinishedTasks: () => request("/tasks/finished"),
+  getRemoteTasks: () => request("/remote/tasks"),
   killActiveTask: (id: string) => request(`/tasks/active/${id}/kill`, { method: "POST" }),
   createTask: (data: any) => request("/tasks", { method: "POST", body: JSON.stringify(data) }),
   updateTask: (id: string, data: any) => request(`/tasks/${id}`, { method: "PATCH", body: JSON.stringify(data) }),

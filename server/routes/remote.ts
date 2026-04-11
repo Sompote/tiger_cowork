@@ -7,6 +7,7 @@
  * Endpoints:
  *   POST /api/remote/task          — submit a task, returns { taskId }
  *   GET  /api/remote/task/:id      — poll for result + progress
+ *   GET  /api/remote/tasks         — list all remote tasks (for UI display)
  */
 
 import { FastifyInstance } from "fastify";
@@ -118,6 +119,24 @@ export async function remoteRoutes(fastify: FastifyInstance) {
     });
 
     return { taskId, sessionId };
+  });
+
+  // List all remote tasks (most recent first) — used by the UI task menu
+  fastify.get("/tasks", async () => {
+    const list = Array.from(remoteTasks.values())
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .map((entry) => ({
+        taskId: entry.taskId,
+        sessionId: entry.sessionId,
+        status: entry.status,
+        progress: entry.progress.slice(-20), // tail to keep payload small
+        result: entry.result,
+        error: entry.error,
+        startedAt: entry.startedAt,
+        updatedAt: entry.updatedAt,
+        elapsed: Math.round((Date.now() - entry.startedAt) / 1000),
+      }));
+    return { tasks: list };
   });
 
   // Poll for task progress/result

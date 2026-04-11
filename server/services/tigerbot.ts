@@ -814,8 +814,15 @@ async function getApiConfig() {
     : rawUrl.endsWith("/chat/completions") ? rawUrl : rawUrl.replace(/\/$/, "") + "/chat/completions";
   // OAuth tokens (sk-ant-oat01-) use Bearer auth; API keys (sk-ant-api) use x-api-key
   const isOAuthToken = isAnthropic && apiKey?.startsWith("sk-ant-oat01-");
-  return { apiKey, model, apiUrl, isAnthropic, isOAuthToken };
+  const isKimi = provider === "kimi" || rawUrl.includes("api.kimi.com");
+  return { apiKey, model, apiUrl, isAnthropic, isOAuthToken, isKimi };
 }
+
+// Kimi Code API gates access by requiring Claude Code identity headers.
+const KIMI_HEADERS: Record<string, string> = {
+  "User-Agent": "claude-code/1.0",
+  "X-Client-Name": "claude-code",
+};
 
 // Single LLM call (no tool loop)
 /**
@@ -1022,7 +1029,7 @@ function fromAnthropicResponse(data: any): any {
 }
 
 async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?: string; signal?: AbortSignal } = {}): Promise<any> {
-  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken } = await getApiConfig();
+  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken, isKimi } = await getApiConfig();
   if (!apiKey) throw new Error("API key not configured");
 
   const sanitized = sanitizeMessages(messages);
@@ -1080,6 +1087,7 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
+        ...(isKimi ? KIMI_HEADERS : {}),
       },
       body: JSON.stringify(body),
       signal: options.signal,
@@ -2099,7 +2107,7 @@ export async function streamTigerBot(
   onChunk: (text: string) => void,
   onDone: () => void
 ): Promise<void> {
-  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken } = await getApiConfig();
+  const { apiKey, model, apiUrl, isAnthropic, isOAuthToken, isKimi } = await getApiConfig();
   const settings = await getSettings();
 
   if (!apiKey) {
@@ -2139,6 +2147,7 @@ export async function streamTigerBot(
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
+          ...(isKimi ? KIMI_HEADERS : {}),
         },
         body: JSON.stringify({
           model,

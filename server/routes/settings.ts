@@ -147,9 +147,13 @@ export async function settingsRoutes(fastify: FastifyInstance) {
       } else {
         const rawUrl = apiUrl || "https://api.tigerbot.com/bot-chat/openai/v1/chat/completions";
         const url = rawUrl.endsWith("/chat/completions") ? rawUrl : rawUrl.replace(/\/$/, "") + "/chat/completions";
+        const isKimi = provider === "kimi" || rawUrl.includes("api.kimi.com");
+        const kimiHeaders: Record<string, string> = isKimi
+          ? { "User-Agent": "claude-code/1.0", "X-Client-Name": "claude-code" }
+          : {};
         const response = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, ...kimiHeaders },
           body: JSON.stringify({
             model: model || "TigerBot-70B-Chat",
             messages: [{ role: "user", content: "Hello" }],
