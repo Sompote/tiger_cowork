@@ -38,6 +38,10 @@ interface RemoteTaskEntry {
   updatedAt: number;
   abortController?: AbortController;
   killed?: boolean;
+  // Agent tracking for diagram/graphic views
+  agentTools: Record<string, string[]>;
+  activeAgents: Set<string>;
+  doneAgents: Set<string>;
 }
 
 // In-memory registry of active remote tasks
@@ -99,6 +103,9 @@ export async function remoteRoutes(fastify: FastifyInstance) {
       startedAt: Date.now(),
       updatedAt: Date.now(),
       abortController: new AbortController(),
+      agentTools: {},
+      activeAgents: new Set(),
+      doneAgents: new Set(),
     };
     remoteTasks.set(taskId, entry);
 
@@ -128,17 +135,36 @@ export async function remoteRoutes(fastify: FastifyInstance) {
   fastify.get("/tasks", async () => {
     const list = Array.from(remoteTasks.values())
       .sort((a, b) => b.startedAt - a.startedAt)
-      .map((entry) => ({
-        taskId: entry.taskId,
-        sessionId: entry.sessionId,
-        status: entry.status,
-        progress: entry.progress.slice(-20), // tail to keep payload small
-        result: entry.result,
-        error: entry.error,
-        startedAt: entry.startedAt,
-        updatedAt: entry.updatedAt,
-        elapsed: Math.round((Date.now() - entry.startedAt) / 1000),
-      }));
+      .map((entry) => {
+        // Merge entry's tracked agent tools with live realtime session state
+        const agentTools: Record<string, string[]> = { ...entry.agentTools };
+        const activeAgents: string[] = [];
+        const doneAgents: string[] = Array.from(entry.doneAgents);
+        const rtSession = getRealtimeSession(entry.sessionId);
+        if (rtSession) {
+          for (const [id, handle] of rtSession.agents.entries()) {
+            if (handle.agentDef.role === "human") continue;
+            const label = handle.agentDef.name || id;
+            if (!agentTools[label]) agentTools[label] = [];
+            if (handle.status === "working") activeAgents.push(label);
+            else if (handle.status === "completed" && !doneAgents.includes(label)) doneAgents.push(label);
+          }
+        }
+        return {
+          taskId: entry.taskId,
+          sessionId: entry.sessionId,
+          status: entry.status,
+          progress: entry.progress.slice(-20),
+          result: entry.result,
+          error: entry.error,
+          startedAt: entry.startedAt,
+          updatedAt: entry.updatedAt,
+          elapsed: Math.round((Date.now() - entry.startedAt) / 1000),
+          agentTools,
+          activeAgents,
+          doneAgents,
+        };
+      });
     return { tasks: list };
   });
 
@@ -213,6 +239,10 @@ async function processRemoteTask(
         [{ role: "user", content: task }],
         systemPrompt,
         (name, args) => {
+          // Track tool for diagram view
+          if (!entry.agentTools["Orchestrator"]) entry.agentTools["Orchestrator"] = [];
+          entry.agentTools["Orchestrator"].push(name);
+          entry.activeAgents.add("Orchestrator");
           // Send concise tool call info: tool name + short hint of what it's doing
           let hint = "";
           if (name === "web_search" && args?.query) hint = `: "${args.query.slice(0, 80)}"`;
@@ -332,10 +362,27 @@ async function processRemoteTask(
   }
 
   // Start a progress monitor that periodically reports working agents
+  // and syncs agent state for diagram/graphic views
   const progressInterval = setInterval(() => {
     if (entry.status !== "running") {
       clearInterval(progressInterval);
       return;
+    }
+    // Sync agent status from realtime session
+    const rtSess = getRealtimeSession(sessionId);
+    if (rtSess) {
+      for (const [id, handle] of rtSess.agents.entries()) {
+        if (handle.agentDef.role === "human") continue;
+        const label = handle.agentDef.name || id;
+        if (!entry.agentTools[label]) entry.agentTools[label] = [];
+        if (handle.status === "working") {
+          entry.activeAgents.add(label);
+          entry.doneAgents.delete(label);
+        } else if (handle.status === "completed" || handle.status === "error") {
+          entry.activeAgents.delete(label);
+          entry.doneAgents.add(label);
+        }
+      }
     }
     const working = getWorkingAgents(sessionId);
     if (working.length > 0) {

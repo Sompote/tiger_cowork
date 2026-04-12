@@ -43,6 +43,9 @@ interface RemoteTask {
   startedAt: number;
   updatedAt: number;
   elapsed: number;
+  agentTools?: Record<string, string[]>;
+  activeAgents?: string[];
+  doneAgents?: string[];
 }
 
 interface FinishedTask {
@@ -114,6 +117,8 @@ export default function TasksPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [graphicOpen, setGraphicOpen] = useState<Record<string, boolean>>({});
   const [diagramOpen, setDiagramOpen] = useState<Record<string, boolean>>({});
+  const [remoteGraphicOpen, setRemoteGraphicOpen] = useState<Record<string, boolean>>({});
+  const [remoteDiagramOpen, setRemoteDiagramOpen] = useState<Record<string, boolean>>({});
   const { onStatus } = useSocket();
 
   const killTask = async (taskId: string) => {
@@ -485,6 +490,28 @@ export default function TasksPage() {
                         {task.elapsed}s · {timeAgo(new Date(task.updatedAt).toISOString())}
                       </span>
                       <button
+                        className={`btn btn-sm${remoteGraphicOpen[task.taskId] ? " btn-primary" : " btn-ghost"}`}
+                        onClick={() => setRemoteGraphicOpen(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
+                        title="Toggle agent graphic view"
+                        style={{ gap: 4 }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-4-8c.79 0 1.5-.71 1.5-1.5S8.79 9 8 9s-1.5.71-1.5 1.5S7.21 12 8 12zm8 0c.79 0 1.5-.71 1.5-1.5S16.79 9 16 9s-1.5.71-1.5 1.5.71 1.5 1.5 1.5zm-4 4c2.21 0 4-1.12 4-2.5h-8c0 1.38 1.79 2.5 4 2.5z"/>
+                        </svg>
+                        Graphic
+                      </button>
+                      <button
+                        className={`btn btn-sm${remoteDiagramOpen[task.taskId] ? " btn-primary" : " btn-ghost"}`}
+                        onClick={() => setRemoteDiagramOpen(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
+                        title="Toggle agent flow diagram"
+                        style={{ gap: 4 }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6zM10 7h4M7 10v4M17 10v4M10 17h4" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+                        </svg>
+                        Diagram
+                      </button>
+                      <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => setExpandedRemote(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
                       >
@@ -515,6 +542,40 @@ export default function TasksPage() {
                       {" · "}
                       <strong>Task ID:</strong> <code>{task.taskId.slice(0, 8)}</code>
                     </div>
+
+                    {/* Active & done agents pills for remote tasks */}
+                    {task.agentTools && Object.keys(task.agentTools).length > 0 && (() => {
+                      const running = task.activeAgents || [];
+                      const done = new Set(task.doneAgents || []);
+                      const waiting = Object.keys(task.agentTools).filter(a => !running.includes(a) && !done.has(a));
+                      return (running.length > 0 || waiting.length > 0) ? (
+                        <div className="card-detail">
+                          {running.length > 0 && (<>
+                            <strong>Running:</strong>
+                            <div className="active-agents-row">
+                              {running.map((agent, i) => (
+                                <span key={i} className={`active-agent-badge agent-color-${agentColorIndex(agent)}`}>
+                                  <span className="agent-dot" />
+                                  {agent}
+                                </span>
+                              ))}
+                            </div>
+                          </>)}
+                          {waiting.length > 0 && (<>
+                            <strong style={{ marginLeft: running.length > 0 ? 12 : 0 }}>Waiting:</strong>
+                            <div className="active-agents-row">
+                              {waiting.map((agent, i) => (
+                                <span key={i} className={`active-agent-badge agent-waiting-badge agent-color-${agentColorIndex(agent)}`}>
+                                  <span className="agent-dot agent-dot-waiting" />
+                                  {agent}
+                                </span>
+                              ))}
+                            </div>
+                          </>)}
+                        </div>
+                      ) : null;
+                    })()}
+
                     {isExpanded && task.progress.length > 0 && (
                       <pre className="card-result" style={{ maxHeight: 240, overflow: "auto", fontSize: 11 }}>
                         {task.progress.join("\n")}
@@ -532,6 +593,22 @@ export default function TasksPage() {
                       </div>
                     )}
                   </div>
+                  {remoteGraphicOpen[task.taskId] && (
+                    <AgentGraphic
+                      agentTools={task.agentTools || {}}
+                      activeAgents={task.activeAgents || []}
+                      doneAgents={task.doneAgents || []}
+                      status={task.status}
+                    />
+                  )}
+                  {remoteDiagramOpen[task.taskId] && (
+                    <AgentDiagram
+                      agentTools={task.agentTools || {}}
+                      activeAgents={task.activeAgents || []}
+                      doneAgents={task.doneAgents || []}
+                      status={task.status}
+                    />
+                  )}
                 </div>
               );
             })}
