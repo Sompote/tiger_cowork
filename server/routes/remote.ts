@@ -36,6 +36,8 @@ interface RemoteTaskEntry {
   error?: string;
   startedAt: number;
   updatedAt: number;
+  abortController?: AbortController;
+  killed?: boolean;
 }
 
 // In-memory registry of active remote tasks
@@ -96,6 +98,7 @@ export async function remoteRoutes(fastify: FastifyInstance) {
       progress: [],
       startedAt: Date.now(),
       updatedAt: Date.now(),
+      abortController: new AbortController(),
     };
     remoteTasks.set(taskId, entry);
 
@@ -137,6 +140,30 @@ export async function remoteRoutes(fastify: FastifyInstance) {
         elapsed: Math.round((Date.now() - entry.startedAt) / 1000),
       }));
     return { tasks: list };
+  });
+
+  // Kill a running remote task
+  fastify.post("/task/:id/kill", async (request, reply) => {
+    const taskId = (request.params as any).id;
+    const entry = remoteTasks.get(taskId);
+    if (!entry) {
+      reply.code(404);
+      return { error: "Task not found" };
+    }
+    if (entry.status !== "running") {
+      return { ok: true, status: entry.status, message: "Task already finished" };
+    }
+    entry.killed = true;
+    entry.abortController?.abort();
+    try {
+      shutdownRealtimeSession(entry.sessionId);
+    } catch {
+      // session may not exist (simple chat mode) — ignore
+    }
+    entry.status = "error";
+    entry.error = "Killed by user";
+    addProgress(entry, "Killed by user");
+    return { ok: true, status: "error" };
   });
 
   // Poll for task progress/result
@@ -206,8 +233,10 @@ async function processRemoteTask(
           }
           // Only log failures — successful results are implicit from the next tool call
         },
+        entry.abortController?.signal,
       );
       clearInterval(heartbeat);
+      if (entry.killed) return;
       entry.result = result.content;
       entry.status = "completed";
       addProgress(entry, "Completed");
@@ -222,6 +251,7 @@ async function processRemoteTask(
       }
     } catch (err: any) {
       clearInterval(heartbeat);
+      if (entry.killed) return;
       entry.status = "error";
       entry.error = err.message;
       addProgress(entry, `Error: ${err.message}`);
@@ -318,13 +348,14 @@ async function processRemoteTask(
 
   // Wait for result from the target agent
   const timeout = (settings.subAgentTimeout || 300) * 1000;
-  const abortController = new AbortController();
+  const abortController = entry.abortController || new AbortController();
 
   try {
     const resultMsg = await busWaitForMessage(sessionId, waitTopic, timeout, abortController.signal);
     const agentResult = resultMsg.payload?.result || "(no result)";
 
     clearInterval(progressInterval);
+    if (entry.killed) return;
     entry.result = agentResult;
     entry.status = "completed";
     addProgress(entry, "Completed (realtime agents)");
@@ -339,11 +370,12 @@ async function processRemoteTask(
     }
   } catch (err: any) {
     clearInterval(progressInterval);
+    if (entry.killed) return;
     entry.status = "error";
     entry.error = `Agent timeout or error: ${err.message}`;
     addProgress(entry, entry.error);
   } finally {
     // Shutdown the realtime session
-    shutdownRealtimeSession(sessionId);
+    try { shutdownRealtimeSession(sessionId); } catch {}
   }
 }

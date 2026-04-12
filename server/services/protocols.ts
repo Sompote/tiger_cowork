@@ -149,11 +149,17 @@ export function tcpClose(agentA: string, agentB: string): void {
 class AgentBus extends EventEmitter {
   private history: ProtocolMessage[] = [];
   private maxHistory = 500;
+  // Track which messages have been consumed per topic so busWaitForMessage
+  // can pick up messages that arrived while nobody was subscribed.
+  private consumed = new Set<ProtocolMessage>();
 
   publish(msg: ProtocolMessage): void {
     msg.timestamp = msg.timestamp || new Date().toISOString();
     this.history.push(msg);
-    if (this.history.length > this.maxHistory) this.history.shift();
+    if (this.history.length > this.maxHistory) {
+      const removed = this.history.shift();
+      if (removed) this.consumed.delete(removed);
+    }
     this.emit(`topic:${msg.topic}`, msg);
     this.emit("message", msg);
   }
@@ -161,6 +167,27 @@ class AgentBus extends EventEmitter {
   subscribe(topic: string, handler: (msg: ProtocolMessage) => void): () => void {
     this.on(`topic:${topic}`, handler);
     return () => this.off(`topic:${topic}`, handler);
+  }
+
+  /**
+   * Return the first unconsumed message on this topic (FIFO), or null.
+   * Marks it as consumed so it won't be returned again.
+   */
+  consumeFromHistory(topic: string): ProtocolMessage | null {
+    for (const msg of this.history) {
+      if (msg.topic === topic && !this.consumed.has(msg)) {
+        this.consumed.add(msg);
+        return msg;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Mark a message as consumed (used when received via live subscription).
+   */
+  markConsumed(msg: ProtocolMessage): void {
+    this.consumed.add(msg);
   }
 
   getHistory(topic?: string): ProtocolMessage[] {
@@ -172,11 +199,14 @@ class AgentBus extends EventEmitter {
     for (const msg of msgs) {
       this.history.push(msg);
       if (this.history.length > this.maxHistory) this.history.shift();
+      // Loaded history messages are considered already consumed
+      this.consumed.add(msg);
     }
   }
 
   clear(): void {
     this.history = [];
+    this.consumed.clear();
     this.removeAllListeners();
   }
 }
@@ -307,8 +337,16 @@ export function busWaitForMessage(
   timeoutMs: number = 120000,
   signal?: AbortSignal,
 ): Promise<ProtocolMessage> {
+  const bus = busGet(sessionId);
+
+  // Check history first — pick up messages that arrived while we weren't subscribed.
+  // This prevents task messages from being lost when agents are in a bid-only cycle.
+  const queued = bus.consumeFromHistory(topic);
+  if (queued) {
+    return Promise.resolve(queued);
+  }
+
   return new Promise((resolve, reject) => {
-    const bus = busGet(sessionId);
     let settled = false;
 
     const cleanup = () => {
@@ -319,6 +357,7 @@ export function busWaitForMessage(
     };
 
     const unsub = bus.subscribe(topic, (msg) => {
+      bus.markConsumed(msg);
       cleanup();
       resolve(msg);
     });
@@ -328,6 +367,70 @@ export function busWaitForMessage(
       ? setTimeout(() => {
           cleanup();
           reject(new Error(`busWaitForMessage timeout (${timeoutMs}ms) on topic "${topic}"`));
+        }, timeoutMs)
+      : null;
+
+    if (signal) {
+      if (signal.aborted) {
+        cleanup();
+        reject(new Error("aborted"));
+        return;
+      }
+      signal.addEventListener("abort", () => {
+        cleanup();
+        reject(new Error("aborted"));
+      }, { once: true });
+    }
+  });
+}
+
+/**
+ * Wait for a message on any of the given topics (priority order).
+ * Checks history first — topics listed earlier have higher priority when
+ * multiple unconsumed messages exist. This prevents Promise.race from
+ * consuming messages on losing branches.
+ */
+export function busWaitForAny(
+  sessionId: string,
+  topics: { topic: string; kind: string }[],
+  timeoutMs: number = 0,
+  signal?: AbortSignal,
+): Promise<{ kind: string; msg: ProtocolMessage }> {
+  const bus = busGet(sessionId);
+
+  // Priority check: scan history in topic order — first match wins
+  for (const { topic, kind } of topics) {
+    const queued = bus.consumeFromHistory(topic);
+    if (queued) {
+      return Promise.resolve({ kind, msg: queued });
+    }
+  }
+
+  // No queued messages — subscribe to all topics and race
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const unsubs: (() => void)[] = [];
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      for (const u of unsubs) u();
+      if (timer) clearTimeout(timer);
+    };
+
+    for (const { topic, kind } of topics) {
+      const unsub = bus.subscribe(topic, (msg) => {
+        bus.markConsumed(msg);
+        cleanup();
+        resolve({ kind, msg });
+      });
+      unsubs.push(unsub);
+    }
+
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          cleanup();
+          reject(new Error(`busWaitForAny timeout (${timeoutMs}ms) on topics: ${topics.map(t => t.topic).join(", ")}`));
         }, timeoutMs)
       : null;
 
@@ -392,9 +495,17 @@ class Blackboard {
         console.log(`[Blackboard] Task "${id}" already completed — skipping re-proposal`);
         return { ...existing, skipped: true };
       }
-      if (existing.status === "in_progress" || existing.status === "awarded" || existing.status === "bidding") {
+      if (existing.status === "in_progress" || existing.status === "awarded") {
         console.log(`[Blackboard] Task "${id}" already ${existing.status} — skipping re-proposal`);
         return { ...existing, skipped: true };
+      }
+      // If task is in "bidding" or "open" state, allow re-broadcast.
+      // This handles the case where bidders were slow or missed the first notification.
+      // Keep existing bids intact — just re-notify so new bidders can join.
+      if (existing.status === "bidding" || existing.status === "open") {
+        console.log(`[Blackboard] Task "${id}" is ${existing.status} — allowing re-broadcast (${existing.bids.length} existing bids kept)`);
+        this.appendLog({ id: `e_${Date.now()}`, type: "proposal", taskId: id, agentId, timestamp: new Date().toISOString(), payload: { description, rebroadcast: true, existing_bids: existing.bids.length } });
+        return { ...existing, rebroadcast: true } as BlackboardTask & { skipped?: boolean; rebroadcast?: boolean };
       }
       // If task previously failed, allow re-proposal but reset bids
       if (existing.status === "failed") {

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import AgentGraphic from "./AgentGraphic";
+import AgentDiagram from "./AgentDiagram";
 import "./PageStyles.css";
 
 interface Task {
@@ -112,6 +113,7 @@ export default function TasksPage() {
   const [form, setForm] = useState({ name: "", cron: "0 * * * *", command: "" });
   const [refreshing, setRefreshing] = useState(false);
   const [graphicOpen, setGraphicOpen] = useState<Record<string, boolean>>({});
+  const [diagramOpen, setDiagramOpen] = useState<Record<string, boolean>>({});
   const { onStatus } = useSocket();
 
   const killTask = async (taskId: string) => {
@@ -122,6 +124,16 @@ export default function TasksPage() {
       // Task may have already completed
       loadActiveTasks();
     }
+  };
+
+  const killRemoteTask = async (taskId: string) => {
+    if (!confirm("Kill this remote task?")) return;
+    try {
+      await api.killRemoteTask(taskId);
+    } catch {
+      // already finished or gone
+    }
+    loadActiveTasks();
   };
 
   const loadActiveTasks = useCallback(async () => {
@@ -229,6 +241,17 @@ export default function TasksPage() {
                     Graphic
                   </button>
                   <button
+                    className={`btn btn-sm${diagramOpen[task.id] ? " btn-primary" : " btn-ghost"}`}
+                    onClick={() => setDiagramOpen(prev => ({ ...prev, [task.id]: !prev[task.id] }))}
+                    title="Toggle agent flow diagram"
+                    style={{ gap: 4 }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6zM10 7h4M7 10v4M17 10v4M10 17h4" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+                    </svg>
+                    Diagram
+                  </button>
+                  <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => navigate(`/?session=${task.sessionId}`)}
                     title="Go to chat session"
@@ -328,6 +351,14 @@ export default function TasksPage() {
               </div>
               {graphicOpen[task.id] && (
                 <AgentGraphic
+                  agentTools={task.agentTools}
+                  activeAgents={task.activeAgents || []}
+                  doneAgents={task.doneAgents || []}
+                  status={task.status}
+                />
+              )}
+              {diagramOpen[task.id] && (
+                <AgentDiagram
                   agentTools={task.agentTools}
                   activeAgents={task.activeAgents || []}
                   doneAgents={task.doneAgents || []}
@@ -466,6 +497,15 @@ export default function TasksPage() {
                       >
                         Chat
                       </button>
+                      {task.status === "running" && (
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={() => killRemoteTask(task.taskId)}
+                          title="Kill remote task"
+                        >
+                          Kill
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="card-body">

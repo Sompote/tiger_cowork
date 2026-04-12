@@ -1,10 +1,10 @@
 ![Tiger CoWork Banner](picture/screen_read.png)
 
-# Tiger CoWork v0.6.0
+# Tiger CoWork v0.6.1
 
 A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, cross-machine agent connection, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect agents across machines on your network so distributed teams can collaborate in real time. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
 
-## What's New in v0.6.0
+## What's New in v0.6.1
 
 - **Per-Project Agent Mode Override** — each project can override the global sub-agent mode (Auto Spawn, Auto Create, Manual, Realtime, Auto Swarm) and pick its own YAML config, architecture type, agent count, and connection protocols. The active override is shown as a clickable purple tag in the project header and chat banner.
 - **Auto Architecture — AI-Decided Settings** — new "Auto (AI decides)" option for architecture type and agent count (3–8 default). Connection protocols are now multi-select toggle buttons instead of a single dropdown.
@@ -26,7 +26,7 @@ A self-hosted AI workspace with chat, code execution, parallel multi-agent orche
 
 *Visual Agent Editor — drag-and-drop multi-agent design with mesh networking and YAML export.*
 
-![Tiger CoWork — Minecraft Task Monitor](picture/screentask.png)
+![Tiger CoWork — Minecraft Task Monitor](picture/screen5.png)
 
 *Minecraft Task Monitor — live pixel-art agents with speech bubbles, walking animations, and inter-agent interactions.*
 

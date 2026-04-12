@@ -343,8 +343,11 @@ function broadcastStatus(data: Record<string, any>) {
   }
   const key = data.sessionId || "__global__";
 
-  // Important events go through immediately
-  if (BYPASS_STATUSES.has(data.status)) {
+  // Important events go through immediately. Blackboard tool events also bypass —
+  // bid/award/propose are low-rate but each one carries unique state, so coalescing
+  // them via the 150ms throttle would drop winner/task data.
+  const isBBToolEvent = typeof data.tool === "string" && data.tool.startsWith("bb_");
+  if (BYPASS_STATUSES.has(data.status) || isBBToolEvent) {
     // Flush any pending throttled status first
     if (statusThrottleTimers.has(key)) {
       clearTimeout(statusThrottleTimers.get(key)!);
@@ -1079,6 +1082,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
 
+        const lastBBArgs: Record<string, any> = {};
         const result = await callTigerBotWithTools(
           chatMessages,
           await buildSystemPrompt(undefined, { includeAgentConfig: !!realtimeTools || rtSettings.subAgentMode === "auto_create" || rtSettings.subAgentMode === "auto_swarm" }),
@@ -1086,6 +1090,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           (name, args) => {
             toolsUsed.push(name);
             broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            if (name.startsWith("bb_")) lastBBArgs[name] = args;
             // Tag protocol tool usage in chat
             if (name.startsWith("proto_") && ioRef) {
               const protoName = name.replace("proto_", "").split("_")[0].toUpperCase();
@@ -1124,7 +1129,17 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           },
           // onToolResult — collect output files, show status only
           (name, toolResult) => {
-            broadcastStatus({ sessionId, status: "tool_result", tool: name });
+            const extra: any = {};
+            if (name === "bb_award" && toolResult?.awardedTo) {
+              extra.task_id = lastBBArgs.bb_award?.task_id;
+              extra.awarded_to = toolResult.awardedTo;
+            } else if (name === "bb_complete") {
+              extra.task_id = lastBBArgs.bb_complete?.task_id;
+            } else if (name === "bb_propose" && toolResult?.taskId) {
+              extra.task_id = toolResult.taskId;
+              if (toolResult.awarded_to) extra.awarded_to = toolResult.awarded_to;
+            }
+            broadcastStatus({ sessionId, status: "tool_result", tool: name, ...extra });
             if (name === "wait_result") {
               activeTask.status = "Agent result received, thinking...";
             } else if (name === "send_task") {
@@ -1839,11 +1854,13 @@ img.save('${tmpOut}', 'JPEG', quality=80)
           }
         }
 
+        const lastBBArgs: Record<string, any> = {};
         const result = await callTigerBotWithTools(
           chatMessages,
           projectPrompt,
           (name, args) => {
             broadcastStatus({ sessionId, status: "tool_call", tool: name, args });
+            if (name.startsWith("bb_")) lastBBArgs[name] = args;
             // Tag protocol tool usage in chat
             if (name.startsWith("proto_") && ioRef) {
               const protoName = name.replace("proto_", "").split("_")[0].toUpperCase();
@@ -1881,7 +1898,17 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.lastUpdate = new Date().toISOString();
           },
           (name, toolResult) => {
-            broadcastStatus({ sessionId, status: "tool_result", tool: name });
+            const extra: any = {};
+            if (name === "bb_award" && toolResult?.awardedTo) {
+              extra.task_id = lastBBArgs.bb_award?.task_id;
+              extra.awarded_to = toolResult.awardedTo;
+            } else if (name === "bb_complete") {
+              extra.task_id = lastBBArgs.bb_complete?.task_id;
+            } else if (name === "bb_propose" && toolResult?.taskId) {
+              extra.task_id = toolResult.taskId;
+              if (toolResult.awarded_to) extra.awarded_to = toolResult.awarded_to;
+            }
+            broadcastStatus({ sessionId, status: "tool_result", tool: name, ...extra });
             if (name === "wait_result") {
               activeTask.status = "Agent result received, thinking...";
             } else if (name === "send_task") {

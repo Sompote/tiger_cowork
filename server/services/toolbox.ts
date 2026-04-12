@@ -9,7 +9,7 @@ import { getMcpTools, callMcpTool, isMcpTool } from "./mcp";
 import { remoteTask, RemoteInstance } from "./remote";
 import {
   tcpOpen, tcpSend, tcpRead, tcpClose,
-  busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busLoadHistory,
+  busPublish, busSubscribe, busHistory, busGet, busWaitForMessage, busWaitForAny, busLoadHistory,
   queueEnqueue, queueDequeue, queuePeek, queueDepth, queueDrain,
   getProtocolStatus, cleanupSessionProtocols,
   blackboardPropose, blackboardBid, blackboardAward,
@@ -1906,12 +1906,21 @@ function getManualAgentPrompt(agentDef: AgentConfig, systemConfig: AgentSystemCo
       return a ? `  - ${a.id} ("${a.name}", role: ${a.role})` : `  - ${id}`;
     }).join("\n") || "  (none)"}\n`;
     prompt += `\nP2P Bidder agents:\n${bidderAgents || "  (none)"}\n`;
-    prompt += `\nP2P BIDDING WORKFLOW:\n`;
+    prompt += `\nP2P BIDDING WORKFLOW (per task):\n`;
     prompt += `  1. bb_propose("task description") — post the job on the blackboard (bidders are notified via bus)\n`;
     prompt += `  2. bb_read(task_id) — check for incoming bids\n`;
     prompt += `  3. bb_award(task_id, orchestrator_scores=[...]) — review bids via bb_read (includes bidder profiles). Provide YOUR score (0-1) for each bidder. Winner = 50% bidder confidence + 50% your score.\n`;
     prompt += `  4. spawn_subagent({agentId: "winner_id", task: "..."}) — SEND the task to the winner so they actually execute it\n`;
     prompt += `  5. Collect the result from spawn_subagent, then bb_complete if needed\n`;
+    prompt += `\nPARALLEL EXECUTION STRATEGY (CRITICAL — use this for multi-task work):\n`;
+    prompt += `  When the user's request can be decomposed into multiple sub-tasks:\n`;
+    prompt += `  Step A: bb_propose ALL sub-tasks first (call bb_propose multiple times in quick succession).\n`;
+    prompt += `  Step B: Poll bb_read to check bids across ALL proposed tasks. Award each task as bids come in.\n`;
+    prompt += `  Step C: spawn_subagent to each winner as soon as they are awarded — do NOT wait for one task to finish before sending the next.\n`;
+    prompt += `  Step D: Collect results from ALL agents.\n`;
+    prompt += `  CRITICAL: Do NOT block waiting for one agent's result before proposing/awarding/sending other tasks.\n`;
+    const bidTimeoutVal = (systemConfig.system?.p2p_governance as any)?.bid_timeout_seconds || 30;
+    prompt += `  The bid timeout is ${bidTimeoutVal}s — if no bids arrive within that time, the system auto-awards to the best available bidder.\n`;
     prompt += `\nRULES:\n- Use spawn_subagent for direct delegation to connected agents\n`;
     prompt += `- Use the P2P bidding workflow above when the best agent isn't clear\n`;
     prompt += `- IMPORTANT: After bb_award, you MUST spawn_subagent to the winner — the award alone does NOT send the task\n`;
@@ -2251,6 +2260,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
 
     // Build filtered tool set for this sub-agent
     const subagentTools = await getToolsForSubagent(currentDepth + 1, resolvedAgentDef, resolvedConnections, resolvedSystemConfig);
+    const lastBBSubArgs: Record<string, any> = {};
 
     // Use agent-specific model if defined, fall back to system sub-agent model override
     const agentModel = resolvedAgentDef?.model || subModel || undefined;
@@ -2274,6 +2284,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         onToolCall: (name: string, toolArgs: any) => {
           run.toolCalls.push(name);
           console.log(`[SubAgent:${label}] ${cliName} Tool: ${name}`);
+          if (name.startsWith("bb_")) lastBBSubArgs[name] = toolArgs;
           if (subagentStatusCallback) {
             subagentStatusCallback({
               sessionId: parentSessionId,
@@ -2281,6 +2292,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
               subagentId,
               label,
               tool: name,
+              args: toolArgs,
             });
           }
         },
@@ -2294,6 +2306,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         (name: string, toolArgs: any) => {
           run.toolCalls.push(name);
           console.log(`[SubAgent:${label}] Tool: ${name}`);
+          if (name.startsWith("bb_")) lastBBSubArgs[name] = toolArgs;
           if (subagentStatusCallback) {
             subagentStatusCallback({
               sessionId: parentSessionId,
@@ -2301,18 +2314,30 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
               subagentId,
               label,
               tool: name,
+              args: toolArgs,
             });
           }
         },
         // onToolResult
         (name: string, toolResult: any) => {
           if (subagentStatusCallback) {
+            const extra: any = {};
+            if (name === "bb_award" && toolResult?.awardedTo) {
+              extra.task_id = lastBBSubArgs.bb_award?.task_id;
+              extra.awarded_to = toolResult.awardedTo;
+            } else if (name === "bb_complete") {
+              extra.task_id = lastBBSubArgs.bb_complete?.task_id;
+            } else if (name === "bb_propose" && toolResult?.taskId) {
+              extra.task_id = toolResult.taskId;
+              if (toolResult.awarded_to) extra.awarded_to = toolResult.awarded_to;
+            }
             subagentStatusCallback({
               sessionId: parentSessionId,
               status: "subagent_tool_done",
               subagentId,
               label,
               tool: name,
+              ...extra,
             });
           }
         },
@@ -2729,14 +2754,13 @@ async function realtimeAgentLoop(
     }
     systemPrompt += `\n  P2P bidder agents: ${bidderAgents.join(", ") || "(none)"}`;
     systemPrompt += `\n  Consensus mechanism: ${mechanism}`;
-    systemPrompt += `\n\n  P2P BIDDING WORKFLOW:`;
-    systemPrompt += `\n    1. bb_propose("task description") — post the job. Bidder agents are AUTOMATICALLY woken up and asked to bid.`;
-    systemPrompt += `\n    2. Use bb_read to check for bids. Bidders need time to respond — if no bids yet, call bb_read again after a moment.`;
-    systemPrompt += `\n    3. bb_award(task_id, orchestrator_scores=[{agent_id, score, reason}, ...]) — review bids via bb_read (includes bidder profiles: persona, expertise, reputation). Then provide YOUR score (0-1) for each bidder. Final winner = 50% bidder confidence + 50% your score. Example: orchestrator_scores=[{agent_id:"web_researcher_1", score:0.9, reason:"best fit for data tasks"}, ...]`;
-    systemPrompt += `\n    4. send_task({to: "winner_id", task: "full task details"}) — SEND the actual task to the winner`;
-    systemPrompt += `\n    5. wait_result({from: "winner_id"}) — collect the result`;
-    systemPrompt += `\n    IMPORTANT: After bb_award, you MUST send_task to the winner — the award alone does NOT execute the task.`;
-    systemPrompt += `\n    IMPORTANT: Do NOT skip bidding. Do NOT do the work yourself. Post tasks, wait for bids, award, then send_task.`;
+    systemPrompt += `\n\n  P2P BIDDING WORKFLOW — same as realtime send_task but with bidding:`;
+    systemPrompt += `\n    1. bb_propose("task description") — posts task, waits ~5s for bids, picks best bidder, dispatches task automatically. Returns who won.`;
+    systemPrompt += `\n    2. wait_result({from: "winner_id"}) — collect the result (winner ID is in bb_propose response).`;
+    systemPrompt += `\n    3. Repeat for next task.`;
+    systemPrompt += `\n    That's it. bb_propose does everything: post → collect bids → award → dispatch. Just like send_task but agents bid first.`;
+    systemPrompt += `\n    IMPORTANT: Do ONE task at a time. bb_propose → wait_result → next bb_propose.`;
+    systemPrompt += `\n    IMPORTANT: Do NOT do the work yourself. Always delegate via bb_propose.`;
 
     if (bidOnlyAgents.length > 0) {
       systemPrompt += `\n\n  CRITICAL: Agents ${bidOnlyAgents.join(", ")} are ONLY reachable via blackboard bidding. Do NOT send_task to them without first going through bb_propose → bb_award.`;
@@ -2831,9 +2855,144 @@ async function realtimeAgentLoop(
     try {
       handle.status = "idle";
 
-      // Wait for a task message on bus topic "task:{agentId}"
-      const msg = await busWaitForMessage(sessionId, `task:${agentId}`, 0, signal);
+      // Wait for either a task or a bid-request. Tasks have priority — if a task
+      // message arrived while the agent was in a bid-only cycle, it's picked up
+      // from history first. This prevents task starvation by continuous bid_requests.
+      const received = await busWaitForAny(sessionId, [
+        { topic: `task:${agentId}`, kind: "task" },
+        { topic: `bid_request:${agentId}`, kind: "bid" },
+      ], 0, signal);
 
+      // ── Bid request: constrained "bid-only" cycle ────────────────────────
+      if (received.kind === "bid") {
+        const bidPayload = received.msg.payload || {};
+        const bidTaskId = String(bidPayload.task_id || "");
+        const bidDescription = String(bidPayload.description || "");
+        if (!bidTaskId) {
+          console.warn(`[Realtime:${agentDef.name}] bid_request missing task_id, ignoring`);
+          continue;
+        }
+
+        // Skip stale bid requests — if the task is already awarded, in_progress,
+        // or completed, don't waste an LLM call bidding on it.
+        const bbTask = blackboardGetTask(sessionId, bidTaskId);
+        if (!bbTask || (bbTask.status !== "open" && bbTask.status !== "bidding")) {
+          console.log(`[Realtime:${agentDef.name}] Skipping stale bid_request for task "${bidTaskId}" (status: ${bbTask?.status || "not found"})`);
+          continue;
+        }
+
+        // Also skip if this agent already bid on this task
+        const alreadyBid = bbTask.bids?.some((b: any) => b.agentId === agentId);
+        if (alreadyBid) {
+          console.log(`[Realtime:${agentDef.name}] Skipping bid_request for task "${bidTaskId}" — already bid`);
+          continue;
+        }
+
+        console.log(`[Realtime:${agentDef.name}] Bid request for task ${bidTaskId}: "${bidDescription.slice(0, 80)}"`);
+
+        if (subagentStatusCallback) {
+          subagentStatusCallback({
+            sessionId, status: "realtime_agent_bidding",
+            agentId, label: agentDef.name,
+            task_id: bidTaskId,
+            description: bidDescription,
+            proposed_by: bidPayload.proposed_by,
+          });
+        }
+
+        const bidAgentModel = agentDef.model || undefined;
+
+        if (isLocalCliAgent(bidAgentModel)) {
+          // CLI agents auto-bid using their reputation score (no LLM call needed).
+          const conf = (typeof agentDef.p2p?.reputation_score === "number")
+            ? agentDef.p2p.reputation_score
+            : 0.5;
+          try {
+            blackboardBid(sessionId, agentId, bidTaskId, conf, undefined, "auto-bid (CLI agent)");
+            busPublish(sessionId, agentId, "bb:bid_received", {
+              task_id: bidTaskId, bidder: agentId, confidence: conf,
+            });
+            if (subagentStatusCallback) {
+              subagentStatusCallback({
+                sessionId, status: "realtime_agent_tool",
+                agentId, label: agentDef.name, tool: "bb_bid",
+                args: { task_id: bidTaskId, confidence: conf, reasoning: "auto-bid" },
+              });
+            }
+          } catch (e: any) {
+            console.warn(`[Realtime:${agentDef.name}] Auto-bid failed: ${e.message}`);
+          }
+        } else {
+          // LLM agents: constrained call exposing only bb_read + bb_bid.
+          const bidTools = finalTools.filter((t: any) => {
+            const n = t.function?.name;
+            return n === "bb_read" || n === "bb_bid";
+          });
+          const expertiseBlock = agentDef.p2p?.confidence_domains?.length
+            ? `\nYour expertise domains: ${agentDef.p2p.confidence_domains.join(", ")}`
+            : "";
+          const bidPrompt = `You are agent "${agentDef.name}" (id: ${agentId}) evaluating a bid request on the shared blackboard.${expertiseBlock}
+
+TASK ID: ${bidTaskId}
+TASK DESCRIPTION: "${bidDescription}"
+
+YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
+1. (Optional) Use bb_read(task_id="${bidTaskId}") to inspect the task in detail.
+2. Use bb_bid(task_id="${bidTaskId}", confidence=<0.0–1.0>, reasoning="<short>") with your honest confidence based on how well this task matches your expertise.
+3. STOP after one bid. Do NOT call any other tool. The proposer will award and dispatch the real task separately.`;
+
+          const bidPrevAgentId = _currentAgentId;
+          const bidPrevProjectFolder = _currentProjectWorkingFolder;
+          _currentAgentId = agentId;
+          const bidCallId = `bid-${agentId}-${Date.now()}`;
+          setCallContext(bidCallId, sessionId, 0, agentId, _currentProjectWorkingFolder);
+          try {
+            const bidCaller = await getSubagentCaller();
+            await bidCaller(
+              [{ role: "user" as const, content: bidPrompt }],
+              `You are ${agentDef.name}. Bid-only mode — only bb_read and bb_bid are allowed. Submit ONE bid then stop.`,
+              (name: string, toolArgs: any) => {
+                if (subagentStatusCallback) {
+                  subagentStatusCallback({
+                    sessionId, status: "realtime_agent_tool",
+                    agentId, label: agentDef.name, tool: name, args: toolArgs,
+                  });
+                }
+              },
+              (name: string, _toolResult: any) => {
+                if (subagentStatusCallback) {
+                  subagentStatusCallback({
+                    sessionId, status: "realtime_agent_tool_done",
+                    agentId, label: agentDef.name, tool: name,
+                  });
+                }
+              },
+              signal,
+              bidTools,
+              bidAgentModel,
+              undefined, undefined, bidCallId,
+            );
+          } catch (err: any) {
+            if (err.message !== "aborted" && !signal.aborted) {
+              console.warn(`[Realtime:${agentDef.name}] Bid call failed: ${err.message}`);
+            }
+          } finally {
+            clearCallContext(bidCallId);
+            _currentAgentId = bidPrevAgentId;
+            _currentProjectWorkingFolder = bidPrevProjectFolder;
+          }
+        }
+
+        if (subagentStatusCallback) {
+          subagentStatusCallback({
+            sessionId, status: "realtime_agent_bid_done",
+            agentId, label: agentDef.name, task_id: bidTaskId,
+          });
+        }
+        continue;
+      }
+
+      const msg = received.msg;
       handle.status = "working";
       const taskText = msg.payload?.task || "(no task)";
       handle.lastTask = taskText;
@@ -2863,6 +3022,7 @@ async function realtimeAgentLoop(
       const realtimeAgentModel = agentDef.model || undefined;
 
       let result: any;
+      const lastBBRtArgs: Record<string, any> = {};
 
       if (isLocalCliAgent(realtimeAgentModel)) {
         // --- Local CLI agent (Claude Code or Codex): autonomous with own tool loop ---
@@ -2880,6 +3040,7 @@ async function realtimeAgentLoop(
           model: rtCliSubModel,
           onToolCall: (name: string, toolArgs: any) => {
             console.log(`[Realtime:${agentDef.name}] ${cliName} Tool: ${name}`);
+            if (name.startsWith("bb_")) lastBBRtArgs[name] = toolArgs;
             if (subagentStatusCallback) {
               subagentStatusCallback({
                 sessionId,
@@ -2887,6 +3048,7 @@ async function realtimeAgentLoop(
                 agentId,
                 label: agentDef.name,
                 tool: name,
+                args: toolArgs,
               });
             }
           },
@@ -2899,6 +3061,7 @@ async function realtimeAgentLoop(
           taskPrompt,
           (name: string, toolArgs: any) => {
             console.log(`[Realtime:${agentDef.name}] Tool: ${name}`);
+            if (name.startsWith("bb_")) lastBBRtArgs[name] = toolArgs;
             if (subagentStatusCallback) {
               subagentStatusCallback({
                 sessionId,
@@ -2906,17 +3069,28 @@ async function realtimeAgentLoop(
                 agentId,
                 label: agentDef.name,
                 tool: name,
+                args: toolArgs,
               });
             }
           },
           (name: string, toolResult: any) => {
             if (subagentStatusCallback) {
+              const extra: any = {};
+              if (name === "bb_award" && toolResult?.awardedTo) {
+                extra.task_id = lastBBRtArgs.bb_award?.task_id;
+                extra.awarded_to = toolResult.awardedTo;
+              } else if (name === "bb_complete") {
+                extra.task_id = lastBBRtArgs.bb_complete?.task_id;
+              } else if (name === "bb_propose" && toolResult?.taskId) {
+                extra.task_id = toolResult.taskId;
+              }
               subagentStatusCallback({
                 sessionId,
                 status: "realtime_agent_tool_done",
                 agentId,
                 label: agentDef.name,
                 tool: name,
+                ...extra,
               });
             }
           },
@@ -3980,81 +4154,88 @@ IMPORTANT RULES:
     case "bb_propose": {
       const sessionId = _currentParentSessionId || "default";
 
-      // Guard: only orchestrator-role agents can propose tasks (prevents scope creep from worker agents)
+      // Guard: only orchestrator-role agents can propose
       const rtSessionForPropose = realtimeSessions.get(sessionId);
       if (rtSessionForPropose) {
         const callerDefForPropose = rtSessionForPropose.systemConfig.agents?.find((a: AgentConfig) => a.id === _currentAgentId);
         if (callerDefForPropose && callerDefForPropose.role !== "orchestrator" && callerDefForPropose.role !== "human") {
-          console.log(`[bb_propose] BLOCKED: "${_currentAgentId}" (role: ${callerDefForPropose.role}) is not an orchestrator — only orchestrators can propose tasks`);
-          return { ok: false, error: `Only orchestrator agents can propose tasks via bb_propose. Agent "${_currentAgentId}" (role: ${callerDefForPropose.role}) should complete assigned work, not create new tasks. Use bb_complete to report results instead.` };
+          return { ok: false, error: `Only orchestrator agents can propose tasks. Use bb_complete to report results instead.` };
         }
+      }
+
+      // One task at a time: reject if proposer has un-awarded tasks
+      const bbForCheck = blackboardGet(sessionId);
+      const pendingTasks = bbForCheck.getTasks().filter((t: any) =>
+        t.proposedBy === _currentAgentId && (t.status === "open" || t.status === "bidding")
+      );
+      if (pendingTasks.length > 0) {
+        return { ok: false, error: `You already have a pending task: "${pendingTasks[0].taskId}". Wait for it to be awarded before proposing another.` };
       }
 
       const task = blackboardPropose(sessionId, _currentAgentId, args.description, args.task_id);
-
-      // If task was already completed or in progress, don't re-broadcast to bidders
       if ((task as any).skipped) {
-        console.log(`[bb_propose] Task "${task.taskId}" skipped (status: ${task.status}) — not waking bidders`);
-        return { ok: true, protocol: "blackboard", action: "propose", task,
-          skipped: true,
-          bidders_notified: [],
-          hint: `Task "${task.taskId}" is already ${task.status}. No need to re-dispatch — ${task.status === "completed" ? "results are available via bb_read" : "work is in progress"}.` };
+        return { ok: true, protocol: "blackboard", action: "propose", task, skipped: true,
+          hint: `Task "${task.taskId}" is already ${task.status}.` };
       }
 
-      // Notify all agents via bus so bidders can discover the new task
       const proposedTaskId = task.taskId;
-      busPublish(sessionId, _currentAgentId, "bb:new_task", {
-        task_id: proposedTaskId,
-        description: args.description,
-        proposed_by: _currentAgentId,
-      });
-      // Wake up bidder agents in realtime mode by sending them a task on their task: topic
       const rtSession = realtimeSessions.get(sessionId);
-      const wokenBidders: string[] = [];
-      console.log(`[bb_propose] sessionId=${sessionId}, rtSession=${!!rtSession}, caller=${_currentAgentId}, taskId=${proposedTaskId}`);
-      if (rtSession) {
-        const allAgents = rtSession.systemConfig.agents || [];
-        const bidderAgents = allAgents
-          .filter((a: AgentConfig) => a.id !== _currentAgentId && a.role !== "human" && a.p2p?.bidder === true);
-        console.log(`[bb_propose] Total agents: ${allAgents.length}, bidders found: ${bidderAgents.length}, ids: ${bidderAgents.map((a: AgentConfig) => a.id).join(", ")}`);
-
-        // Fast-path: if ≤2 bidders, auto-assign to the first one (skip full bidding cycle)
-        const p2pGov = rtSession.systemConfig.system?.p2p_governance;
-        const autoAssignThreshold = p2pGov?.auto_assign_threshold ?? 2;
-        if (bidderAgents.length > 0 && bidderAgents.length <= autoAssignThreshold) {
-          // Round-robin among available bidders for fair distribution
-          const assignee = bidderAgents[Math.floor(Math.random() * bidderAgents.length)];
-          console.log(`[bb_propose] Auto-assigning task "${proposedTaskId}" to "${assignee.id}" (only ${bidderAgents.length} bidder(s), threshold=${autoAssignThreshold})`);
-          // Auto-bid, award, and start
-          blackboardBid(sessionId, assignee.id, proposedTaskId, 1.0);
-          blackboardAward(sessionId, proposedTaskId, assignee.id);
-          blackboardStartTask(sessionId, assignee.id, proposedTaskId);
-          busPublish(sessionId, _currentAgentId, "bb:task_awarded", {
-            task_id: proposedTaskId,
-            awarded_to: assignee.id,
-            description: args.description,
-            auto_assigned: true,
-          });
-          return { ok: true, protocol: "blackboard", action: "propose", task,
-            auto_assigned: true,
-            assigned_to: assignee.id,
-            bidders_notified: [],
-            hint: `Task auto-assigned to "${assignee.id}" (${bidderAgents.length} bidder(s) — below threshold ${autoAssignThreshold}, bidding skipped). Use send_task({to: "${assignee.id}", task: "..."}) to deliver the work NOW.` };
-        }
-
-        for (const bidder of bidderAgents) {
-          console.log(`[bb_propose] Waking bidder ${bidder.id} via task:${bidder.id}`);
-          busPublish(sessionId, _currentAgentId, `task:${bidder.id}`, {
-            task: `A new task has been posted on the blackboard (task_id: "${proposedTaskId}"): "${args.description}". Use bb_read to review it, then use bb_bid(task_id="${proposedTaskId}", confidence=<your_confidence_score>) to bid if it matches your expertise. Do NOT execute the task yet — only bid.`,
-            context: `Blackboard bidding request from ${_currentAgentId}. This is a bid request, not a direct task assignment.`,
-            from: _currentAgentId,
-          });
-          wokenBidders.push(bidder.id);
-        }
+      if (!rtSession) {
+        return { ok: true, protocol: "blackboard", action: "propose", task,
+          hint: `Task posted. No realtime session — use bb_read/bb_award manually.` };
       }
+
+      const allAgents = rtSession.systemConfig.agents || [];
+      const bidderAgents = allAgents
+        .filter((a: AgentConfig) => a.id !== _currentAgentId && a.role !== "human" && a.p2p?.bidder === true);
+      console.log(`[bb_propose] Task "${proposedTaskId}" — notifying ${bidderAgents.length} bidder(s)`);
+
+      // Step 1: Notify bidders
+      for (const bidder of bidderAgents) {
+        busPublish(sessionId, _currentAgentId, `bid_request:${bidder.id}`, {
+          task_id: proposedTaskId,
+          description: args.description,
+          proposed_by: _currentAgentId,
+        });
+      }
+
+      // Step 2: Wait for bids (5 seconds)
+      const bidWaitMs = ((rtSession.systemConfig.system?.p2p_governance as any)?.bid_wait_seconds ?? 5) * 1000;
+      console.log(`[bb_propose] Waiting ${bidWaitMs}ms for bids...`);
+      await new Promise(resolve => setTimeout(resolve, bidWaitMs));
+
+      // Step 3: Pick best bidder and dispatch
+      const bb = blackboardGet(sessionId);
+      const currentTask = bb.getTask(proposedTaskId);
+      if (!currentTask || currentTask.bids.length === 0) {
+        console.log(`[bb_propose] No bids after ${bidWaitMs}ms — task stays open`);
+        return { ok: true, protocol: "blackboard", action: "propose", task,
+          awarded: false,
+          hint: `Task "${proposedTaskId}" posted but no bids received after ${bidWaitMs / 1000}s. Agents may be busy. Try again later or use send_task to assign directly.` };
+      }
+
+      const best = currentTask.bids.reduce((a: any, b: any) => a.confidence >= b.confidence ? a : b);
+      console.log(`[bb_propose] Best bidder: "${best.agentId}" (confidence ${best.confidence}, ${currentTask.bids.length} total bid(s))`);
+
+      // Award
+      blackboardAward(sessionId, proposedTaskId, best.agentId, "auto");
+      blackboardStartTask(sessionId, best.agentId, proposedTaskId);
+
+      // Dispatch task to winner via task control
+      const dispatchResult = await realtimeSendTask({
+        to: best.agentId,
+        task: args.description,
+        context: `Awarded via bidding (task_id: ${proposedTaskId}). You won with confidence ${best.confidence}.`,
+      }, signal);
+      console.log(`[bb_propose] Dispatched to "${best.agentId}" (ok=${dispatchResult?.ok})`);
+
       return { ok: true, protocol: "blackboard", action: "propose", task,
-        bidders_notified: wokenBidders,
-        hint: `Task posted to blackboard. ${wokenBidders.length} bidder agent(s) notified: ${wokenBidders.join(", ") || "none"}. Wait briefly, then use bb_read to check for bids before calling bb_award.` };
+        awarded: true,
+        awarded_to: best.agentId,
+        confidence: best.confidence,
+        total_bids: currentTask.bids.length,
+        dispatched: dispatchResult?.ok ?? false,
+        hint: `Task "${proposedTaskId}" awarded and dispatched to "${best.agentId}" (confidence: ${best.confidence}, ${currentTask.bids.length} bid(s)). Use wait_result({from: "${best.agentId}"}) to collect the result.` };
     }
     case "bb_bid": {
       const sessionId = _currentParentSessionId || "default";
@@ -4109,11 +4290,20 @@ IMPORTANT RULES:
           description: awardedTask?.description || "",
           scoring: scoringDetails || undefined,
         });
+        // Bridge: bid protocol → task control protocol
+        // Route through realtimeSendTask so the task goes through standard
+        // validation, remote routing, and logging — same path as manual send_task.
+        const dispatchResult = await realtimeSendTask({
+          to: result.awardedTo,
+          task: awardedTask?.description || args.task_id,
+          context: `Awarded via blackboard bidding (task_id: ${args.task_id}).${scoringDetails ? ` Combined score: ${scoringDetails[0]?.combined_score}` : ""}`,
+        }, signal);
+        console.log(`[bb_award] Dispatched task "${args.task_id}" to "${result.awardedTo}" via task control (ok=${dispatchResult?.ok})`);
       }
       return { ...result, protocol: "blackboard", action: "award",
         scoring: scoringDetails || undefined,
         next_step: result.ok && result.awardedTo
-          ? `Task awarded to "${result.awardedTo}". NOW send the task to the winner: use send_task({to: "${result.awardedTo}", task: "..."}) in realtime mode, or spawn_subagent({agentId: "${result.awardedTo}", task: "..."}) in manual mode. Then collect results.`
+          ? `Task awarded AND auto-dispatched to "${result.awardedTo}". The agent is now working. Use wait_result({from: "${result.awardedTo}"}) to collect the result. You may also send_task if you need to provide additional details.`
           : undefined };
     }
     case "bb_complete": {
