@@ -4,6 +4,8 @@ import { api } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
 import AgentGraphic from "./AgentGraphic";
 import AgentDiagram from "./AgentDiagram";
+import ChatLogPanel from "./ChatLogPanel";
+import { useTzMode, formatDateTime, formatTime } from "../utils/timezone";
 import "./PageStyles.css";
 
 interface Task {
@@ -119,7 +121,10 @@ export default function TasksPage() {
   const [diagramOpen, setDiagramOpen] = useState<Record<string, boolean>>({});
   const [remoteGraphicOpen, setRemoteGraphicOpen] = useState<Record<string, boolean>>({});
   const [remoteDiagramOpen, setRemoteDiagramOpen] = useState<Record<string, boolean>>({});
+  const [logOpen, setLogOpen] = useState<Record<string, boolean>>({});
+  const [remoteLogOpen, setRemoteLogOpen] = useState<Record<string, boolean>>({});
   const { onStatus } = useSocket();
+  const tzMode = useTzMode();
 
   const killTask = async (taskId: string) => {
     try {
@@ -257,6 +262,17 @@ export default function TasksPage() {
                     Diagram
                   </button>
                   <button
+                    className={`btn btn-sm${logOpen[task.id] ? " btn-primary" : " btn-ghost"}`}
+                    onClick={() => setLogOpen(prev => ({ ...prev, [task.id]: !prev[task.id] }))}
+                    title="Toggle chat log"
+                    style={{ gap: 4 }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M3 5h18v2H3V5zm0 4h18v2H3V9zm0 4h12v2H3v-2zm0 4h18v2H3v-2z"/>
+                    </svg>
+                    Log
+                  </button>
+                  <button
                     className="btn btn-ghost btn-sm"
                     onClick={() => navigate(`/?session=${task.sessionId}`)}
                     title="Go to chat session"
@@ -349,7 +365,7 @@ export default function TasksPage() {
                   </div>
                 ) : null}
                 <div className="card-detail" style={{ marginTop: 4 }}>
-                  <strong>Started:</strong> {new Date(task.startedAt).toLocaleTimeString()}
+                  <strong>Started:</strong> {formatTime(task.startedAt, tzMode)}
                   {" \u00B7 "}
                   <strong>Last update:</strong> {timeAgo(task.lastUpdate)}
                 </div>
@@ -368,8 +384,10 @@ export default function TasksPage() {
                   activeAgents={task.activeAgents || []}
                   doneAgents={task.doneAgents || []}
                   status={task.status}
+                  sessionId={task.sessionId}
                 />
               )}
+              {logOpen[task.id] && <ChatLogPanel sessionId={task.sessionId} />}
             </div>
           ))}
         </div>
@@ -402,7 +420,7 @@ export default function TasksPage() {
                     )}
                   </div>
                   <div className="active-task-actions">
-                    <span className="active-task-elapsed" title={`Started: ${new Date(task.startedAt).toLocaleString()}\nFinished: ${new Date(task.finishedAt).toLocaleString()}`}>
+                    <span className="active-task-elapsed" title={`Started: ${formatDateTime(task.startedAt, tzMode)}\nFinished: ${formatDateTime(task.finishedAt, tzMode)}`}>
                       {durStr} · {timeAgo(task.finishedAt)}
                     </span>
                     <button
@@ -512,6 +530,17 @@ export default function TasksPage() {
                         Diagram
                       </button>
                       <button
+                        className={`btn btn-sm${remoteLogOpen[task.taskId] ? " btn-primary" : " btn-ghost"}`}
+                        onClick={() => setRemoteLogOpen(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
+                        title="Toggle chat log"
+                        style={{ gap: 4 }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M3 5h18v2H3V5zm0 4h18v2H3V9zm0 4h12v2H3v-2zm0 4h18v2H3v-2z"/>
+                        </svg>
+                        Log
+                      </button>
+                      <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => setExpandedRemote(prev => ({ ...prev, [task.taskId]: !prev[task.taskId] }))}
                       >
@@ -607,8 +636,10 @@ export default function TasksPage() {
                       activeAgents={task.activeAgents || []}
                       doneAgents={task.doneAgents || []}
                       status={task.status}
+                      sessionId={task.sessionId}
                     />
                   )}
+                  {remoteLogOpen[task.taskId] && <ChatLogPanel sessionId={task.sessionId} />}
                 </div>
               );
             })}
@@ -625,6 +656,9 @@ export default function TasksPage() {
         <h1>Scheduled Tasks</h1>
         <button className="btn btn-primary" onClick={() => setShowForm(true)}>New task</button>
       </div>
+      <p style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: -8, marginBottom: 12 }}>
+        Cron expressions run in the server's timezone. "Last run" follows your <strong>Time display</strong> setting ({tzMode === "server" ? "server / UTC" : "local"}).
+      </p>
 
       {showForm && (
         <div className="card form-card">
@@ -673,7 +707,7 @@ export default function TasksPage() {
             <div className="card-body">
               <div className="card-detail"><strong>Schedule:</strong> <code>{task.cron}</code></div>
               <div className="card-detail"><strong>Command:</strong> <code>{task.command}</code></div>
-              {task.lastRun && <div className="card-detail"><strong>Last run:</strong> {new Date(task.lastRun).toLocaleString()}</div>}
+              {task.lastRun && <div className="card-detail"><strong>Last run:</strong> {formatDateTime(task.lastRun, tzMode)}</div>}
               {task.lastResult && <pre className="card-result">{task.lastResult}</pre>}
             </div>
           </div>

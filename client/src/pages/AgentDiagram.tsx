@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSocket } from "../hooks/useSocket";
+import ChatLogPanel from "./ChatLogPanel";
 
 interface AgentDiagramProps {
   agentTools: Record<string, string[]>;
   activeAgents: string[];
   doneAgents: string[];
   status: string;
+  sessionId?: string;
 }
 
 type LinkKind = "delegate" | "direct" | "bus" | "spawn";
@@ -117,7 +119,7 @@ function edgeKey(a: string, b: string): string {
   return [a, b].sort().join("\u0001");
 }
 
-export default function AgentDiagram({ agentTools, activeAgents, doneAgents, status }: AgentDiagramProps) {
+export default function AgentDiagram({ agentTools, activeAgents, doneAgents, status, sessionId }: AgentDiagramProps) {
   const agents = useMemo(() => Object.keys(agentTools), [agentTools]);
 
   const orchestrator = useMemo(() => {
@@ -1144,6 +1146,7 @@ export default function AgentDiagram({ agentTools, activeAgents, doneAgents, sta
         </g>
       </svg>
       </div>
+      {sessionId && <ChatLogPanel sessionId={sessionId} maxHeight={fullscreen ? 360 : 260} />}
     </div>
   );
 }

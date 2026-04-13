@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { api } from "../utils/api";
+import { useTzMode, setTzMode } from "../utils/timezone";
 import "./PageStyles.css";
 
 const AgentEditor = lazy(() => import("../components/AgentEditor"));
@@ -42,6 +43,8 @@ export default function SettingsPage() {
   const [newProviderModel, setNewProviderModel] = useState("");
   const [_oauthStatus, _setOauthStatus] = useState<{ message: string; success: boolean } | null>(null); // reserved for future use
   const yamlUploadRef = useRef<HTMLInputElement>(null);
+  const tzMode = useTzMode();
+  const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "local"; } catch { return "local"; } })();
 
   // Remote Token (this machine's token for incoming remote connections)
   const [remoteTokenValue, setRemoteTokenValue] = useState("");
@@ -217,6 +220,68 @@ export default function SettingsPage() {
       </div>
 
       <div className="settings-grid">
+        <section className="card">
+          <h3>Time display</h3>
+          <p style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 0, marginBottom: 12 }}>
+            How timestamps are shown across the app (chat logs, task lists, etc.).
+            Per-browser preference — does not affect the server.
+          </p>
+          <div
+            role="radiogroup"
+            aria-label="Time display mode"
+            style={{
+              display: "inline-flex",
+              border: "1px solid var(--border, #d1d5db)",
+              borderRadius: 8,
+              overflow: "hidden",
+              background: "var(--bg-elevated, #f9fafb)",
+            }}
+          >
+            {([
+              { value: "local" as const, label: "Local time", hint: browserTz },
+              { value: "server" as const, label: "Server time", hint: "UTC" },
+            ]).map((opt, idx) => {
+              const active = tzMode === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setTzMode(opt.value)}
+                  style={{
+                    padding: "10px 18px",
+                    border: "none",
+                    borderLeft: idx === 0 ? "none" : "1px solid var(--border, #d1d5db)",
+                    background: active ? "#2563eb" : "transparent",
+                    color: active ? "#ffffff" : "var(--text, #374151)",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    fontWeight: active ? 600 : 500,
+                    fontFamily: "system-ui, sans-serif",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "flex-start",
+                    gap: 2,
+                    minWidth: 140,
+                    transition: "background 0.15s",
+                  }}
+                >
+                  <span>{opt.label}</span>
+                  <span style={{
+                    fontSize: 10,
+                    opacity: 0.8,
+                    fontWeight: 400,
+                    color: active ? "#dbeafe" : "var(--text-tertiary, #9ca3af)",
+                  }}>
+                    {opt.hint}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
         <section className="card">
           <h3>AI Provider</h3>
           <div className="form-group">

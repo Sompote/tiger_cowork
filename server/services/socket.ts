@@ -1168,6 +1168,14 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.lastUpdate = new Date().toISOString();
           },
           taskId, // per-task context for parallel execution
+          // onAgentText — capture the agent's intermediate reasoning/thinking
+          // between tool-call rounds so the chat log shows what it was doing
+          // even in single-agent mode.
+          (text: string) => {
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            appendChatLog(sessionId, `\n[${chatLogTimestamp()}] AGENT THINKING:\n${trimmed}\n`);
+          },
         );
 
         // Scan sandbox for any new output files generated during this job
@@ -1935,6 +1943,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             activeTask.lastUpdate = new Date().toISOString();
           },
           taskId, // per-task context for parallel execution
+          // onAgentText — capture single-agent reasoning/thinking between tool rounds
+          (text: string) => {
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            appendChatLog(sessionId, `\n[${chatLogTimestamp()}] AGENT THINKING:\n${trimmed}\n`);
+          },
         );
 
         // Scan sandbox for any new output files generated during this job

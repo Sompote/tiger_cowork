@@ -12,8 +12,19 @@
 
 import { FastifyInstance } from "fastify";
 import { v4 as uuid } from "uuid";
+import * as fs from "fs";
+import * as path from "path";
 import { getSettings, getChatHistory, saveChatHistory, ChatSession } from "../services/data";
 import { callTigerBotWithTools } from "../services/tigerbot";
+
+const CHAT_LOG_DIR = path.resolve("data", "chat_logs");
+try { if (!fs.existsSync(CHAT_LOG_DIR)) fs.mkdirSync(CHAT_LOG_DIR, { recursive: true }); } catch {}
+function appendChatLog(sessionId: string, text: string) {
+  try { fs.appendFileSync(path.join(CHAT_LOG_DIR, `${sessionId}.log`), text); } catch {}
+}
+function chatLogTimestamp(): string {
+  return new Date().toISOString().replace("T", " ").slice(0, 19);
+}
 import {
   startRealtimeSession,
   shutdownRealtimeSession,
@@ -253,6 +264,9 @@ async function processRemoteTask(
           else if (name === "list_files" && args?.path) hint = `: ${args.path.slice(0, 80)}`;
           else if (name === "send_task" && args?.to) hint = ` → ${args.to}`;
           addProgress(entry, `Tool: ${name}${hint}`);
+          // Mirror to chat log
+          const argsStr = args ? `\n${JSON.stringify(args, null, 2).slice(0, 600)}` : "";
+          appendChatLog(sessionId, `\n[${chatLogTimestamp()}] TOOL_CALL: ${name}${argsStr}\n`);
         },
         (name, res) => {
           // Send concise result status: success/fail + short info
@@ -261,9 +275,20 @@ async function processRemoteTask(
             const err = res?.error || res?.stderr || "failed";
             addProgress(entry, `✗ ${name}: ${String(err).slice(0, 120)}`);
           }
-          // Only log failures — successful results are implicit from the next tool call
+          appendChatLog(sessionId, `[${chatLogTimestamp()}] TOOL_RESULT: ${name}${ok ? "" : " (failed)"}\n`);
         },
         entry.abortController?.signal,
+        undefined, // toolsOverride
+        undefined, // modelOverride
+        sessionId, // for checkpoint & resume
+        undefined, // onRetry
+        undefined, // taskId
+        // onAgentText — capture single-agent reasoning/thinking to chat log
+        (text: string) => {
+          const trimmed = text.trim();
+          if (!trimmed) return;
+          appendChatLog(sessionId, `\n[${chatLogTimestamp()}] AGENT THINKING:\n${trimmed}\n`);
+        },
       );
       clearInterval(heartbeat);
       if (entry.killed) return;
