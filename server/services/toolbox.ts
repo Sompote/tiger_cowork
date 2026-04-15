@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { exec, spawn as spawnChild } from "child_process";
 import { promisify } from "util";
+import { AsyncLocalStorage } from "async_hooks";
 import yaml from "js-yaml";
 import { runPython } from "./python";
 import { getSettings, appendAgentHistory, flushAgentHistory } from "./data";
@@ -891,7 +892,7 @@ async function runPythonTool(args: { code: string }, _retryCount: number = 0): P
   const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
   const timeout = settings.pythonTimeout || 300000; // 5 minutes default
-  const result = await runPython(args.code, sandboxDir, timeout, _currentProjectWorkingFolder);
+  const result = await runPython(args.code, sandboxDir, timeout, getCurrentProjectWorkingFolder());
 
   // If Python errored, provide structured error info to help the LLM fix the code
   if (result.exitCode !== 0) {
@@ -1021,7 +1022,7 @@ async function runPythonTool(args: { code: string }, _retryCount: number = 0): P
 async function runReactTool(args: { code: string; title?: string; dependencies?: string[] }): Promise<any> {
   const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-  const outputDir = _currentProjectWorkingFolder || path.join(sandboxDir, "output_file");
+  const outputDir = getCurrentProjectWorkingFolder() || path.join(sandboxDir, "output_file");
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   let code = args.code || "";
@@ -1126,7 +1127,7 @@ function readFileTool(args: { path?: string; file?: string; filepath?: string })
 async function writeFileTool(args: { path: string; content: string; append?: boolean }): Promise<any> {
   const settings = await getSettings();
   const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
-  const outputDir = _currentProjectWorkingFolder || path.join(sandboxDir, "output_file");
+  const outputDir = getCurrentProjectWorkingFolder() || path.join(sandboxDir, "output_file");
   const target = path.resolve(outputDir, args.path);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   if (args.append) {
@@ -1490,7 +1491,7 @@ export async function runClaudeCodeAgent(
   } = {},
 ): Promise<{ content: string; toolResults?: any[]; toolCalls?: string[] }> {
   const settings = await getSettings();
-  const workDir = opts.workingDir || _currentProjectWorkingFolder || settings.sandboxDir || process.cwd();
+  const workDir = opts.workingDir || getCurrentProjectWorkingFolder() || settings.sandboxDir || process.cwd();
   const timeout = opts.timeout || 300_000; // 5 min default
   const maxTurns = opts.maxTurns || 25;
 
@@ -1673,7 +1674,7 @@ export async function runCodexAgent(
   } = {},
 ): Promise<{ content: string; toolResults?: any[]; toolCalls?: string[] }> {
   const settings = await getSettings();
-  const workDir = opts.workingDir || _currentProjectWorkingFolder || settings.sandboxDir || process.cwd();
+  const workDir = opts.workingDir || getCurrentProjectWorkingFolder() || settings.sandboxDir || process.cwd();
   const timeout = opts.timeout || 300_000;
 
   // Build the prompt
@@ -2021,7 +2022,7 @@ export async function spawnSubagent(
   if (settings.subAgentMode === "manual" && settings.subAgentConfigFile) {
     const systemConfig = loadAgentConfig(settings.subAgentConfigFile);
     if (systemConfig) {
-      const callerId = _currentAgentId;
+      const callerId = getCurrentAgentId();
       const targetId = args.agentId;
 
       if (!targetId) {
@@ -2240,11 +2241,18 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
   // Error recovery instructions for all sub-agents
   subPrompt += `\n\nERROR RECOVERY: If a tool call fails (Python error, missing package, file not found), do NOT give up. Analyze the error, fix the issue (install packages, correct paths, fix syntax), and retry. If the same approach fails twice, try a different method. Always complete the task.`;
 
-  // Set agent context so protocol tools know who we are — preserve project folder
-  const prevAgentId = _currentAgentId;
-  const prevProjectFolder = _currentProjectWorkingFolder;
+  // Build agent context — scoped via AsyncLocalStorage so parallel spawns don't
+  // race on module-level state. The parent's project folder is captured from
+  // the current ALS scope (or fallback) before we enter the new scope.
   const subTaskId = `subagent-${agentId}-${Date.now()}`;
-  setCallContext(subTaskId, parentSessionId, currentDepth + 1, agentId, _currentProjectWorkingFolder);
+  const parentProjectFolder = getCurrentProjectWorkingFolder();
+  const subCallCtx: CallContext = {
+    parentSessionId,
+    subagentDepth: currentDepth + 1,
+    agentId,
+    projectWorkingFolder: parentProjectFolder,
+  };
+  setCallContext(subTaskId, parentSessionId, currentDepth + 1, agentId, parentProjectFolder);
 
   try {
     const callAgent = await getSubagentCaller();
@@ -2267,6 +2275,10 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
 
     let result: any;
 
+    // Run the LLM/CLI call inside an ALS scope so every downstream tool
+    // invocation (via callTool) and helper read (runPython, etc.) resolves
+    // the correct per-task context even when parallel subagents are running.
+    result = await runWithCallContext(subCallCtx, async () => {
     if (isLocalCliAgent(agentModel)) {
       // --- Local CLI agent (Claude Code or Codex): bypass LLM tool loop ---
       const isCodex = isCodexModel(agentModel);
@@ -2274,8 +2286,8 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       const runAgent = isCodex ? runCodexAgent : runClaudeCodeAgent;
       const cliSubModel = extractCliSubModel(agentModel);
       console.log(`[SubAgent:${label}] Using ${cliName} CLI as agent backend${cliSubModel ? ` (model: ${cliSubModel})` : ""}`);
-      result = await runAgent(args.task, {
-        workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
+      return await runAgent(args.task, {
+        workingDir: getCurrentProjectWorkingFolder() || settings.sandboxDir,
         systemPrompt: subPrompt,
         signal: combinedSignal,
         timeout,
@@ -2299,7 +2311,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
       });
     } else {
       // --- Standard LLM API agent ---
-      result = await callAgent(
+      return await callAgent(
         [{ role: "user" as const, content: args.task }],
         subPrompt,
         // onToolCall
@@ -2346,7 +2358,7 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         agentModel,
         undefined,  // sessionId
         undefined,  // onRetry
-        undefined,  // taskId
+        subTaskId,  // taskId — so nested callTool invocations resolve this sub-agent's ALS context
         (text: string) => {
           // Stream sub-agent's reasoning to chat log
           if (subagentStatusCallback) {
@@ -2361,13 +2373,10 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
         },
       );
     }
+    }); // end runWithCallContext
 
     clearTimeout(timeoutId);
     clearCallContext(subTaskId);
-    // Restore parent agent context globals
-    _currentAgentId = prevAgentId;
-    _currentProjectWorkingFolder = prevProjectFolder;
-    _currentSubagentDepth = currentDepth;
 
     run.status = "completed";
     run.completedAt = new Date().toISOString();
@@ -2407,10 +2416,6 @@ You are sub-agent "${label}" at depth ${currentDepth + 1}/${maxDepth}.`;
     };
   } catch (err: any) {
     clearCallContext(subTaskId);
-    // Restore parent agent context globals
-    _currentAgentId = prevAgentId;
-    _currentProjectWorkingFolder = prevProjectFolder;
-    _currentSubagentDepth = currentDepth;
     run.status = "error";
     run.completedAt = new Date().toISOString();
 
@@ -2941,14 +2946,17 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
 2. Use bb_bid(task_id="${bidTaskId}", confidence=<0.0–1.0>, reasoning="<short>") with your honest confidence based on how well this task matches your expertise.
 3. STOP after one bid. Do NOT call any other tool. The proposer will award and dispatch the real task separately.`;
 
-          const bidPrevAgentId = _currentAgentId;
-          const bidPrevProjectFolder = _currentProjectWorkingFolder;
-          _currentAgentId = agentId;
           const bidCallId = `bid-${agentId}-${Date.now()}`;
-          setCallContext(bidCallId, sessionId, 0, agentId, _currentProjectWorkingFolder);
+          const bidCtx: CallContext = {
+            parentSessionId: sessionId,
+            subagentDepth: 0,
+            agentId,
+            projectWorkingFolder: getCurrentProjectWorkingFolder(),
+          };
+          setCallContext(bidCallId, sessionId, 0, agentId, bidCtx.projectWorkingFolder);
           try {
             const bidCaller = await getSubagentCaller();
-            await bidCaller(
+            await runWithCallContext(bidCtx, () => bidCaller(
               [{ role: "user" as const, content: bidPrompt }],
               `You are ${agentDef.name}. Bid-only mode — only bb_read and bb_bid are allowed. Submit ONE bid then stop.`,
               (name: string, toolArgs: any) => {
@@ -2971,15 +2979,13 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
               bidTools,
               bidAgentModel,
               undefined, undefined, bidCallId,
-            );
+            ));
           } catch (err: any) {
             if (err.message !== "aborted" && !signal.aborted) {
               console.warn(`[Realtime:${agentDef.name}] Bid call failed: ${err.message}`);
             }
           } finally {
             clearCallContext(bidCallId);
-            _currentAgentId = bidPrevAgentId;
-            _currentProjectWorkingFolder = bidPrevProjectFolder;
           }
         }
 
@@ -3009,11 +3015,16 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
         });
       }
 
-      // Set call context so protocol tools know who we are — preserve project folder
-      const prevAgentId = _currentAgentId;
-      const prevProjectFolder = _currentProjectWorkingFolder;
+      // Build per-task call context — scoped via AsyncLocalStorage so parallel
+      // realtime sessions can't race on module-level state.
       const rtTaskId = `realtime-${agentId}-${Date.now()}`;
-      setCallContext(rtTaskId, sessionId, 0, agentId, _currentProjectWorkingFolder);
+      const rtCtx: CallContext = {
+        parentSessionId: sessionId,
+        subagentDepth: 0,
+        agentId,
+        projectWorkingFolder: getCurrentProjectWorkingFolder(),
+      };
+      setCallContext(rtTaskId, sessionId, 0, agentId, rtCtx.projectWorkingFolder);
 
       // Run LLM tool loop for this task
       const taskPrompt = `${systemPrompt}\n\nYOUR TASK:\n${msg.payload.task}${msg.payload.context ? `\n\nADDITIONAL CONTEXT:\n${msg.payload.context}` : ""}`;
@@ -3024,6 +3035,7 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
       let result: any;
       const lastBBRtArgs: Record<string, any> = {};
 
+      result = await runWithCallContext(rtCtx, async () => {
       if (isLocalCliAgent(realtimeAgentModel)) {
         // --- Local CLI agent (Claude Code or Codex): autonomous with own tool loop ---
         const isCodex = isCodexModel(realtimeAgentModel);
@@ -3031,8 +3043,8 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
         const runAgent = isCodex ? runCodexAgent : runClaudeCodeAgent;
         const rtCliSubModel = extractCliSubModel(realtimeAgentModel);
         console.log(`[Realtime:${agentDef.name}] Using ${cliName} CLI as agent backend${rtCliSubModel ? ` (model: ${rtCliSubModel})` : ""}`);
-        result = await runAgent(msg.payload.task, {
-          workingDir: _currentProjectWorkingFolder || settings.sandboxDir,
+        return await runAgent(msg.payload.task, {
+          workingDir: getCurrentProjectWorkingFolder() || settings.sandboxDir,
           systemPrompt: taskPrompt,
           signal,
           timeout: (settings.subAgentTimeout || 120) * 1000,
@@ -3056,7 +3068,7 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
       } else {
         // --- Standard LLM API agent ---
         const callAgent = await getSubagentCaller();
-        result = await callAgent(
+        return await callAgent(
           [{ role: "user" as const, content: msg.payload.task }],
           taskPrompt,
           (name: string, toolArgs: any) => {
@@ -3114,11 +3126,9 @@ YOUR ONLY JOB RIGHT NOW IS TO BID — NOT TO EXECUTE THE TASK.
           },
         );
       }
+      }); // end runWithCallContext
 
-      // Restore context
       clearCallContext(rtTaskId);
-      _currentAgentId = prevAgentId;
-      _currentProjectWorkingFolder = prevProjectFolder;
 
       const resultContent = result.content || "(no result)";
       handle.lastResult = resultContent.slice(0, 5000);
@@ -3389,7 +3399,7 @@ export async function humanWaitForAgent(sessionId: string, agentId: string, time
 // --- Realtime tool implementations ---
 
 async function realtimeSendTask(args: { to: string; task: string; context?: string; wait?: boolean }, signal?: AbortSignal): Promise<any> {
-  const sessionId = _currentParentSessionId || "default";
+  const sessionId = getCurrentSessionId() || "default";
   const session = realtimeSessions.get(sessionId);
   if (!session) {
     return { ok: false, error: "No realtime session active." };
@@ -3402,7 +3412,7 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   }
 
   // Validate caller is allowed to send to target
-  const callerId = _currentAgentId;
+  const callerId = getCurrentAgentId();
   if (callerId === "main") {
     // P2P mode: main can send to any peer agent (no orchestrator hierarchy)
     const isP2PMode = session.systemConfig.system?.orchestration_mode === "p2p";
@@ -3484,7 +3494,7 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
     if (!instance) {
       return { ok: false, error: `Remote agent "${args.to}" has no resolvable instance. Configure remote_instance or remote_url+remote_token.` };
     }
-    console.log(`[Realtime] ${_currentAgentId} → send_task → REMOTE ${args.to} (${instance.url})`);
+    console.log(`[Realtime] ${getCurrentAgentId()} → send_task → REMOTE ${args.to} (${instance.url})`);
     const remoteLabel = targetAgent.agentDef.name || args.to;
     if (subagentStatusCallback) {
       subagentStatusCallback({ sessionId, status: "running", agentId: args.to, label: remoteLabel, content: `Remote task → ${instance.name || instance.url}` });
@@ -3516,12 +3526,12 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
 
   // If target is a human node, route output to client via callback (not LLM loop)
   if (targetAgent.agentDef.role === "human") {
-    console.log(`[Realtime] ${_currentAgentId} → send_task → HUMAN (${args.to}): ${args.task.slice(0, 100)}`);
+    console.log(`[Realtime] ${getCurrentAgentId()} → send_task → HUMAN (${args.to}): ${args.task.slice(0, 100)}`);
     // Collect any output files from this agent's last run
-    const callerHandle = session.agents.get(_currentAgentId);
+    const callerHandle = session.agents.get(getCurrentAgentId());
     const callerFiles: string[] = [];
     // Check bus history for this agent's most recent result which may contain outputFiles
-    const recentResults = busHistory(sessionId, `result:${_currentAgentId}`);
+    const recentResults = busHistory(sessionId, `result:${getCurrentAgentId()}`);
     if (recentResults.length > 0) {
       const lastResult = recentResults[recentResults.length - 1];
       if (lastResult.payload?.outputFiles) {
@@ -3532,8 +3542,8 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
       subagentStatusCallback({
         sessionId,
         status: "human_node_message",
-        agentId: _currentAgentId,
-        label: session.agents.get(_currentAgentId)?.agentDef.name || _currentAgentId,
+        agentId: getCurrentAgentId(),
+        label: session.agents.get(getCurrentAgentId())?.agentDef.name || getCurrentAgentId(),
         content: args.task,
         outputFiles: callerFiles.length > 0 ? callerFiles : undefined,
       });
@@ -3548,13 +3558,13 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
   }
 
   // Publish task to the agent's bus topic
-  busPublish(sessionId, _currentAgentId, `task:${args.to}`, {
+  busPublish(sessionId, getCurrentAgentId(), `task:${args.to}`, {
     task: args.task,
     context: args.context,
-    from: _currentAgentId,
+    from: getCurrentAgentId(),
   });
 
-  console.log(`[Realtime] ${_currentAgentId} → send_task → ${args.to}: ${args.task.slice(0, 100)}`);
+  console.log(`[Realtime] ${getCurrentAgentId()} → send_task → ${args.to}: ${args.task.slice(0, 100)}`);
 
   // If wait=true, block until the agent publishes its result
   if (args.wait) {
@@ -3594,7 +3604,7 @@ async function realtimeSendTask(args: { to: string; task: string; context?: stri
 }
 
 async function realtimeWaitResult(args: { from: string; timeout?: number }, signal?: AbortSignal): Promise<any> {
-  const sessionId = _currentParentSessionId || "default";
+  const sessionId = getCurrentSessionId() || "default";
   const session = realtimeSessions.get(sessionId);
   if (!session) {
     return { ok: false, error: "No realtime session active." };
@@ -3645,7 +3655,7 @@ async function realtimeWaitResult(args: { from: string; timeout?: number }, sign
 }
 
 function realtimeCheckAgents(): any {
-  const sessionId = _currentParentSessionId || "default";
+  const sessionId = getCurrentSessionId() || "default";
   const session = realtimeSessions.get(sessionId);
   if (!session) {
     return { ok: false, error: "No realtime session active." };
@@ -3830,12 +3840,40 @@ interface CallContext {
 
 const callContexts = new Map<string, CallContext>();
 
-// Global fallback context — used by helper functions (runPython, spawnSubagent, etc.)
-// that don't yet receive a taskId. Updated on every setCallContext call.
-let _currentParentSessionId: string | undefined;
-let _currentSubagentDepth: number = 0;
-let _currentAgentId: string = "main";
-let _currentProjectWorkingFolder: string | undefined;
+// AsyncLocalStorage-backed context. Every concurrent task gets its own store that
+// survives across `await` boundaries, so tool implementations can resolve the
+// correct sessionId/agentId without racing on shared module state.
+const callStore = new AsyncLocalStorage<CallContext>();
+
+// Fallback values for callers that run outside any ALS scope (legacy code paths).
+// NEVER mutated during concurrent work; only seeded by setCallContext.
+let _fallbackParentSessionId: string | undefined;
+let _fallbackSubagentDepth: number = 0;
+let _fallbackAgentId: string = "main";
+let _fallbackProjectWorkingFolder: string | undefined;
+
+function getCurrentSessionId(): string | undefined {
+  return callStore.getStore()?.parentSessionId ?? _fallbackParentSessionId;
+}
+function getCurrentAgentId(): string {
+  return callStore.getStore()?.agentId ?? _fallbackAgentId;
+}
+function getCurrentSubagentDepth(): number {
+  return callStore.getStore()?.subagentDepth ?? _fallbackSubagentDepth;
+}
+function getCurrentProjectWorkingFolder(): string | undefined {
+  return callStore.getStore()?.projectWorkingFolder ?? _fallbackProjectWorkingFolder;
+}
+
+/**
+ * Run `fn` with an ALS-scoped call context. All tool implementations invoked
+ * inside this async scope (including after awaits) will resolve their
+ * sessionId/agentId from `ctx` via the getCurrent* helpers. This is the
+ * concurrency-safe replacement for the old save/restore-around-await pattern.
+ */
+export function runWithCallContext<T>(ctx: CallContext, fn: () => Promise<T> | T): Promise<T> | T {
+  return callStore.run(ctx, fn);
+}
 
 export function setCallContext(taskId: string, sessionId?: string, depth?: number, agentId?: string, projectWorkingFolder?: string) {
   const ctx: CallContext = {
@@ -3845,11 +3883,13 @@ export function setCallContext(taskId: string, sessionId?: string, depth?: numbe
     projectWorkingFolder,
   };
   callContexts.set(taskId, ctx);
-  // Update globals as fallback for functions that don't have taskId
-  _currentParentSessionId = sessionId;
-  _currentSubagentDepth = depth || 0;
-  _currentAgentId = agentId || "main";
-  _currentProjectWorkingFolder = projectWorkingFolder;
+  // Seed fallbacks for legacy paths that never enter an ALS scope.
+  // These are only read when callStore.getStore() is undefined, so concurrent
+  // sessions that DO run inside ALS are unaffected by this write.
+  _fallbackParentSessionId = sessionId;
+  _fallbackSubagentDepth = depth || 0;
+  _fallbackAgentId = agentId || "main";
+  _fallbackProjectWorkingFolder = projectWorkingFolder;
 }
 
 export function clearCallContext(taskId: string) {
@@ -3857,12 +3897,17 @@ export function clearCallContext(taskId: string) {
 }
 
 export async function callTool(name: string, args: any, signal?: AbortSignal, taskId?: string): Promise<any> {
+  // If a taskId is provided, look up its context and run the dispatch inside an
+  // ALS scope so tool implementations see the correct session/agent even when
+  // multiple tasks run in parallel.
   const ctx = taskId ? callContexts.get(taskId) : undefined;
-  const _currentParentSessionId = ctx?.parentSessionId;
-  const _currentSubagentDepth = ctx?.subagentDepth || 0;
-  const _currentAgentId = ctx?.agentId || "main";
-  const _currentProjectWorkingFolder = ctx?.projectWorkingFolder;
+  if (ctx) {
+    return callStore.run(ctx, () => callToolImpl(name, args, signal, taskId));
+  }
+  return callToolImpl(name, args, signal, taskId);
+}
 
+async function callToolImpl(name: string, args: any, signal?: AbortSignal, taskId?: string): Promise<any> {
   switch (name) {
     case "web_search": return webSearch(args);
     case "openrouter_web_search": return openRouterWebSearch(args);
@@ -3877,7 +3922,7 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
     case "load_skill": return loadSkillTool(args);
     case "clawhub_search": return clawhubSearchTool(args);
     case "clawhub_install": return clawhubInstallTool(args);
-    case "spawn_subagent": return spawnSubagent(args, _currentParentSessionId, _currentSubagentDepth, signal);
+    case "spawn_subagent": return spawnSubagent(args, getCurrentSessionId(), getCurrentSubagentDepth(), signal);
 
     // ─── Auto Create Architecture Tool ───
     case "create_architecture": {
@@ -3888,7 +3933,7 @@ export async function callTool(name: string, args: any, signal?: AbortSignal, ta
       const count = agentCount || currentSettings.autoAgentCount || "auto";
       const protocols: string[] = currentSettings.autoProtocols || (currentSettings.autoProtocol ? [currentSettings.autoProtocol] : ["tcp"]);
       const protocol = protocols.join(", ");
-      const sessionId = _currentParentSessionId || taskId || "default";
+      const sessionId = getCurrentSessionId() || taskId || "default";
 
       // Load base template if configured (user linked an architecture file in settings)
       let baseTemplatePrompt = "";
@@ -4030,7 +4075,7 @@ IMPORTANT RULES:
       if (!config) return { ok: false, error: `Config file "${filename}" not found or invalid` };
       const allAgents = (config.agents || []).filter((a: AgentConfig) => a.role !== "human");
       if (allAgents.length === 0) return { ok: false, error: "Selected config has no usable agents" };
-      const sessionId = _currentParentSessionId || taskId || "default";
+      const sessionId = getCurrentSessionId() || taskId || "default";
       setAutoSwarmSelection(sessionId, filename);
 
       // Shutdown any existing realtime session before booting the new one
@@ -4113,51 +4158,51 @@ IMPORTANT RULES:
 
     // ─── Protocol Tools ───
     case "proto_tcp_send": {
-      const sessionId = _currentParentSessionId || "default";
-      const from = _currentAgentId;
+      const sessionId = getCurrentSessionId() || "default";
+      const from = getCurrentAgentId();
       await tcpOpen(from, args.to, sessionId);
       const sent = await tcpSend(from, args.to, args.topic, args.payload);
       return { ok: sent, protocol: "tcp", from, to: args.to, topic: args.topic };
     }
     case "proto_tcp_read": {
-      const from = _currentAgentId;
+      const from = getCurrentAgentId();
       const messages = tcpRead(from, args.peer);
       return { ok: true, protocol: "tcp", peer: args.peer, messages, count: messages.length };
     }
     case "proto_bus_publish": {
-      const sessionId = _currentParentSessionId || "default";
-      busPublish(sessionId, _currentAgentId, args.topic, args.payload);
-      return { ok: true, protocol: "bus", from: _currentAgentId, topic: args.topic };
+      const sessionId = getCurrentSessionId() || "default";
+      busPublish(sessionId, getCurrentAgentId(), args.topic, args.payload);
+      return { ok: true, protocol: "bus", from: getCurrentAgentId(), topic: args.topic };
     }
     case "proto_bus_history": {
-      const sessionId = _currentParentSessionId || "default";
+      const sessionId = getCurrentSessionId() || "default";
       const messages = busHistory(sessionId, args.topic);
       return { ok: true, protocol: "bus", topic: args.topic || "all", messages, count: messages.length };
     }
     case "proto_queue_send": {
-      const sessionId = _currentParentSessionId || "default";
-      const depth = queueEnqueue(_currentAgentId, args.to, args.topic, args.payload, sessionId);
-      return { ok: true, protocol: "queue", from: _currentAgentId, to: args.to, topic: args.topic, queueDepth: depth };
+      const sessionId = getCurrentSessionId() || "default";
+      const depth = queueEnqueue(getCurrentAgentId(), args.to, args.topic, args.payload, sessionId);
+      return { ok: true, protocol: "queue", from: getCurrentAgentId(), to: args.to, topic: args.topic, queueDepth: depth };
     }
     case "proto_queue_receive": {
-      const msg = queueDequeue(args.from, _currentAgentId, args.topic);
+      const msg = queueDequeue(args.from, getCurrentAgentId(), args.topic);
       return msg
         ? { ok: true, protocol: "queue", message: msg }
         : { ok: true, protocol: "queue", message: null, note: "Queue empty" };
     }
     case "proto_queue_peek": {
-      const messages = queuePeek(args.from, _currentAgentId, args.topic, args.count || 5);
+      const messages = queuePeek(args.from, getCurrentAgentId(), args.topic, args.count || 5);
       return { ok: true, protocol: "queue", messages, count: messages.length };
     }
 
     // ─── Blackboard / P2P Governance Tools ───
     case "bb_propose": {
-      const sessionId = _currentParentSessionId || "default";
+      const sessionId = getCurrentSessionId() || "default";
 
       // Guard: only orchestrator-role agents can propose
       const rtSessionForPropose = realtimeSessions.get(sessionId);
       if (rtSessionForPropose) {
-        const callerDefForPropose = rtSessionForPropose.systemConfig.agents?.find((a: AgentConfig) => a.id === _currentAgentId);
+        const callerDefForPropose = rtSessionForPropose.systemConfig.agents?.find((a: AgentConfig) => a.id === getCurrentAgentId());
         if (callerDefForPropose && callerDefForPropose.role !== "orchestrator" && callerDefForPropose.role !== "human") {
           return { ok: false, error: `Only orchestrator agents can propose tasks. Use bb_complete to report results instead.` };
         }
@@ -4166,13 +4211,13 @@ IMPORTANT RULES:
       // One task at a time: reject if proposer has un-awarded tasks
       const bbForCheck = blackboardGet(sessionId);
       const pendingTasks = bbForCheck.getTasks().filter((t: any) =>
-        t.proposedBy === _currentAgentId && (t.status === "open" || t.status === "bidding")
+        t.proposedBy === getCurrentAgentId() && (t.status === "open" || t.status === "bidding")
       );
       if (pendingTasks.length > 0) {
         return { ok: false, error: `You already have a pending task: "${pendingTasks[0].taskId}". Wait for it to be awarded before proposing another.` };
       }
 
-      const task = blackboardPropose(sessionId, _currentAgentId, args.description, args.task_id);
+      const task = blackboardPropose(sessionId, getCurrentAgentId(), args.description, args.task_id);
       if ((task as any).skipped) {
         return { ok: true, protocol: "blackboard", action: "propose", task, skipped: true,
           hint: `Task "${task.taskId}" is already ${task.status}.` };
@@ -4187,15 +4232,15 @@ IMPORTANT RULES:
 
       const allAgents = rtSession.systemConfig.agents || [];
       const bidderAgents = allAgents
-        .filter((a: AgentConfig) => a.id !== _currentAgentId && a.role !== "human" && a.p2p?.bidder === true);
+        .filter((a: AgentConfig) => a.id !== getCurrentAgentId() && a.role !== "human" && a.p2p?.bidder === true);
       console.log(`[bb_propose] Task "${proposedTaskId}" — notifying ${bidderAgents.length} bidder(s)`);
 
       // Step 1: Notify bidders
       for (const bidder of bidderAgents) {
-        busPublish(sessionId, _currentAgentId, `bid_request:${bidder.id}`, {
+        busPublish(sessionId, getCurrentAgentId(), `bid_request:${bidder.id}`, {
           task_id: proposedTaskId,
           description: args.description,
-          proposed_by: _currentAgentId,
+          proposed_by: getCurrentAgentId(),
         });
       }
 
@@ -4238,20 +4283,20 @@ IMPORTANT RULES:
         hint: `Task "${proposedTaskId}" awarded and dispatched to "${best.agentId}" (confidence: ${best.confidence}, ${currentTask.bids.length} bid(s)). Use wait_result({from: "${best.agentId}"}) to collect the result.` };
     }
     case "bb_bid": {
-      const sessionId = _currentParentSessionId || "default";
-      const result = blackboardBid(sessionId, _currentAgentId, args.task_id, args.confidence, args.cost, args.reasoning);
+      const sessionId = getCurrentSessionId() || "default";
+      const result = blackboardBid(sessionId, getCurrentAgentId(), args.task_id, args.confidence, args.cost, args.reasoning);
       // Notify proposer that a bid arrived
       if (result.ok) {
-        busPublish(sessionId, _currentAgentId, "bb:bid_received", {
+        busPublish(sessionId, getCurrentAgentId(), "bb:bid_received", {
           task_id: args.task_id,
-          bidder: _currentAgentId,
+          bidder: getCurrentAgentId(),
           confidence: args.confidence,
         });
       }
       return { ...result, protocol: "blackboard", action: "bid" };
     }
     case "bb_award": {
-      const sessionId = _currentParentSessionId || "default";
+      const sessionId = getCurrentSessionId() || "default";
       // If orchestrator_scores provided, compute combined scores and determine winner
       let awardTo = args.award_to;
       let scoringDetails: any[] | undefined;
@@ -4284,7 +4329,7 @@ IMPORTANT RULES:
         blackboardStartTask(sessionId, result.awardedTo, args.task_id);
         // Notify the winner via bus with the task details
         const awardedTask = blackboardGetTask(sessionId, args.task_id);
-        busPublish(sessionId, _currentAgentId, "bb:task_awarded", {
+        busPublish(sessionId, getCurrentAgentId(), "bb:task_awarded", {
           task_id: args.task_id,
           awarded_to: result.awardedTo,
           description: awardedTask?.description || "",
@@ -4307,12 +4352,12 @@ IMPORTANT RULES:
           : undefined };
     }
     case "bb_complete": {
-      const sessionId = _currentParentSessionId || "default";
-      const result = blackboardCompleteTask(sessionId, _currentAgentId, args.task_id, args.result);
+      const sessionId = getCurrentSessionId() || "default";
+      const result = blackboardCompleteTask(sessionId, getCurrentAgentId(), args.task_id, args.result);
       return { ...result, protocol: "blackboard", action: "complete" };
     }
     case "bb_read": {
-      const sessionId = _currentParentSessionId || "default";
+      const sessionId = getCurrentSessionId() || "default";
       // Helper: enrich bids with bidder profile info from agent config
       const enrichTask = (task: any) => {
         if (!task || !task.bids || task.bids.length === 0) return task;
@@ -4342,7 +4387,7 @@ IMPORTANT RULES:
       return { ok: true, protocol: "blackboard", action: "read", tasks: tasks.map(enrichTask), count: tasks.length };
     }
     case "bb_log": {
-      const sessionId = _currentParentSessionId || "default";
+      const sessionId = getCurrentSessionId() || "default";
       const log = blackboardGetLog(sessionId, args.limit || 50);
       return { ok: true, protocol: "blackboard", action: "log", entries: log, count: log.length };
     }

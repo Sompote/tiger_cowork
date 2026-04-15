@@ -42,7 +42,8 @@ interface RemoteTaskEntry {
   taskId: string;
   sessionId: string;
   status: "running" | "completed" | "error";
-  progress: string[];       // timestamped progress messages
+  progress: string[];       // timestamped progress messages (trimmed in memory)
+  progressSeq: number;      // monotonic counter — increments on every addProgress call, never resets. Clients watch this (or updatedAt) for idle detection so in-memory trimming of `progress` doesn't cause length regressions.
   result?: string;
   error?: string;
   startedAt: number;
@@ -83,6 +84,7 @@ function addProgress(entry: RemoteTaskEntry, msg: string) {
     entry.progress.splice(5, 50);
   }
   entry.progress.push(`[${ts}] ${msg}`);
+  entry.progressSeq += 1;
   entry.updatedAt = Date.now();
 }
 
@@ -111,6 +113,7 @@ export async function remoteRoutes(fastify: FastifyInstance) {
       sessionId,
       status: "running",
       progress: [],
+      progressSeq: 0,
       startedAt: Date.now(),
       updatedAt: Date.now(),
       abortController: new AbortController(),
@@ -217,6 +220,8 @@ export async function remoteRoutes(fastify: FastifyInstance) {
       sessionId: entry.sessionId,
       status: entry.status,
       progress: entry.progress,
+      progressSeq: entry.progressSeq,
+      updatedAt: entry.updatedAt,
       result: entry.result,
       error: entry.error,
       elapsed: Math.round((Date.now() - entry.startedAt) / 1000),
@@ -245,7 +250,11 @@ async function processRemoteTask(
     }, 10_000);
 
     try {
-      const systemPrompt = await buildSystemPrompt();
+      const baseSystemPrompt = await buildSystemPrompt();
+      const remoteInstruction = (settings.remoteSystemPrompt || "").trim();
+      const systemPrompt = remoteInstruction
+        ? `${remoteInstruction}\n\n${baseSystemPrompt}`
+        : baseSystemPrompt;
       const result = await callTigerBotWithTools(
         [{ role: "user", content: task }],
         systemPrompt,
@@ -315,6 +324,13 @@ async function processRemoteTask(
   }
 
   // ─── Realtime agent mode ───
+  // Hidden remote instructions — prepended to the task as system guidance the
+  // caller never sees. Agents receive this as part of their incoming task.
+  const remoteInstruction = (settings.remoteSystemPrompt || "").trim();
+  const effectiveTask = remoteInstruction
+    ? `[Remote instance instructions — follow these when answering]\n${remoteInstruction}\n\n[Incoming task]\n${task}`
+    : task;
+
   addProgress(entry, `Starting realtime agents (${configFile})...`);
 
   const agentConfig = loadAgentConfig(configFile);
@@ -353,7 +369,7 @@ async function processRemoteTask(
 
     // Send directly via bus (same as direct orchestrator bypass in socket.ts)
     busPublish(sessionId, humanDef?.id || "human", `task:${targetAgentId}`, {
-      task,
+      task: effectiveTask,
       context: "",
       from: humanDef?.id || "human",
     });
@@ -382,7 +398,7 @@ async function processRemoteTask(
       targetAgentId = connected[0];
       waitTopic = `result:${connected[0]}`;
       addProgress(entry, `Broadcasting task to ${connected.length} agents: ${connected.join(", ")}`);
-      await humanBroadcastToAgents(sessionId, task);
+      await humanBroadcastToAgents(sessionId, effectiveTask);
     }
   }
 

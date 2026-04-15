@@ -1109,6 +1109,19 @@ export default function SettingsPage() {
               ))}
             </select>
           </div>
+          <div className="form-group">
+            <label>Hidden System Prompt</label>
+            <p className="hint" style={{ marginTop: 0, marginBottom: 6 }}>
+              Private instructions prepended to every incoming remote task — invisible to the caller. Use it to set persona, scope, tone, or guardrails for how this instance answers.
+            </p>
+            <textarea
+              rows={5}
+              placeholder="e.g. You are the research desk for Team X. Always answer in bullet points and refuse requests unrelated to our dataset."
+              value={settings.remoteSystemPrompt || ""}
+              onChange={(e) => setSettings({ ...settings, remoteSystemPrompt: e.target.value })}
+              style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }}
+            />
+          </div>
         </section>
 
         <section className="card">
