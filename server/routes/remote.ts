@@ -359,48 +359,47 @@ async function processRemoteTask(
   const orchestratorDef = agentConfig.agents?.find((a: any) => a.role === "orchestrator");
   const humanDef = agentConfig.agents?.find((a: any) => a.role === "human");
 
-  let targetAgentId: string;
-  let waitTopic: string;
-
-  if (orchestratorDef) {
-    targetAgentId = orchestratorDef.id;
-    waitTopic = `result:${orchestratorDef.id}`;
-    addProgress(entry, `Sending task to orchestrator: ${orchestratorDef.name}`);
-
-    // Send directly via bus (same as direct orchestrator bypass in socket.ts)
-    busPublish(sessionId, humanDef?.id || "human", `task:${targetAgentId}`, {
-      task: effectiveTask,
-      context: "",
-      from: humanDef?.id || "human",
-    });
-  } else {
-    // No orchestrator — broadcast to all connected agents
-    const connected = getHumanConnectedAgents(sessionId);
-    if (connected.length === 0) {
-      // Fallback: send to first non-human agent
-      const firstAgent = agentConfig.agents?.find((a: any) => a.role !== "human");
-      if (!firstAgent) {
-        entry.status = "error";
-        entry.error = "No agents available to handle task";
-        addProgress(entry, entry.error);
-        shutdownRealtimeSession(sessionId);
-        return;
-      }
-      targetAgentId = firstAgent.id;
-      waitTopic = `result:${firstAgent.id}`;
-      addProgress(entry, `Sending task to agent: ${firstAgent.name}`);
+  // Dispatches the task to the selected agent and returns the topic to wait
+  // on. Returns null if no agent is available (terminal error). Called once
+  // per retry attempt so each attempt runs against a freshly-started session.
+  const dispatchTask = async (): Promise<{ waitTopic: string } | null> => {
+    if (orchestratorDef) {
+      const targetAgentId = orchestratorDef.id;
+      addProgress(entry, `Sending task to orchestrator: ${orchestratorDef.name}`);
       busPublish(sessionId, humanDef?.id || "human", `task:${targetAgentId}`, {
-        task,
+        task: effectiveTask,
         context: "",
         from: humanDef?.id || "human",
       });
-    } else {
-      targetAgentId = connected[0];
-      waitTopic = `result:${connected[0]}`;
-      addProgress(entry, `Broadcasting task to ${connected.length} agents: ${connected.join(", ")}`);
-      await humanBroadcastToAgents(sessionId, effectiveTask);
+      return { waitTopic: `result:${targetAgentId}` };
     }
+    const connected = getHumanConnectedAgents(sessionId);
+    if (connected.length === 0) {
+      const firstAgent = agentConfig.agents?.find((a: any) => a.role !== "human");
+      if (!firstAgent) return null;
+      const targetAgentId = firstAgent.id;
+      addProgress(entry, `Sending task to agent: ${firstAgent.name}`);
+      busPublish(sessionId, humanDef?.id || "human", `task:${targetAgentId}`, {
+        task: effectiveTask,
+        context: "",
+        from: humanDef?.id || "human",
+      });
+      return { waitTopic: `result:${targetAgentId}` };
+    }
+    addProgress(entry, `Broadcasting task to ${connected.length} agents: ${connected.join(", ")}`);
+    await humanBroadcastToAgents(sessionId, effectiveTask);
+    return { waitTopic: `result:${connected[0]}` };
+  };
+
+  const firstDispatch = await dispatchTask();
+  if (!firstDispatch) {
+    entry.status = "error";
+    entry.error = "No agents available to handle task";
+    addProgress(entry, entry.error);
+    shutdownRealtimeSession(sessionId);
+    return;
   }
+  let waitTopic = firstDispatch.waitTopic;
 
   // Start a progress monitor that periodically reports working agents
   // and syncs agent state for diagram/graphic views
@@ -434,36 +433,80 @@ async function processRemoteTask(
     }
   }, 5_000);
 
-  // Wait for result from the target agent
+  // Wait for result — retry on timeout by cancelling the stale session,
+  // resetting state, and re-delegating. Cap at `remoteTaskMaxRetries` (default
+  // 2), so up to 3 total attempts before giving up. Non-timeout errors and
+  // kills bail out immediately.
   const timeout = (settings.subAgentTimeout || 300) * 1000;
+  const maxRetries = settings.remoteTaskMaxRetries ?? 2;
   const abortController = entry.abortController || new AbortController();
 
-  try {
-    const resultMsg = await busWaitForMessage(sessionId, waitTopic, timeout, abortController.signal);
-    const agentResult = resultMsg.payload?.result || "(no result)";
+  const isTimeoutErr = (e: any) =>
+    typeof e?.message === "string" && e.message.includes("busWaitForMessage timeout");
 
-    clearInterval(progressInterval);
-    if (entry.killed) return;
-    entry.result = agentResult;
-    entry.status = "completed";
-    addProgress(entry, "Completed (realtime agents)");
+  let finalResult: string | null = null;
+  let finalError: string | null = null;
 
-    // Save to chat history
-    const sessions = await getChatHistory();
-    const session = sessions.find((s) => s.id === sessionId);
-    if (session) {
-      session.messages.push({ role: "assistant", content: agentResult, timestamp: new Date().toISOString() });
-      session.updatedAt = new Date().toISOString();
-      await saveChatHistory(sessions);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const resultMsg = await busWaitForMessage(sessionId, waitTopic, timeout, abortController.signal);
+      finalResult = resultMsg.payload?.result || "(no result)";
+      break;
+    } catch (err: any) {
+      if (entry.killed || abortController.signal.aborted) {
+        finalError = null; // killed — handled below
+        break;
+      }
+      if (!isTimeoutErr(err) || attempt === maxRetries) {
+        finalError = isTimeoutErr(err)
+          ? `Agent timed out after ${maxRetries + 1} attempts (${timeout / 1000}s each)`
+          : `Agent error: ${err.message}`;
+        break;
+      }
+      // Timeout with retries remaining: reset session and re-dispatch.
+      addProgress(
+        entry,
+        `Agent timed out after ${timeout / 1000}s — re-delegating (attempt ${attempt + 2}/${maxRetries + 1})`,
+      );
+      try { shutdownRealtimeSession(sessionId); } catch {}
+      entry.activeAgents.clear();
+      entry.doneAgents.clear();
+      const rt = await startRealtimeSession(sessionId, configFile);
+      if (!rt) {
+        finalError = "Failed to restart realtime session for retry";
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+      const redispatch = await dispatchTask();
+      if (!redispatch) {
+        finalError = "No agents available on retry";
+        break;
+      }
+      waitTopic = redispatch.waitTopic;
     }
-  } catch (err: any) {
-    clearInterval(progressInterval);
+  }
+
+  clearInterval(progressInterval);
+  try {
     if (entry.killed) return;
-    entry.status = "error";
-    entry.error = `Agent timeout or error: ${err.message}`;
-    addProgress(entry, entry.error);
+    if (finalResult !== null) {
+      entry.result = finalResult;
+      entry.status = "completed";
+      addProgress(entry, "Completed (realtime agents)");
+
+      const sessions = await getChatHistory();
+      const session = sessions.find((s) => s.id === sessionId);
+      if (session) {
+        session.messages.push({ role: "assistant", content: finalResult, timestamp: new Date().toISOString() });
+        session.updatedAt = new Date().toISOString();
+        await saveChatHistory(sessions);
+      }
+    } else {
+      entry.status = "error";
+      entry.error = finalError || "Unknown error";
+      addProgress(entry, entry.error);
+    }
   } finally {
-    // Shutdown the realtime session
     try { shutdownRealtimeSession(sessionId); } catch {}
   }
 }
