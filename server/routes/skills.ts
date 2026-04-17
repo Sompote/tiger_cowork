@@ -4,25 +4,26 @@ import multipart from "@fastify/multipart";
 import path from "path";
 import fs from "fs";
 import AdmZip from "adm-zip";
+import yaml from "js-yaml";
 import { getSkills, saveSkills } from "../services/data";
 import { listInstalledSkills } from "../services/clawhub";
 
 /** Parse SKILL.md frontmatter and return name + description */
 function parseFrontmatter(content: string): { name: string; description: string } {
-  let name = "";
-  let description = "";
   const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  if (fmMatch) {
-    for (const line of fmMatch[1].split("\n")) {
-      const idx = line.indexOf(":");
-      if (idx <= 0) continue;
-      const key = line.slice(0, idx).trim().toLowerCase();
-      const val = line.slice(idx + 1).trim();
-      if (key === "name") name = val;
-      else if (key === "description") description = val;
-    }
+  if (!fmMatch) return { name: "", description: "" };
+  let parsed: any;
+  try {
+    parsed = yaml.load(fmMatch[1]);
+  } catch {
+    return { name: "", description: "" };
   }
-  return { name, description };
+  if (!parsed || typeof parsed !== "object") return { name: "", description: "" };
+  const normalize = (v: any) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
+  return {
+    name: normalize(parsed.name),
+    description: normalize(parsed.description),
+  };
 }
 
 export async function skillsRoutes(fastify: FastifyInstance) {

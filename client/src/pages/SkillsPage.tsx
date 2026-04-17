@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import YAML from "yaml";
 import { api } from "../utils/api";
 import "./PageStyles.css";
 
@@ -97,12 +98,16 @@ export default function SkillsPage() {
     let body = content;
     const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
     if (match) {
-      match[1].split("\n").forEach((line) => {
-        const idx = line.indexOf(":");
-        if (idx > 0) {
-          fm[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      try {
+        const parsed = YAML.parse(match[1]);
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed)) {
+            if (typeof v === "string") fm[k] = v.replace(/\s+/g, " ").trim();
+          }
         }
-      });
+      } catch {
+        // fall through with empty fm
+      }
       body = match[2];
     }
     return { fm, body };
