@@ -718,12 +718,15 @@ export function blackboardDestroy(sessionId: string): void {
 export function cleanupSessionProtocols(sessionId: string): void {
   busDestroy(sessionId);
   blackboardDestroy(sessionId);
-  // Clean TCP channels that include session-scoped agents
+  // Channel keys are agent-id pairs ("a<->b"), so match via the
+  // channel→session map rather than the key string.
   for (const [key, ch] of tcpChannels.entries()) {
-    if (key.includes(sessionId)) {
+    if (tcpChannelSessions.get(key) === sessionId) {
       for (const c of ch.clients) c.destroy();
       ch.server.close();
       tcpChannels.delete(key);
+      tcpChannelSessions.delete(key);
+      console.log(`[Protocol:TCP] Channel ${key} closed (session ${sessionId} cleanup)`);
     }
   }
 }

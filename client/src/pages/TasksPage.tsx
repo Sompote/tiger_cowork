@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../utils/api";
 import { useSocket } from "../hooks/useSocket";
@@ -146,7 +146,13 @@ export default function TasksPage() {
     loadActiveTasks();
   };
 
+  // In-flight guard: socket status events can fire many times per second and
+  // each triggered a 3-request refetch; concurrent runs also resolved out of
+  // order, flashing stale task state over fresh state.
+  const loadInFlightRef = useRef(false);
   const loadActiveTasks = useCallback(async () => {
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
     setRefreshing(true);
     try {
       const data = await api.getActiveTasks();
@@ -162,11 +168,12 @@ export default function TasksPage() {
     } catch {
       // ignore
     }
+    loadInFlightRef.current = false;
     setRefreshing(false);
   }, []);
 
   useEffect(() => {
-    api.getTasks().then(setTasks);
+    api.getTasks().then(setTasks).catch(() => {});
     loadActiveTasks();
   }, [loadActiveTasks]);
 

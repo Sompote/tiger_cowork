@@ -249,6 +249,19 @@ async function start() {
   initMcpServers().catch((err) => console.error("[MCP] Init error:", err.message));
 }
 
-start();
+// Safety net: an unhandled rejection from a timer, socket handler, or
+// background task must not take down the whole server (Node's default is
+// to exit). Log loudly instead — the failing operation surfaces its own error.
+process.on("unhandledRejection", (reason) => {
+  console.error("[UnhandledRejection]", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UncaughtException]", err);
+});
+
+start().catch((err) => {
+  console.error("[Fatal] startup failed:", err);
+  process.exit(1);
+});
 
 export { io };

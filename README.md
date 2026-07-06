@@ -1,8 +1,17 @@
 ![Tiger CoWork Banner](picture/screen_read.png)
 
-# Tiger CoWork v0.7.1
+# Tiger CoWork v0.7.2
 
 A self-hosted AI workspace with chat, code execution, parallel multi-agent orchestration, cross-machine agent connection, and a skill marketplace. Mix different AI providers in the same agent team — OpenAI-compatible APIs, Claude Code CLI, and Codex CLI. Connect agents across machines on your network so distributed teams can collaborate in real time. Connect external MCP servers to extend the AI's toolbox. Built with 16 built-in tools and designed for long-running sessions with smart context compression and checkpoint recovery.
+
+## What's New in v0.7.2
+
+- **Crash-Safe Data Storage** — every JSON store (settings, chat history, tasks, projects, skills) is now written atomically (temp file + rename) behind a per-file lock, so a crash mid-write can no longer truncate or wipe a store. Corrupt files are quarantined to `*.corrupt-<timestamp>` and logged instead of being silently overwritten with defaults, and concurrent writers use read-modify-write updates so they can't clobber each other's changes.
+- **Server Crash Prevention** — the socket chat handlers are wrapped so an error thrown before their inner try/catch reports back to the client and keeps the server running instead of taking down the whole process; added top-level `unhandledRejection`/`uncaughtException` guards and a fatal-startup catch.
+- **Correct Checkpoint Resume** — resuming a long run from a checkpoint now appends your new message (it previously answered the *previous* question), expires stale checkpoints after 30 minutes, and clears checkpoints on terminal errors so they can't hijack the next turn.
+- **Session & Resource Cleanup** — killing a task now tears down its realtime agent session (no more follow-up messages hanging on a dead session), TCP protocol channels are actually released on cleanup, an idle sweeper reclaims abandoned realtime sessions, and the web-search temp files that once filled `/tmp` are removed on every path.
+- **Hardened Path Validation** — workspace path checks reject sibling-directory escapes, agent-config deletion and skill-zip extraction are guarded against path traversal / zip-slip, and log endpoints validate the session id before touching the filesystem.
+- **Client Reliability** — API error responses are now surfaced as errors instead of crashing callers; the project chat can no longer get stuck in a permanent "loading" state after a missed event; and the app shares a single websocket connection instead of opening one per view.
 
 ## What's New in v0.7.1
 

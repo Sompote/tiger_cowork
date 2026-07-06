@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { exec, spawn as spawnChild } from "child_process";
+import { exec, execFile, spawn as spawnChild } from "child_process";
 import { promisify } from "util";
 import { AsyncLocalStorage } from "async_hooks";
 import yaml from "js-yaml";
@@ -20,6 +20,7 @@ import {
 
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // --- Tool definitions (OpenAI function-calling format) ---
 
@@ -779,24 +780,25 @@ async function webSearch(args: { query: string }): Promise<any> {
   const results: any[] = [];
 
   // Primary: DuckDuckGo Python library (reliable, bypasses bot detection)
+  // The query is passed via argv (not interpolated into the script) so
+  // quotes/newlines in it can't break or inject into the Python source.
+  const tmpFile = `/tmp/ddg_search_${process.pid}_${Date.now()}.py`;
   try {
-    const safeQuery = query.replace(/'/g, "\\'");
     const pyScript = [
-      "import json",
+      "import json, sys",
+      "q = sys.argv[1]",
       "try:",
       "    from ddgs import DDGS",
-      `    r = list(DDGS().text('${safeQuery}', max_results=8))`,
+      "    r = list(DDGS().text(q, max_results=8))",
       "    print(json.dumps(r))",
       "except ImportError:",
       "    from duckduckgo_search import DDGS",
       "    with DDGS() as ddgs:",
-      `        r = list(ddgs.text('${safeQuery}', max_results=8))`,
+      "        r = list(ddgs.text(q, max_results=8))",
       "        print(json.dumps(r))",
     ].join("\n");
-    const tmpFile = `/tmp/ddg_search_${Date.now()}.py`;
     fs.writeFileSync(tmpFile, pyScript);
-    const { stdout } = await execAsync(`python3 ${tmpFile}`, { timeout: 30000 });
-    try { fs.unlinkSync(tmpFile); } catch {}
+    const { stdout } = await execFileAsync("python3", [tmpFile, query], { timeout: 30000 });
     const ddgResults = JSON.parse(stdout.trim());
     for (const r of ddgResults) {
       results.push({
@@ -808,6 +810,10 @@ async function webSearch(args: { query: string }): Promise<any> {
     }
   } catch (err: any) {
     console.error("[webSearch] DuckDuckGo Python failed:", err.message);
+  } finally {
+    // Unlink in finally — leaving it to the success path leaks a temp file
+    // per failed search (this has filled /tmp before).
+    try { fs.unlinkSync(tmpFile); } catch {}
   }
 
   // Fallback: DuckDuckGo Instant Answer API (for quick facts/definitions)
@@ -2606,6 +2612,47 @@ const realtimeSessions = new Map<string, RealtimeSession>();
 export function getRealtimeSession(sessionId: string): RealtimeSession | undefined {
   return realtimeSessions.get(sessionId);
 }
+
+// Idle sweeper: realtime sessions are intentionally kept alive between
+// messages, but with no other cleanup they (and their bus/blackboard/TCP
+// resources plus parked agent loops) accumulate for the process lifetime.
+// A session counts as active if any agent is working or its bus history
+// grew since the last sweep; shutting an idle one down is safe — bus
+// history is persisted and the next message boots a fresh session.
+const REALTIME_IDLE_TTL_MS = 30 * 60 * 1000;
+const REALTIME_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const realtimeIdleObs = new Map<string, { lastActiveAt: number; lastBusLen: number }>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of realtimeSessions) {
+    const busLen = busHistory(sessionId).length;
+    const anyWorking = Array.from(session.agents.values()).some((h) => h.status === "working");
+    let obs = realtimeIdleObs.get(sessionId);
+    if (!obs) {
+      obs = { lastActiveAt: now, lastBusLen: busLen };
+      realtimeIdleObs.set(sessionId, obs);
+      continue;
+    }
+    if (anyWorking || busLen !== obs.lastBusLen) {
+      obs.lastActiveAt = now;
+      obs.lastBusLen = busLen;
+      continue;
+    }
+    if (now - obs.lastActiveAt > REALTIME_IDLE_TTL_MS) {
+      console.log(`[Realtime] Sweeping idle session ${sessionId} (inactive ${Math.round((now - obs.lastActiveAt) / 60000)}min)`);
+      try {
+        shutdownRealtimeSession(sessionId);
+      } catch (e: any) {
+        console.error(`[Realtime] Idle sweep failed for ${sessionId}:`, e?.message);
+      }
+      realtimeIdleObs.delete(sessionId);
+    }
+  }
+  for (const id of realtimeIdleObs.keys()) {
+    if (!realtimeSessions.has(id)) realtimeIdleObs.delete(id);
+  }
+}, REALTIME_SWEEP_INTERVAL_MS).unref();
 
 // --- Boot all agents ---
 

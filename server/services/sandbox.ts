@@ -5,7 +5,8 @@ import fsSync from "fs";
 export function validatePath(sandboxDir: string, requestedPath: string): string {
   const resolved = path.resolve(sandboxDir, requestedPath);
   const root = path.resolve(sandboxDir);
-  if (!resolved.startsWith(root)) {
+  // A bare startsWith would also match sibling dirs like `${root}-other`
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
     throw new Error("Access denied: path outside workspace");
   }
   return resolved;

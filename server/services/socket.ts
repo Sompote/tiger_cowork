@@ -1,13 +1,47 @@
 import { Server, Socket } from "socket.io";
 import { v4 as uuid } from "uuid";
 import { callTigerBotWithTools, callTigerBot, trimConversationContext, compressOlderMessages, estimateMessagesChars } from "./tigerbot";
-import { getChatHistory, saveChatHistory, ChatSession, getSettings, getProjects, getSkills, runWithSettingsOverride } from "./data";
+import { getChatHistory, saveChatHistory, updateChatHistory, ChatSession, getSettings, getProjects, getSkills, runWithSettingsOverride } from "./data";
 import { runPython } from "./python";
 import { setSubagentStatusCallback, setCallContext, clearCallContext, loadAgentConfig, getManualAgentConfigSummary, startRealtimeSession, shutdownRealtimeSession, getRealtimeSession, getToolsForRealtimeOrchestrator, getHumanConnectedAgents, humanSendToAgent, humanBroadcastToAgents, humanWaitForAgent, collectPendingResults, getWorkingAgents, getAutoCreatedArchitecture, getAutoSwarmSelection, callTool } from "./toolbox";
 import { busSubscribe, busPublish, busWaitForMessage } from "./protocols";
 import path from "path";
-import { execSync } from "child_process";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import fs from "fs";
+
+const execFileAsync = promisify(execFile);
+
+// Resize oversized chat images with PIL. Paths are passed via argv — the old
+// inline-interpolated execSync was shell-injectable through the image path
+// and blocked the event loop for up to 10s per image.
+const PY_RESIZE_SCRIPT = `
+from PIL import Image
+import sys
+img = Image.open(sys.argv[1])
+img.thumbnail((1600, 1600), Image.LANCZOS)
+img = img.convert('RGB')
+img.save(sys.argv[2], 'JPEG', quality=80)
+`;
+const IMAGE_MAX_SIZE = 4 * 1024 * 1024; // API limit is 5MB base64
+
+async function compressImageIfNeeded(imgPath: string, mimeType: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  let buffer = fs.readFileSync(imgPath);
+  if (buffer.length <= IMAGE_MAX_SIZE) return { buffer, mimeType };
+  console.log(`[Image] ${imgPath} is ${(buffer.length / 1024 / 1024).toFixed(1)}MB, compressing...`);
+  const tmpOut = `/tmp/cowork_resized_${process.pid}_${Date.now()}.jpg`;
+  try {
+    await execFileAsync("python3", ["-c", PY_RESIZE_SCRIPT, imgPath, tmpOut], { timeout: 10000 });
+    buffer = fs.readFileSync(tmpOut);
+    mimeType = "image/jpeg";
+    console.log(`[Image] Compressed to ${(buffer.length / 1024 / 1024).toFixed(1)}MB`);
+  } catch (err: any) {
+    console.error(`[Image] Compression failed:`, err.message);
+  } finally {
+    try { fs.unlinkSync(tmpOut); } catch {}
+  }
+  return { buffer, mimeType };
+}
 
 // ─── Scan output_file/ for newly created files ───
 const OUTPUT_EXTS = [".pdf", ".docx", ".doc", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".svg", ".html", ".gif", ".webp", ".txt", ".md"];
@@ -120,6 +154,17 @@ export function killActiveTask(taskId: string): boolean {
     // Record as cancelled before deletion
     const task = activeTasks.get(taskId);
     if (task) recordFinishedTask(task, "cancelled");
+    // Aborting kills the realtime session's agent loops (the session's
+    // controller chains off this task's), so tear the session down too —
+    // otherwise follow-up messages find a "live" session with no agents
+    // listening and hang for the full sub-agent timeout.
+    if (task?.sessionId && getRealtimeSession(task.sessionId)) {
+      try {
+        shutdownRealtimeSession(task.sessionId);
+      } catch (e: any) {
+        console.error(`[Tasks] Failed to shut down realtime session ${task.sessionId}:`, e?.message);
+      }
+    }
     activeTasks.delete(taskId);
     taskAbortControllers.delete(taskId);
     return true;
@@ -601,6 +646,23 @@ export function setupSocket(io: Server): void {
   io.on("connection", (socket: Socket) => {
     console.log("Client connected:", socket.id);
 
+    // Socket.io does not catch rejections from async listeners — an error
+    // thrown before a handler's own try/catch (e.g. while loading history)
+    // becomes an unhandled rejection. Wrap handlers so a failing turn logs,
+    // tells the client, and leaves the server running.
+    const safeHandler = <T>(event: string, fn: (data: T) => Promise<void>) => async (data: T) => {
+      try {
+        await fn(data);
+      } catch (err: any) {
+        console.error(`[Socket:${event}] handler error:`, err);
+        const sessionId = (data as any)?.sessionId;
+        if (sessionId) {
+          socket.emit("chat:response", { sessionId, content: `Internal error: ${err?.message || err}`, done: true });
+          broadcastStatus({ sessionId, status: "done" });
+        }
+      }
+    };
+
     // Intercept socket.emit to record chat logs
     const origEmit = socket.emit.bind(socket);
     socket.emit = function(event: string, ...args: any[]) {
@@ -633,7 +695,7 @@ export function setupSocket(io: Server): void {
       }
     }
 
-    socket.on("chat:send", async (data: { sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
+    socket.on("chat:send", safeHandler("chat:send", async (data: { sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
       const { sessionId, message, images } = data;
       const sessions = await getChatHistory();
       let session = sessions.find((s) => s.id === sessionId);
@@ -876,7 +938,6 @@ export function setupSocket(io: Server): void {
 
       // If the latest user message has images, convert to multimodal content
       console.log(`[Image] images received:`, images ? JSON.stringify(images) : "none");
-      fs.writeFileSync("/tmp/cowork-image-debug.log", `${new Date().toISOString()} images: ${JSON.stringify(images)}\nmessage: ${message.slice(0,200)}\n`, { flag: "a" });
       if (images && images.length > 0) {
         const lastIdx = chatMessages.length - 1;
         const textContent = chatMessages[lastIdx].content;
@@ -886,32 +947,7 @@ export function setupSocket(io: Server): void {
         for (const img of images) {
           try {
             const imgPath = path.resolve(img.path);
-            let imgBuffer = fs.readFileSync(imgPath);
-            let mimeType = img.type || "image/png";
-
-            // Compress if larger than 4MB (API limit is 5MB for base64)
-            const MAX_SIZE = 4 * 1024 * 1024;
-            if (imgBuffer.length > MAX_SIZE) {
-              console.log(`[Image] ${img.path} is ${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB, compressing...`);
-              try {
-                const tmpOut = `/tmp/cowork_resized_${Date.now()}.jpg`;
-                execSync(`python3 -c "
-from PIL import Image
-import sys
-img = Image.open('${imgPath.replace(/'/g, "\\'")}')
-img.thumbnail((1600, 1600), Image.LANCZOS)
-img = img.convert('RGB')
-img.save('${tmpOut}', 'JPEG', quality=80)
-"`, { timeout: 10000 });
-                imgBuffer = fs.readFileSync(tmpOut);
-                mimeType = "image/jpeg";
-                fs.unlinkSync(tmpOut);
-                console.log(`[Image] Compressed to ${(imgBuffer.length / 1024 / 1024).toFixed(1)}MB`);
-              } catch (compErr: any) {
-                console.error(`[Image] Compression failed:`, compErr.message);
-              }
-            }
-
+            const { buffer: imgBuffer, mimeType } = await compressImageIfNeeded(imgPath, img.type || "image/png");
             const base64 = imgBuffer.toString("base64");
             contentParts.push({
               type: "image_url",
@@ -997,6 +1033,14 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         if (rtSettings.subAgentEnabled && realtimeConfigFile) {
           // Check if realtime session already booted (create_architecture boots it)
           let rtSession = getRealtimeSession(sessionId) || null;
+          // A session whose controller was aborted (task killed) has no agent
+          // loops listening — delegating to it would hang for the full
+          // sub-agent timeout. Tear it down and boot fresh.
+          if (rtSession && rtSession.abortController.signal.aborted) {
+            console.log(`[Realtime] Session ${sessionId} was aborted — restarting before delegation`);
+            shutdownRealtimeSession(sessionId);
+            rtSession = null;
+          }
           if (!rtSession) {
             rtSession = await startRealtimeSession(sessionId, realtimeConfigFile, abortController.signal);
           }
@@ -1352,9 +1396,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
             }
           };
 
-          // Max timeout — clean up even if agents never respond
+          // Max timeout — clean up even if agents never respond. Also drop
+          // any listeners that never fired so they don't accumulate on the bus.
+          const lateUnsubs: Array<() => void> = [];
           const lateTimeout = setTimeout(() => {
             console.log(`[Realtime] Late-result timeout (5min) for ${sessionId}, cleaning up`);
+            for (const u of lateUnsubs) { try { u(); } catch {} }
             broadcastStatus({ sessionId, status: "done" });
             activeTasks.delete(taskId);
             taskAbortControllers.delete(taskId);
@@ -1375,17 +1422,18 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
               // Save to chat history
               try {
-                const lateSessions = await getChatHistory();
-                const lateSess = lateSessions.find(s => s.id === sessionId);
-                if (lateSess) {
-                  lateSess.messages.push({
-                    role: "assistant",
-                    content: lateContent.trim(),
-                    timestamp: new Date().toISOString(),
-                    files: lateFiles.length > 0 ? lateFiles : undefined,
-                  });
-                  await saveChatHistory(lateSessions);
-                }
+                await updateChatHistory((lateSessions) => {
+                  const lateSess = lateSessions.find(s => s.id === sessionId);
+                  if (lateSess) {
+                    lateSess.messages.push({
+                      role: "assistant",
+                      content: lateContent.trim(),
+                      timestamp: new Date().toISOString(),
+                      files: lateFiles.length > 0 ? lateFiles : undefined,
+                    });
+                  }
+                  return lateSessions;
+                });
               } catch (e: any) {
                 console.error(`[Realtime] Failed to save late result:`, e.message);
               }
@@ -1396,6 +1444,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
               cleanupWhenDone();
             });
+            lateUnsubs.push(unsub);
           }
         } else {
           // No agents still working — broadcast done and clean up immediately
@@ -1406,10 +1455,10 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         // Keep realtime session alive between messages so agents retain context
         // for follow-up user requests. Session will be cleaned up on disconnect.
       }
-    });
+    }));
 
     // ─── Project Chat ───
-    socket.on("project:chat:send", async (data: { projectId: string; sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
+    socket.on("project:chat:send", safeHandler("project:chat:send", async (data: { projectId: string; sessionId: string; message: string; images?: { path: string; type: string }[] }) => {
       const { projectId, sessionId, message, images } = data;
       const projects = await getProjects();
       const project = projects.find((p) => p.id === projectId);
@@ -1701,24 +1750,7 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         for (const img of images) {
           try {
             const imgPath = path.resolve(img.path);
-            let imgBuffer = fs.readFileSync(imgPath);
-            let mimeType = img.type || "image/png";
-            const MAX_SIZE = 4 * 1024 * 1024;
-            if (imgBuffer.length > MAX_SIZE) {
-              try {
-                const tmpOut = `/tmp/cowork_resized_${Date.now()}.jpg`;
-                execSync(`python3 -c "
-from PIL import Image
-img = Image.open('${imgPath.replace(/'/g, "\\'")}')
-img.thumbnail((1600, 1600), Image.LANCZOS)
-img = img.convert('RGB')
-img.save('${tmpOut}', 'JPEG', quality=80)
-"`, { timeout: 10000 });
-                imgBuffer = fs.readFileSync(tmpOut);
-                mimeType = "image/jpeg";
-                fs.unlinkSync(tmpOut);
-              } catch {}
-            }
+            const { buffer: imgBuffer, mimeType } = await compressImageIfNeeded(imgPath, img.type || "image/png");
             const base64 = imgBuffer.toString("base64");
             contentParts.push({
               type: "image_url",
@@ -1802,6 +1834,12 @@ img.save('${tmpOut}', 'JPEG', quality=80)
 
         if (rtSettings.subAgentEnabled && projRealtimeConfigFile) {
           let rtSession = getRealtimeSession(sessionId) || null;
+          // Aborted session (task killed) has no listening agents — restart it.
+          if (rtSession && rtSession.abortController.signal.aborted) {
+            console.log(`[Realtime] Session ${sessionId} was aborted — restarting before delegation`);
+            shutdownRealtimeSession(sessionId);
+            rtSession = null;
+          }
           if (!rtSession) {
             rtSession = await startRealtimeSession(sessionId, projRealtimeConfigFile, abortController.signal);
           }
@@ -2100,8 +2138,14 @@ img.save('${tmpOut}', 'JPEG', quality=80)
         if (rtSessionCheck2 && stillWorking2.length > 0) {
           console.log(`[Realtime] ${stillWorking2.length} agent(s) still working after project chat ended, setting up late-result listeners`);
 
+          // Unsubscribe listeners that never fired after the max wait, and only
+          // clear the timeout once every agent has reported (the old code
+          // cleared it on the FIRST result, leaking the remaining listeners).
+          const lateUnsubs2: Array<() => void> = [];
+          let latePending2 = stillWorking2.length;
           const lateTimeout2 = setTimeout(() => {
             console.log(`[Realtime] Late-result timeout (5min) for project ${sessionId}`);
+            for (const u of lateUnsubs2) { try { u(); } catch {} }
             // Don't shutdown — keep agents alive for follow-up messages
           }, 5 * 60 * 1000);
 
@@ -2118,17 +2162,18 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               socket.emit("chat:chunk", { sessionId, content: lateContent });
 
               try {
-                const lateSessions = await getChatHistory();
-                const lateSess = lateSessions.find(s => s.id === sessionId);
-                if (lateSess) {
-                  lateSess.messages.push({
-                    role: "assistant",
-                    content: lateContent.trim(),
-                    timestamp: new Date().toISOString(),
-                    files: lateFiles.length > 0 ? lateFiles : undefined,
-                  });
-                  await saveChatHistory(lateSessions);
-                }
+                await updateChatHistory((lateSessions) => {
+                  const lateSess = lateSessions.find(s => s.id === sessionId);
+                  if (lateSess) {
+                    lateSess.messages.push({
+                      role: "assistant",
+                      content: lateContent.trim(),
+                      timestamp: new Date().toISOString(),
+                      files: lateFiles.length > 0 ? lateFiles : undefined,
+                    });
+                  }
+                  return lateSessions;
+                });
               } catch (e: any) {
                 console.error(`[Realtime] Failed to save late result:`, e.message);
               }
@@ -2136,8 +2181,10 @@ img.save('${tmpOut}', 'JPEG', quality=80)
               socket.emit("chat:response", { sessionId, content: lateContent.trim(), done: true, files: lateFiles.length > 0 ? lateFiles : undefined, lateResult: true });
               broadcastStatus({ sessionId, status: "job_complete", files: lateFiles.length > 0 ? lateFiles : undefined } as any);
 
-              clearTimeout(lateTimeout2);
+              latePending2--;
+              if (latePending2 <= 0) clearTimeout(lateTimeout2);
             });
+            lateUnsubs2.push(unsub);
           }
         }
         // Keep realtime session alive between messages for follow-up delegation
@@ -2156,15 +2203,15 @@ img.save('${tmpOut}', 'JPEG', quality=80)
       } else {
         await runProjectChat();
       }
-    });
+    }));
 
-    socket.on("python:run", async (data: { code: string }) => {
+    socket.on("python:run", safeHandler("python:run", async (data: { code: string }) => {
       const settings = await getSettings();
       const sandboxDir = settings.sandboxDir || path.resolve("sandbox");
       socket.emit("python:status", { status: "running" });
       const result = await runPython(data.code, sandboxDir);
       socket.emit("python:result", result);
-    });
+    }));
 
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);

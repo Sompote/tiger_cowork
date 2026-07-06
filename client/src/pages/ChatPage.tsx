@@ -353,21 +353,25 @@ export default function ChatPage() {
         setActiveSession(sessionParam);
         setSearchParams({}, { replace: true }); // clean URL
       }
-    });
+    }).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (activeSession) {
-      api.getSession(activeSession).then((session: any) => {
-        setMessages(session.messages || []);
-        // Restore auto-created architecture button if present
-        if (session.autoCreatedArch) {
-          setAutoCreatedArch(session.autoCreatedArch);
-        } else {
-          setAutoCreatedArch(null);
-        }
-      });
-    }
+    if (!activeSession) return;
+    // Guard against a slow response for a previous session landing after a
+    // switch and overwriting the new session's messages.
+    let cancelled = false;
+    api.getSession(activeSession).then((session: any) => {
+      if (cancelled) return;
+      setMessages(session.messages || []);
+      // Restore auto-created architecture button if present
+      if (session.autoCreatedArch) {
+        setAutoCreatedArch(session.autoCreatedArch);
+      } else {
+        setAutoCreatedArch(null);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, [activeSession]);
 
   const toolLabels: Record<string, string> = {

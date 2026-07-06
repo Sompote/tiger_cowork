@@ -184,7 +184,10 @@ export async function skillsRoutes(fastify: FastifyInstance) {
           // Skip hidden/system files
           if (relativePath.startsWith("__MACOSX") || relativePath.startsWith(".")) continue;
 
-          const destPath = path.join(skillDir, relativePath);
+          // Zip-slip guard: an entry like "foo/../../evil" resolves outside
+          // skillDir (the leading-dot check above misses mid-path "..").
+          const destPath = path.resolve(skillDir, relativePath);
+          if (destPath !== skillDir && !destPath.startsWith(skillDir + path.sep)) continue;
           fs.mkdirSync(path.dirname(destPath), { recursive: true });
           fs.writeFileSync(destPath, entry.getData());
         }

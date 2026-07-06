@@ -3,19 +3,84 @@ import path from "path";
 
 const DATA_DIR = path.resolve("data");
 
-async function readJSON(file: string): Promise<any> {
+// Per-file promise-chain mutex: serializes reads-for-update and writes so
+// concurrent writers can't interleave or clobber each other's updates.
+const fileLocks = new Map<string, Promise<unknown>>();
+
+function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(file) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.then(
+    () => {},
+    () => {}
+  );
+  fileLocks.set(file, tail);
+  // Drop the entry once idle so the map doesn't hold settled promises forever.
+  tail.then(() => {
+    if (fileLocks.get(file) === tail) fileLocks.delete(file);
+  });
+  return next;
+}
+
+function defaultFor(file: string): any {
+  return file.endsWith("settings.json") ? {} : [];
+}
+
+async function readJSONUnlocked(file: string): Promise<any> {
   const fp = path.join(DATA_DIR, file);
+  let content: string;
   try {
-    await fs.access(fp);
-    const content = await fs.readFile(fp, "utf-8");
-    return JSON.parse(content);
+    content = await fs.readFile(fp, "utf-8");
   } catch {
-    return file.endsWith("settings.json") ? {} : [];
+    // Missing file (or unreadable) — start from the default.
+    return defaultFor(file);
+  }
+  try {
+    return JSON.parse(content);
+  } catch (err) {
+    // Corrupt store: preserve it for manual recovery instead of letting the
+    // next save silently overwrite it with the default.
+    const backup = `${fp}.corrupt-${Date.now()}`;
+    console.error(`[data] ${file} is corrupt, moving to ${backup}:`, err);
+    try {
+      await fs.rename(fp, backup);
+    } catch {}
+    return defaultFor(file);
+  }
+}
+
+async function readJSON(file: string): Promise<any> {
+  return withFileLock(file, () => readJSONUnlocked(file));
+}
+
+async function writeJSONUnlocked(file: string, data: any): Promise<void> {
+  const fp = path.join(DATA_DIR, file);
+  const tmp = `${fp}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2));
+    await fs.rename(tmp, fp);
+  } catch (err) {
+    try {
+      await fs.unlink(tmp);
+    } catch {}
+    throw err;
   }
 }
 
 async function writeJSON(file: string, data: any): Promise<void> {
-  await fs.writeFile(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
+  return withFileLock(file, () => writeJSONUnlocked(file, data));
+}
+
+// Read-modify-write under the file lock so concurrent updaters can't drop
+// each other's changes. The mutator receives fresh state and returns the
+// state to persist.
+async function updateJSON<T>(file: string, mutator: (current: T) => T | Promise<T>): Promise<T> {
+  return withFileLock(file, async () => {
+    const current = (await readJSONUnlocked(file)) as T;
+    const updated = await mutator(current);
+    await writeJSONUnlocked(file, updated);
+    return updated;
+  });
 }
 
 // Chat history
@@ -39,6 +104,16 @@ export async function getChatHistory(): Promise<ChatSession[]> {
 
 export async function saveChatHistory(sessions: ChatSession[]): Promise<void> {
   await writeJSON("chat_history.json", sessions);
+}
+
+// Atomic read-modify-write for chat history. Prefer this over
+// getChatHistory()+saveChatHistory() when the caller may run concurrently
+// with other writers (route handlers, late bus results) — a stale snapshot
+// saved wholesale silently drops the other writer's messages.
+export async function updateChatHistory(
+  mutator: (sessions: ChatSession[]) => ChatSession[] | Promise<ChatSession[]>
+): Promise<ChatSession[]> {
+  return updateJSON("chat_history.json", mutator);
 }
 
 // Tasks (cron)
@@ -116,6 +191,15 @@ export async function getSettings(): Promise<Settings> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   await writeJSON("settings.json", settings);
+}
+
+// Atomic read-modify-write for settings. The mutator sees the raw on-disk
+// settings (no AsyncLocalStorage overrides baked in) so long-running callers
+// don't revert user edits made while they were working.
+export async function updateSettings(
+  mutator: (settings: Settings) => Settings | Promise<Settings>
+): Promise<Settings> {
+  return updateJSON("settings.json", mutator);
 }
 
 // Projects

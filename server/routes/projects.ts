@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import multipart from "@fastify/multipart";
 import { createReadStream } from "fs";
+import { validatePath } from "../services/sandbox";
 
 // Helper to resolve project working folder (handles relative paths)
 async function resolveWorkingFolder(project: Project): Promise<string> {
@@ -230,7 +231,12 @@ Generate the project memory document now:`;
 
     const resolved = await resolveWorkingFolder(project);
     const subPath = (request.query as any).path || "";
-    const fullPath = path.join(resolved, subPath);
+    let fullPath: string;
+    try {
+      fullPath = validatePath(resolved, subPath);
+    } catch {
+      reply.code(403); return { files: [], error: "Invalid path" };
+    }
 
     if (!fs.existsSync(fullPath)) return { files: [] };
 
@@ -262,13 +268,20 @@ Generate the project memory document now:`;
     // Extract path field from multipart fields
     const pathField = data.fields?.path as any;
     const subPath = pathField?.value || "";
-    const destDir = subPath ? path.join(resolved, subPath) : resolved;
+    // Contain both the subfolder and the client-supplied filename
+    let destDir: string;
+    try {
+      destDir = subPath ? validatePath(resolved, subPath) : resolved;
+    } catch {
+      reply.code(403); return { error: "Invalid path" };
+    }
     if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
 
     const buffer = await data.toBuffer();
-    const destPath = path.join(destDir, data.filename);
+    const safeName = path.basename(data.filename);
+    const destPath = path.join(destDir, safeName);
     fs.writeFileSync(destPath, buffer);
-    return { success: true, name: data.filename };
+    return { success: true, name: safeName };
   });
 
   // Create directory in project working folder
@@ -284,10 +297,13 @@ Generate the project memory document now:`;
     if (!dirName) { reply.code(400); return { error: "name required" }; }
 
     const resolved = await resolveWorkingFolder(project);
-    const fullPath = path.join(resolved, subPath, dirName);
-
-    // Prevent path traversal
-    if (!fullPath.startsWith(resolved)) { reply.code(403); return { error: "Invalid path" }; }
+    // validatePath rejects traversal AND sibling-dir prefix matches
+    let fullPath: string;
+    try {
+      fullPath = validatePath(resolved, path.join(subPath, dirName));
+    } catch {
+      reply.code(403); return { error: "Invalid path" };
+    }
 
     if (!fs.existsSync(fullPath)) fs.mkdirSync(fullPath, { recursive: true });
     return { success: true };
@@ -304,10 +320,12 @@ Generate the project memory document now:`;
     if (!filePath) { reply.code(400); return { error: "path required" }; }
 
     const resolved = await resolveWorkingFolder(project);
-    const fullPath = path.join(resolved, filePath);
-
-    // Prevent path traversal
-    if (!fullPath.startsWith(resolved)) { reply.code(403); return { error: "Invalid path" }; }
+    let fullPath: string;
+    try {
+      fullPath = validatePath(resolved, filePath);
+    } catch {
+      reply.code(403); return { error: "Invalid path" };
+    }
 
     if (!fs.existsSync(fullPath)) { reply.code(404); return { error: "File not found" }; }
 
@@ -335,9 +353,12 @@ Generate the project memory document now:`;
     if (!filePath) { reply.code(400); return { error: "path required" }; }
 
     const resolved = await resolveWorkingFolder(project);
-    const fullPath = path.join(resolved, filePath);
-
-    if (!fullPath.startsWith(resolved)) { reply.code(403); return { error: "Invalid path" }; }
+    let fullPath: string;
+    try {
+      fullPath = validatePath(resolved, filePath);
+    } catch {
+      reply.code(403); return { error: "Invalid path" };
+    }
     if (!fs.existsSync(fullPath)) { reply.code(404); return { error: "File not found" }; }
 
     const fileName = path.basename(fullPath);

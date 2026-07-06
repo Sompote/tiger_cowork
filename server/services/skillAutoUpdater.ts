@@ -4,7 +4,7 @@ import { v4 as uuid } from "uuid";
 import yaml from "js-yaml";
 import {
   getSettings,
-  saveSettings,
+  updateSettings,
   getSkills,
   saveSkills,
   getChatHistory,
@@ -758,7 +758,7 @@ export async function runAutoSkillUpdate(opts: { manual?: boolean } = {}): Promi
 
     if (candidates.length === 0) {
       const summary = opts.manual ? "no successful sessions found" : "no new successful sessions";
-      await saveSettings({ ...settings, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary });
+      await updateSettings((s) => ({ ...s, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary }));
       return { created: 0, updated: 0, skipped: 0, reasons: [summary] };
     }
 
@@ -771,12 +771,12 @@ export async function runAutoSkillUpdate(opts: { manual?: boolean } = {}): Promi
     if (remainingForSynthesis.length === 0) {
       const newCursor = candidates[candidates.length - 1].updatedAt;
       const summary = `created=0 updated=${remediation.updated} skipped=${remediation.skipped} candidates=${candidates.length} (all consumed by remediation)`;
-      await saveSettings({
-        ...settings,
+      await updateSettings((s) => ({
+        ...s,
         skillAutoUpdateCursor: newCursor,
         skillAutoUpdateLastRunAt: new Date().toISOString(),
         skillAutoUpdateLastRunSummary: summary + (remediation.reasons.length ? ` | ${remediation.reasons.slice(0, 3).join("; ")}` : ""),
-      });
+      }));
       return { created: 0, updated: remediation.updated, skipped: remediation.skipped, reasons: remediation.reasons };
     }
 
@@ -790,7 +790,7 @@ export async function runAutoSkillUpdate(opts: { manual?: boolean } = {}): Promi
     const replyContent = typeof reply.content === "string" ? reply.content : "";
     if (isErrorReply(replyContent)) {
       const summary = `LLM error: ${replyContent.slice(0, 200)}`;
-      await saveSettings({ ...settings, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary });
+      await updateSettings((s) => ({ ...s, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary }));
       return {
         created: 0,
         updated: remediation.updated,
@@ -826,7 +826,7 @@ export async function runAutoSkillUpdate(opts: { manual?: boolean } = {}): Promi
         const replyPreview = replyContent.slice(0, 300).replace(/\s+/g, " ");
         console.error(`[SkillAutoUpdate] JSON parse failed. LLM reply (first 300 chars): ${replyPreview}`);
         const summary = `LLM JSON parse failed: ${e.message} | reply head: ${replyPreview.slice(0, 120)}`;
-        await saveSettings({ ...settings, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary });
+        await updateSettings((s) => ({ ...s, skillAutoUpdateLastRunAt: new Date().toISOString(), skillAutoUpdateLastRunSummary: summary }));
         return {
           created: 0,
           updated: remediation.updated,
@@ -874,12 +874,12 @@ export async function runAutoSkillUpdate(opts: { manual?: boolean } = {}): Promi
     // Advance cursor to the newest session we considered
     const newCursor = candidates[candidates.length - 1].updatedAt;
     const summary = `created=${created} updated=${updated} skipped=${skipped} candidates=${candidates.length}`;
-    await saveSettings({
-      ...settings,
+    await updateSettings((s) => ({
+      ...s,
       skillAutoUpdateCursor: newCursor,
       skillAutoUpdateLastRunAt: new Date().toISOString(),
       skillAutoUpdateLastRunSummary: summary + (reasons.length ? ` | ${reasons.slice(0, 3).join("; ")}` : ""),
-    });
+    }));
     return { created, updated, skipped, reasons };
   } finally {
     inflight = false;

@@ -77,7 +77,12 @@ export async function agentsRoutes(fastify: FastifyInstance) {
   // Delete agent config
   fastify.delete("/:filename", async (request, reply) => {
     const filename = (request.params as any).filename;
-    const fp = path.join(AGENTS_DIR, filename);
+    // Same guard as GET — without it "../../data/settings.json" deletes
+    // arbitrary files.
+    if (!filename.match(/^[\w\-. ]+\.ya?ml$/)) {
+      reply.code(400); return { error: "Invalid filename" };
+    }
+    const fp = path.join(AGENTS_DIR, path.basename(filename));
     if (fs.existsSync(fp)) {
       fs.unlinkSync(fp);
     }

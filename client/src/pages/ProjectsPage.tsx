@@ -360,7 +360,11 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  // Loading is derived from running tasks (same pattern as ChatPage) so a
+  // missed chat:response socket event can't leave the input locked forever —
+  // the active-tasks poll clears runningTaskIds when the task is gone.
+  const [runningTaskIds, setRunningTaskIds] = useState<Set<string>>(new Set());
+  const isLoading = runningTaskIds.size > 0;
   const [status, setStatus] = useState("");
   const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const [mobileSessions, setMobileSessions] = useState(false);
@@ -397,7 +401,7 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
       const prefix = `[${project.name}]`;
       const projectSessions = all.filter((s) => s.title.startsWith(prefix));
       setSessions(projectSessions);
-    });
+    }).catch(() => {});
   }, [project.id, project.name]);
 
   useEffect(() => {
@@ -424,17 +428,21 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
   };
 
   useEffect(() => {
-    if (activeSession) {
-      api.getSession(activeSession).then((session: any) => {
-        setMessages(session.messages || []);
-        // Restore auto-created architecture button if present
-        if (session.autoCreatedArch) {
-          setAutoCreatedArch(session.autoCreatedArch);
-        } else {
-          setAutoCreatedArch(null);
-        }
-      });
-    }
+    if (!activeSession) return;
+    // Guard against a slow response for a previous session landing after a
+    // switch and overwriting the new session's messages.
+    let cancelled = false;
+    api.getSession(activeSession).then((session: any) => {
+      if (cancelled) return;
+      setMessages(session.messages || []);
+      // Restore auto-created architecture button if present
+      if (session.autoCreatedArch) {
+        setAutoCreatedArch(session.autoCreatedArch);
+      } else {
+        setAutoCreatedArch(null);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, [activeSession]);
 
   const toolLabels: Record<string, string> = {
@@ -446,7 +454,12 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     wait_result: "Waiting for agent", check_agents: "Checking agents",
   };
 
-  // Restore in-progress state on mount, reconnect, or session switch
+  // Restore in-progress state on mount, reconnect, or session switch.
+  // Track whether we previously saw an active task so we can detect a missed
+  // chat:response (ported from ChatPage) — without this, isLoading stayed
+  // true forever and the input was permanently blocked.
+  const wasLoadingRef = useRef(false);
+  const missCountRef = useRef(0); // require multiple consecutive misses before treating as done
   useEffect(() => {
     if (!activeSession) return;
     let cancelled = false;
@@ -462,9 +475,12 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
           if (merged.size === prev.size) return prev;
           return merged;
         });
-        const activeTask = tasks.find((t: any) => t.sessionId === activeSession);
+        const sessionTasks = tasks.filter((t: any) => t.sessionId === activeSession);
+        setRunningTaskIds(new Set(sessionTasks.map((t: any) => t.id as string)));
+        const activeTask = sessionTasks[sessionTasks.length - 1];
         if (activeTask) {
-          setIsLoading(true);
+          wasLoadingRef.current = true;
+          missCountRef.current = 0;
           if (activeTask.status.startsWith("Running:")) {
             const rawTool = activeTask.status.replace("Running: ", "");
             const tool = rawTool.split(" — ")[0];
@@ -477,10 +493,25 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
               const label = toolLabels[tool] || tool;
               setStatus(`${label}...`);
             }
-          } else if (activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
+          } else if (activeTask.status.startsWith("Waiting for ") || activeTask.status.includes("done, thinking") || activeTask.status.includes("orchestrating") || activeTask.status.includes("received")) {
             setStatus(activeTask.status);
           } else {
             setStatus("Thinking...");
+          }
+        } else if (wasLoadingRef.current) {
+          // Task was active before but is now gone — require 2 consecutive
+          // misses to avoid clearing state on transient network blips
+          missCountRef.current++;
+          if (missCountRef.current >= 2) {
+            // Task truly done — the chat:response event was likely missed.
+            wasLoadingRef.current = false;
+            missCountRef.current = 0;
+            setRunningTaskIds(new Set());
+            setStreaming("");
+            setStatus("");
+            api.getSession(activeSession).then((session: any) => {
+              if (!cancelled) setMessages(session.messages || []);
+            }).catch(() => {});
           }
         }
       }).catch(() => {});
@@ -489,25 +520,57 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
     checkActiveTasks();
     const interval = setInterval(() => {
       if (!cancelled) checkActiveTasks();
-    }, 5000);
+    }, 3000);
 
     return () => { cancelled = true; clearInterval(interval); };
   }, [activeSession, connected]);
 
+  // Buffer incoming chunks and flush at most every 100ms (ported from
+  // ChatPage) — a setState per chunk floods React on fast streams.
+  const chunkBufferRef = useRef("");
+  const chunkFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    const unsub1 = onChunk((data) => {
+    const flushChunks = () => {
+      chunkFlushTimerRef.current = null;
+      if (chunkBufferRef.current) {
+        const buf = chunkBufferRef.current;
+        chunkBufferRef.current = "";
+        setStreaming((prev) => prev + buf);
+      }
+    };
+
+    const unsub1 = onChunk((data: any) => {
       if (data.sessionId === activeSession) {
-        setStreaming((prev) => prev + data.content);
+        if (data.clear) {
+          chunkBufferRef.current = "";
+          if (chunkFlushTimerRef.current) {
+            clearTimeout(chunkFlushTimerRef.current);
+            chunkFlushTimerRef.current = null;
+          }
+          setStreaming("");
+        } else {
+          chunkBufferRef.current += data.content;
+          if (!chunkFlushTimerRef.current) {
+            chunkFlushTimerRef.current = setTimeout(flushChunks, 100);
+          }
+        }
       }
     });
     const unsub2 = onResponse((data) => {
       // Don't clear activeTaskSessions here — let the "done" status handle it
       if (data.sessionId === activeSession) {
+        wasLoadingRef.current = false;
         api.getSession(activeSession).then((session: any) => {
           setMessages(session.messages || []);
-        });
+        }).catch(() => {});
         setStreaming("");
-        setIsLoading(false);
+        setRunningTaskIds((prev) => {
+          if (prev.size === 0) return prev;
+          // Exact taskId unknown here; the poll refreshes the set anyway.
+          if (prev.size === 1) return new Set();
+          return prev;
+        });
         setStatus("");
       }
     });
@@ -532,9 +595,10 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
 
       if (data.sessionId && data.sessionId !== activeSession) return;
 
-      if (data.status === "thinking") { setIsLoading(true); setStatus("Thinking..."); }
+      // Loading state is owned by runningTaskIds (poll + handleSend), so
+      // status events only update the status text here.
+      if (data.status === "thinking") { setStatus("Thinking..."); }
       else if (data.status === "tool_call") {
-        setIsLoading(true);
         if (data.tool === "send_task" && data.args) {
           const target = data.args.to || "agent";
           const taskPreview = data.args.task ? ` — ${data.args.task.slice(0, 60)}` : "";
@@ -550,13 +614,18 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
         else if (data.tool === "send_task") setStatus("Task delegated, orchestrating...");
         else setStatus(`${toolLabels[data.tool] || data.tool} done, thinking...`);
       }
-      else if (data.status === "subagent_spawn") { setIsLoading(true); setStatus(`Sub-agent "${data.label}" spawned...`); }
-      else if (data.status === "subagent_tool") { setIsLoading(true); setStatus(`Sub-agent "${data.label}": ${toolLabels[data.tool] || data.tool}...`); }
+      else if (data.status === "subagent_spawn") setStatus(`Sub-agent "${data.label}" spawned...`);
+      else if (data.status === "subagent_tool") setStatus(`Sub-agent "${data.label}": ${toolLabels[data.tool] || data.tool}...`);
       else if (data.status === "subagent_done") setStatus(`Sub-agent "${data.label}" completed`);
       else if (data.status === "subagent_error") setStatus(`Sub-agent "${data.label}" failed: ${data.error}`);
+      else if (data.status === "done") { setRunningTaskIds(new Set()); setStatus(""); }
       else setStatus("");
     });
-    return () => { unsub1(); unsub2(); unsub3(); };
+    return () => {
+      unsub1(); unsub2(); unsub3();
+      if (chunkFlushTimerRef.current) clearTimeout(chunkFlushTimerRef.current);
+      chunkBufferRef.current = "";
+    };
   }, [activeSession, onChunk, onResponse, onStatus]);
 
   // ─── Listen for auto-created architecture events ───
@@ -638,12 +707,12 @@ function ProjectChat({ project, allSkills }: { project: Project; allSkills: Skil
         setSessions((prev) => [session, ...prev]);
         setActiveSession(session.id);
         setMessages([userMessage]);
-        setIsLoading(true);
+        setRunningTaskIds((prev) => new Set([...prev, "pending-" + Date.now()]));
         sendProjectMessage(project.id, session.id, msg);
       });
     } else {
       setMessages((prev) => [...prev, userMessage]);
-      setIsLoading(true);
+      setRunningTaskIds((prev) => new Set([...prev, "pending-" + Date.now()]));
       sendProjectMessage(project.id, activeSession, msg);
     }
   }, [input, activeSession, isLoading, sendProjectMessage, project]);

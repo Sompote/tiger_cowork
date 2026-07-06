@@ -932,9 +932,20 @@ async function saveCheckpoint(sessionId: string, checkpoint: ToolLoopCheckpoint)
         ]
       : checkpoint.allMessages,
   };
-  await fs.writeFile(fp, JSON.stringify(compactCheckpoint));
+  const tmp = `${fp}.${process.pid}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(compactCheckpoint));
+    await fs.rename(tmp, fp);
+  } catch (err) {
+    try { await fs.unlink(tmp); } catch {}
+    throw err;
+  }
   console.log(`[Checkpoint] Saved round ${checkpoint.checkpointRound} for session ${sessionId} (${(JSON.stringify(compactCheckpoint).length / 1024).toFixed(0)}KB)`);
 }
+
+// Checkpoints older than this are stale — resuming them would answer a
+// long-gone question. Discard instead.
+const CHECKPOINT_TTL_MS = 30 * 60 * 1000;
 
 async function loadCheckpoint(sessionId: string): Promise<ToolLoopCheckpoint | null> {
   const dir = await getCheckpointDir();
@@ -942,6 +953,12 @@ async function loadCheckpoint(sessionId: string): Promise<ToolLoopCheckpoint | n
   try {
     const content = await fs.readFile(fp, "utf-8");
     const checkpoint = JSON.parse(content);
+    const age = Date.now() - Date.parse(checkpoint.timestamp || "");
+    if (!Number.isFinite(age) || age > CHECKPOINT_TTL_MS) {
+      console.log(`[Checkpoint] Discarding stale checkpoint for session ${sessionId} (age ${Number.isFinite(age) ? Math.round(age / 60000) + "min" : "unknown"})`);
+      await clearCheckpoint(sessionId);
+      return null;
+    }
     console.log(`[Checkpoint] Loaded checkpoint for session ${sessionId} at round ${checkpoint.checkpointRound}`);
     return checkpoint;
   } catch {
@@ -1298,8 +1315,9 @@ async function llmCall(messages: ChatMessage[], options: { tools?: any[]; model?
     // Write full request body to debug file for inspection
     try {
       const fs = await import("fs/promises");
-      await fs.writeFile("/root/cowork/data/debug_last_request.json", bodyStr);
-      console.error(`[llmCall] Full request body written to /root/cowork/data/debug_last_request.json`);
+      const debugPath = path.resolve("data", "debug_last_request.json");
+      await fs.writeFile(debugPath, bodyStr);
+      console.error(`[llmCall] Full request body written to ${debugPath}`);
     } catch {}
     throw new Error(`API Error (${response.status}): ${error.slice(0, 500)}`);
   }
@@ -1398,6 +1416,19 @@ export async function callTigerBotWithTools(
       consecutiveErrors = checkpoint.consecutiveErrors;
       earlyContent = checkpoint.earlyContent;
       startRound = checkpoint.checkpointRound;
+      // The checkpoint holds the OLD conversation — the incoming messages
+      // carry the user's new prompt. Without appending them the loop resumes
+      // and answers the previous question. Dedupe against the restored tail
+      // in case the abort happened after the message was already recorded.
+      const restoredTail = allMessages[allMessages.length - 1];
+      const incoming = messages.filter((m) => m.role !== "system");
+      const alreadyPresent =
+        incoming.length > 0 &&
+        restoredTail?.role === incoming[incoming.length - 1].role &&
+        restoredTail?.content === incoming[incoming.length - 1].content;
+      if (incoming.length > 0 && !alreadyPresent) {
+        allMessages.push(...incoming);
+      }
     }
   }
 
@@ -1537,6 +1568,8 @@ export async function callTigerBotWithTools(
           }
           if (llmRetry >= llmMaxRetries - 1) {
             console.error(`[ToolLoop] Context overflow persists after ${llmMaxRetries} compression attempts.`);
+            // Terminal failure — a retained checkpoint would hijack the next message.
+            if (sessionId && checkpointEnabled) await clearCheckpoint(sessionId);
             return { content: `Context overflow after ${llmMaxRetries} compression retries: ${errMsg.slice(0, 200)}`, toolResults };
           }
           continue; // retry immediately after compression
@@ -1565,6 +1598,7 @@ export async function callTigerBotWithTools(
           await new Promise(r => setTimeout(r, delay));
         } else {
           console.error(`[ToolLoop] LLM call failed after ${llmMaxRetries} attempts: ${err.message}`);
+          if (sessionId && checkpointEnabled) await clearCheckpoint(sessionId);
           return { content: `Connection error after ${llmMaxRetries} retries: ${err.message}`, toolResults };
         }
       }
@@ -1655,6 +1689,7 @@ export async function callTigerBotWithTools(
       // Give up after 3 retries — return what we have
       console.error(`[ToolLoop] API returned no choices after 3 retries. Stopping.`);
       if (earlyContent) break;
+      if (sessionId && checkpointEnabled) await clearCheckpoint(sessionId);
       return { content: `The AI model returned an error: ${apiError}. Please try again.`, toolResults };
     }
     noChoicesRetries = 0; // reset on success
