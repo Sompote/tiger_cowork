@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/sompote-tiger-cowork-badge.png)](https://mseep.ai/app/sompote-tiger-cowork)
+
 ![Tiger CoWork Banner](picture/screen_read.png)
 
 # Tiger CoWork v0.7.2
